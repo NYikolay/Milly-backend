@@ -15,11 +15,12 @@ backend/
 │   ├── api/                 # роутеры, зависимости и Pydantic-схемы
 │   │   ├── errors/          # схемы, нормализация валидации, маппинг,
 │   │   │                    # обработчики, middleware, OpenAPI-класс роутов
-│   │   └── routes/          # health.py, tasks.py
+│   │   └── routes/          # health.py, tasks.py, auth.py
+│   ├── auth/                # initData, JWT, refresh-сессии и cookie
 │   ├── core/                # настройки, логирование, middleware
 │   │   └── errors.py        # коды ошибок и исключения
 │   ├── db/                  # engine/session, declarative base, readiness
-│   ├── models/              # место для ORM-моделей (пока пусто)
+│   ├── models/              # User, TelegramProfile, AuthSession
 │   └── tasks/               # broker, worker, scheduler, примеры задач
 ├── tests/                   # unit-тесты без инфраструктуры
 ├── compose.yml              # production-подобный стек
@@ -28,8 +29,9 @@ backend/
 └── .env.example             # шаблон локального окружения
 ```
 
-Правило зависимостей: `main.py` собирает слои; `api` зависит от `db` и
-`tasks`; `tasks` — от `db` и `core`; `db` — от `core`. `api.errors`
+Правило зависимостей: `main.py` собирает приложение и подключает роутеры;
+`api` и `auth` зависят от `core`, `db` и `models`; `tasks` — от `db` и
+`core`; `db` — от `core`. `auth` не импортирует `api`. `api.errors`
 зависит от `core.errors` и FastAPI; `core.errors` не импортирует `api`.
 
 ## Быстрый старт
@@ -142,6 +144,7 @@ origin`) до рендеринга ошибок. Это протокольный
 | `rate_limited` | 429 | слишком много запросов |
 | `internal_error` | 500 | внутренняя ошибка сервера |
 | `not_implemented` | 501 | функция не реализована |
+| `auth_not_configured` | 503 | не заданы обязательные настройки аутентификации |
 | `service_unavailable` | 503 | сервис временно недоступен |
 | `database_unavailable` | 503 | база данных временно недоступна |
 | `task_enqueue_failed` | 503 | не удалось поставить задачу в очередь |
@@ -150,6 +153,85 @@ origin`) до рендеринга ошибок. Это протокольный
 В OpenAPI для каждой операции документируется схема `ErrorResponse` для
 ответов `400`, `404`, `422`, `500` и `503`; для `422` больше не используется
 `HTTPValidationError`.
+
+## Аутентификация Telegram Mini App
+
+Вход выполняется по подписанным данным запуска Mini App
+(`Telegram.WebApp.initData`). Backend проверяет HMAC-SHA256 с секретом,
+производным от bot token, свежесть `auth_date` и отсутствие `is_bot=true`.
+`initDataUnsafe` не доверяется и для авторизации не используется; сырые init
+data и токены не логируются.
+
+Flow:
+
+1. `POST /api/v1/auth/telegram` с `{"init_data": "<raw initData>"}` —
+   валидирует данные, создаёт или обновляет `User` и `TelegramProfile` и
+   возвращает access-токен. Refresh-токен приходит только в HttpOnly-cookie.
+2. Access-токен (JWT HS256, 15 минут) клиент хранит только в памяти и
+   передаёт в `Authorization: Bearer`.
+3. `POST /api/v1/auth/refresh` без тела — читает refresh из cookie, ротирует
+   его и возвращает новый access; cookie перезаписывается.
+4. `POST /api/v1/auth/logout` без тела — отзывает семейство refresh-токенов и
+   очищает cookie; ответ `204`.
+5. `GET /api/v1/auth/me` с `Authorization: Bearer <access>` — возвращает
+   пользователя с Telegram-профилем.
+
+```text
+POST /api/v1/auth/telegram
+{"init_data": "query_id=...&user=...&auth_date=...&hash=..."}
+200 {"access_token": "<jwt>", "token_type": "bearer", "expires_in": 900,
+     "user": {"id": 1, "created_at": "...", "telegram_profile": {"..."}}}
+
+POST /api/v1/auth/refresh
+200 {"access_token": "<jwt>", "token_type": "bearer", "expires_in": 900}
+Set-Cookie: milly_refresh=<opaque>; HttpOnly; Secure; SameSite=Lax;
+            Path=/api/v1/auth; Max-Age=2592000
+
+POST /api/v1/auth/logout
+204
+```
+
+Refresh-токен непрозрачный; в БД хранится только его SHA-256 хеш. Cookie
+имеет параметры:
+
+| Параметр | Значение |
+| --- | --- |
+| Имя | `AUTH_REFRESH_COOKIE_NAME` (по умолчанию `milly_refresh`) |
+| `HttpOnly` | да, JavaScript не может прочитать refresh |
+| `Secure` | `AUTH_REFRESH_COOKIE_SECURE`; `true` в production |
+| `SameSite` | `AUTH_REFRESH_COOKIE_SAMESITE`, по умолчанию `lax` |
+| `Path` | `"{API_V1_STR}/auth"` |
+| `Max-Age` | `AUTH_REFRESH_TTL_SECONDS` (30 дней) |
+
+Refresh строго ротируется: повтор старого токена вне 30-секундного
+grace-окна отзывает всё семейство. Ошибки refresh не очищают cookie, logout
+очищает. Access после logout не отзывается мгновенно и остаётся валидным до
+`exp` — не более 15 минут.
+
+Контракт рассчитан на same-site (или same-origin) frontend и API:
+`SameSite=None` не поддерживается, а `Origin` login/refresh/logout
+проверяется по `CORS_ORIGINS` и origin самого API.
+
+Если Mini App открыт кнопкой-клавиатурой, `initData` может быть пустым;
+авторизоваться по пустым или неподписанным данным нельзя. Клиент показывает
+экран «Откройте приложение через меню бота» и вызывает
+`Telegram.WebApp.openTelegramLink('https://t.me/<bot>?startapp=auth')`, чтобы
+открыть Main Mini App с валидным `initData`. Для клиентов без Main Mini App
+используется inline-кнопка `web_app` от бота.
+
+Переменные окружения: `TELEGRAM_BOT_TOKEN`,
+`TELEGRAM_INIT_DATA_MAX_AGE_SECONDS` (3600),
+`TELEGRAM_INIT_DATA_MAX_FUTURE_SKEW_SECONDS` (60), `AUTH_JWT_SECRET`,
+`AUTH_JWT_ISSUER` (`milly`), `AUTH_JWT_LEEWAY_SECONDS` (30),
+`AUTH_ACCESS_TTL_SECONDS` (900), `AUTH_REFRESH_TTL_SECONDS` (2592000),
+`AUTH_REFRESH_REUSE_GRACE_SECONDS` (30), `AUTH_REFRESH_COOKIE_NAME`,
+`AUTH_REFRESH_COOKIE_SECURE`, `AUTH_REFRESH_COOKIE_SAMESITE`.
+
+В production `TELEGRAM_BOT_TOKEN` и `AUTH_JWT_SECRET` обязательны. Validation
+отклоняет токен без `:`, секрет короче 32 символов или содержащий
+`change-me`, `AUTH_REFRESH_COOKIE_SECURE=false` и
+`AUTH_REFRESH_COOKIE_SAMESITE=none`. Реальные значения не коммитятся: их
+задают через окружение или secret manager.
 
 ## Миграции
 
@@ -218,7 +300,7 @@ taskiq scheduler backend.tasks.worker:scheduler backend.tasks.example \
 poetry install
 poetry run pytest -q
 poetry run ruff check .
-poetry run ruff format --check .
+poetry run ruff format --check src tests
 poetry run mypy src tests
 ```
 
@@ -240,12 +322,14 @@ docker compose config --quiet
   `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_RECYCLE`, `SQL_ECHO`;
 - NATS/taskiq: `NATS_*`, `TASKIQ_RESULT_EX_TIME`, `TASKIQ_KEEP_RESULTS`;
 - Redis: `REDIS_URL`, `REDIS_PASSWORD`;
+- Telegram Mini App auth: `TELEGRAM_*`, `AUTH_*`;
 - `PROVIDER_BASE_URL`, `PROVIDER_API_KEY` — зарезервированы для будущих
   интеграций и текущим скелетом не используются.
 
 Для Compose обязательны `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`,
-`NATS_USER`, `NATS_PASSWORD` и `REDIS_PASSWORD` (переменные с `${...:?}` в
-`compose.yml`). Compose подставляет `POSTGRES_*` и `REDIS_PASSWORD` в
+`NATS_USER`, `NATS_PASSWORD`, `REDIS_PASSWORD`, `TELEGRAM_BOT_TOKEN` и
+`AUTH_JWT_SECRET` (переменные с `${...:?}` в `compose.yml`). Compose
+подставляет `POSTGRES_*` и `REDIS_PASSWORD` в
 `DATABASE_URL`/`DIRECT_DATABASE_URL`/`REDIS_URL` как есть, поэтому эти
 значения должны состоять из URL-safe символов. Percent-encoding для них не
 подходит: он изменит фактический пароль/имя и сломает аутентификацию.
@@ -256,7 +340,8 @@ docker compose config --quiet
 
 ## Ограничения скелета
 
-- Нет auth, email, frontend и бизнес-моделей; `models/` пуст.
+- Нет email, frontend и бизнес-моделей; `models/` содержит только `User`,
+  `TelegramProfile` и `AuthSession`.
 - Scheduler не HA: допускается ровно одна реплика.
 - PgBouncer работает в transaction mode; asyncpg использует отключённые
   prepared statement caches.
