@@ -76,3 +76,7 @@ async def test_live_with_disallowed_host() -> None:
     async with AsyncClient(transport=transport, base_url="http://other.example.com") as http_client:
         response = await http_client.get("/health/live")
     assert response.status_code == 400
+    body = response.json()
+    assert body["error"] is True
+    assert body["code"] == "bad_request"
+    assert body["request_id"] == response.headers["x-request-id"]

@@ -9,10 +9,13 @@ from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 from taskiq import AsyncBroker
 
 from backend.api.errors.handlers import register_exception_handlers
+from backend.api.errors.middleware import (
+    AllowedHostsMiddleware,
+    ErrorEnvelopeMiddleware,
+)
 from backend.api.router import api_router
 from backend.api.routes import health
 from backend.core.config import Settings, get_settings
@@ -112,7 +115,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
           lifespan only starts and shuts it down.
         - The database is created when the lifespan runs.
         - Middleware is added innermost first, so ``RequestContextMiddleware``
-          remains the outermost layer.
+          remains the outermost layer with ``ErrorEnvelopeMiddleware`` directly
+          inside it.
     """
     settings = settings or get_settings()
     configure_logging(settings)
@@ -129,7 +133,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
 
     if settings.allowed_hosts != ["*"]:
-        app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
+        app.add_middleware(AllowedHostsMiddleware, allowed_hosts=settings.allowed_hosts)
     app.add_middleware(GZipMiddleware, minimum_size=1024)
     if settings.cors_origins:
         app.add_middleware(
@@ -141,6 +145,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             expose_headers=["X-Request-ID"],
         )
     app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(ErrorEnvelopeMiddleware, settings=settings)
     app.add_middleware(RequestContextMiddleware)
 
     register_exception_handlers(app)
