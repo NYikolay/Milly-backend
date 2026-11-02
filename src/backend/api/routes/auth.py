@@ -1,0 +1,181 @@
+from __future__ import annotations
+
+from fastapi import Request, Response, status
+
+from backend.api.deps import AuthServiceDep, CurrentUserDep
+from backend.api.errors.openapi import StandardizedAPIRouter
+from backend.auth.cookies import (
+    clear_refresh_cookie,
+    set_refresh_cookie,
+    validate_auth_origin,
+)
+from backend.auth.schemas import (
+    AuthResponse,
+    TelegramAuthRequest,
+    TelegramProfileResponse,
+    TokenResponse,
+    UserResponse,
+)
+from backend.core.config import Settings
+from backend.core.errors import UnauthorizedError
+
+router = StandardizedAPIRouter(prefix="/auth", tags=["auth"])
+
+
+@router.post("/telegram", response_model=AuthResponse)
+async def telegram_login(
+    payload: TelegramAuthRequest,
+    request: Request,
+    response: Response,
+    service: AuthServiceDep,
+) -> AuthResponse:
+    """
+    Authenticate a Telegram Mini App launch and issue tokens.
+
+    Purpose:
+        Validate signed Telegram init data, persist or refresh the local
+        profile, return a short-lived access token, and store the refresh token
+        in an HttpOnly cookie.
+
+    Args:
+        payload: Raw Telegram ``initData`` query string.
+        request: Incoming request carrying the application settings.
+        response: Response used to attach the refresh cookie.
+        service: Authentication service performing login.
+
+    Returns:
+        AuthResponse: Access token, token metadata, and the authenticated user
+            with the Telegram profile.
+
+    Raises:
+        ForbiddenError: If the request origin is not allowed.
+        AuthNotConfiguredError: If authentication settings are missing.
+        UnauthorizedError: If the init data is invalid, stale, or belongs to a
+            bot.
+
+    Notes:
+        - The refresh token is returned only as an HttpOnly cookie and never in
+          the response body.
+        - Raw init data and tokens are never logged.
+    """
+    settings: Settings = request.app.state.settings
+    validate_auth_origin(request, settings)
+    result = await service.login(payload.init_data)
+    set_refresh_cookie(response, result.tokens.refresh_token, settings)
+    return AuthResponse(
+        access_token=result.tokens.access_token,
+        expires_in=settings.auth_access_ttl_seconds,
+        user=UserResponse(
+            id=result.user.id,
+            created_at=result.user.created_at,
+            telegram_profile=TelegramProfileResponse.model_validate(result.profile),
+        ),
+    )
+
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh_tokens(
+    request: Request,
+    response: Response,
+    service: AuthServiceDep,
+) -> TokenResponse:
+    """
+    Rotate the refresh cookie and issue a new access token.
+
+    Purpose:
+        Read the opaque refresh token from the HttpOnly cookie, rotate the
+        server-side session, replace the cookie, and return only the new access
+        token.
+
+    Args:
+        request: Incoming request carrying the application settings and cookie.
+        response: Response used to attach the replacement refresh cookie.
+        service: Authentication service performing refresh rotation.
+
+    Returns:
+        TokenResponse: Newly issued access token and token metadata.
+
+    Raises:
+        ForbiddenError: If the request origin is not allowed.
+        UnauthorizedError: If the refresh cookie is missing, unknown, expired,
+            revoked, or reused.
+        RefreshTokenGraceError: If a just-rotated token is reused within the
+            grace window; this is an ``UnauthorizedError`` subclass.
+        AuthNotConfiguredError: If authentication settings are missing.
+
+    Notes:
+        - Refresh errors propagate before the cookie is modified, so a failed
+          refresh never clears the existing cookie.
+        - Raw refresh tokens are never logged.
+    """
+    settings: Settings = request.app.state.settings
+    validate_auth_origin(request, settings)
+    raw_refresh_token = request.cookies.get(settings.auth_refresh_cookie_name)
+    if raw_refresh_token is None:
+        raise UnauthorizedError("Refresh token is missing")
+    tokens = await service.refresh(raw_refresh_token)
+    set_refresh_cookie(response, tokens.refresh_token, settings)
+    return TokenResponse(
+        access_token=tokens.access_token,
+        expires_in=settings.auth_access_ttl_seconds,
+    )
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(
+    request: Request,
+    response: Response,
+    service: AuthServiceDep,
+) -> Response:
+    """
+    Revoke the refresh-token family and clear the refresh cookie.
+
+    Purpose:
+        Terminate every rotation derived from the presented refresh token and
+        expire the client cookie even when the token is absent or unknown.
+
+    Args:
+        request: Incoming request carrying the application settings and cookie.
+        response: Response used to expire the refresh cookie.
+        service: Authentication service performing logout.
+
+    Returns:
+        Response: Empty 204 response with the expiry cookie.
+
+    Raises:
+        ForbiddenError: If the request origin is not allowed.
+        AuthNotConfiguredError: If authentication settings are missing.
+
+    Notes:
+        - Logout is idempotent and does not reveal whether the cookie existed.
+        - Raw refresh tokens are never logged.
+    """
+    settings: Settings = request.app.state.settings
+    validate_auth_origin(request, settings)
+    raw_refresh_token = request.cookies.get(settings.auth_refresh_cookie_name)
+    await service.logout(raw_refresh_token)
+    clear_refresh_cookie(response, settings)
+    response.status_code = status.HTTP_204_NO_CONTENT
+    return response
+
+
+@router.get("/me", response_model=UserResponse)
+async def read_current_user(user: CurrentUserDep) -> UserResponse:
+    """
+    Return the authenticated user with the Telegram profile.
+
+    Purpose:
+        Expose the principal resolved from a verified access token for client
+        session bootstrap and profile display.
+
+    Args:
+        user: Current user with ``telegram_profile`` loaded.
+
+    Returns:
+        UserResponse: Public user fields and the Telegram profile.
+
+    Raises:
+        UnauthorizedError: If the bearer token is missing or invalid, or the
+            user no longer exists.
+    """
+    return UserResponse.model_validate(user)
