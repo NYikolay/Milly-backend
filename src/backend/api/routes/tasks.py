@@ -21,8 +21,8 @@ async def enqueue_ping() -> TaskEnqueuedResponse:
         TaskEnqueuedResponse: Identifier of the enqueued ping task.
 
     Raises:
-        Exception: Propagates broker failures so the unified error handler
-            renders an internal error response.
+        TaskiqError: Propagates broker failures so the unified error handler
+            renders ``503 task_enqueue_failed``.
 
     Notes:
         - Uses the module-level ``ping`` task object, whose broker connection is
