@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -49,6 +49,20 @@ class Settings(BaseSettings):
     taskiq_result_ex_time: int = 86400
     taskiq_keep_results: bool = True
 
+    telegram_bot_token: SecretStr | None = None
+    telegram_init_data_max_age_seconds: int = Field(default=3600, gt=0)
+    telegram_init_data_max_future_skew_seconds: int = Field(default=60, ge=0)
+
+    auth_jwt_secret: SecretStr | None = None
+    auth_jwt_issuer: str = "milly"
+    auth_jwt_leeway_seconds: int = Field(default=30, ge=0)
+    auth_access_ttl_seconds: int = Field(default=900, gt=0)
+    auth_refresh_ttl_seconds: int = Field(default=2592000, gt=0)
+    auth_refresh_reuse_grace_seconds: int = Field(default=30, ge=0)
+    auth_refresh_cookie_name: str = "milly_refresh"
+    auth_refresh_cookie_secure: bool = True
+    auth_refresh_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+
     @field_validator("database_url", "direct_database_url")
     @classmethod
     def validate_asyncpg_url(cls, value: str) -> str:
@@ -74,19 +88,40 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_production_flags(self) -> Settings:
         """
-        Reject debug mode in production.
+        Validate settings that are unsafe outside local development.
 
         Purpose:
-            Keeps error details from being exposed by production deployments.
+            Prevent production deployments from starting with debug output,
+            development credentials, or an insecure refresh cookie.
 
         Returns:
             Settings: The validated settings instance.
 
         Raises:
-            ValueError: If ``app_env`` is ``production`` and ``debug`` is true.
+            ValueError: If production enables debug, lacks a real Telegram bot
+                token or a strong JWT secret, or configures an insecure refresh
+                cookie.
         """
         if self.app_env == "production" and self.debug:
             raise ValueError("DEBUG must be false in production")
+        if self.app_env == "production":
+            bot_token = (
+                self.telegram_bot_token.get_secret_value().strip()
+                if self.telegram_bot_token is not None
+                else ""
+            )
+            if ":" not in bot_token:
+                raise ValueError("TELEGRAM_BOT_TOKEN must be a real bot token in production")
+
+            jwt_secret = (
+                self.auth_jwt_secret.get_secret_value() if self.auth_jwt_secret is not None else ""
+            )
+            if len(jwt_secret) < 32 or "change-me" in jwt_secret.lower():
+                raise ValueError("AUTH_JWT_SECRET must be a strong secret in production")
+            if not self.auth_refresh_cookie_secure:
+                raise ValueError("AUTH_REFRESH_COOKIE_SECURE must be true in production")
+            if self.auth_refresh_cookie_samesite == "none":
+                raise ValueError("AUTH_REFRESH_COOKIE_SAMESITE=none is not supported")
         return self
 
     @property

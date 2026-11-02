@@ -14,6 +14,7 @@ class ErrorCode(StrEnum):
     VALIDATION_ERROR = "validation_error"
     UNAUTHORIZED = "unauthorized"
     FORBIDDEN = "forbidden"
+    AUTH_NOT_CONFIGURED = "auth_not_configured"
     NOT_FOUND = "not_found"
     METHOD_NOT_ALLOWED = "method_not_allowed"
     CONFLICT = "conflict"
@@ -62,6 +63,12 @@ ERROR_SPECS: dict[ErrorCode, ErrorSpec] = {
         log_level=logging.WARNING,
         message="Permission denied",
         description="Недостаточно прав",
+    ),
+    ErrorCode.AUTH_NOT_CONFIGURED: ErrorSpec(
+        status_code=503,
+        log_level=logging.ERROR,
+        message="Authentication is not configured",
+        description="Аутентификация не настроена",
     ),
     ErrorCode.NOT_FOUND: ErrorSpec(
         status_code=404,
@@ -161,6 +168,9 @@ def get_error_spec(code: ErrorCode) -> ErrorSpec:
 class AppError(Exception):
     """Expected application failure that carries a registry-backed error code."""
 
+    _default_headers: ClassVar[Mapping[str, str] | None] = None
+    headers: Mapping[str, str] | None
+
     def __init__(
         self,
         code: ErrorCode,
@@ -187,11 +197,14 @@ class AppError(Exception):
                 registry description.
             details: Optional JSON-serializable details.
             headers: Optional response headers associated with the error.
+                Defaults to the class-level headers of the concrete error.
             log_level: Logging level for client errors. Defaults to the
                 registry level.
 
         Notes:
             - `details` and `headers` are copied into plain dicts.
+            - The class default headers are used only when `headers` is
+              ``None``; an explicit empty mapping is preserved.
             - The resolved message is also passed to ``Exception`` for standard
               exception reporting.
         """
@@ -201,7 +214,12 @@ class AppError(Exception):
         self.description = spec.description if description is None else description
         self.log_level = spec.log_level if log_level is None else log_level
         self.details = dict(details) if details is not None else None
-        self.headers = dict(headers) if headers is not None else None
+        if headers is not None:
+            self.headers = dict(headers)
+        elif self._default_headers is not None:
+            self.headers = dict(self._default_headers)
+        else:
+            self.headers = None
         super().__init__(self.message)
 
 
@@ -256,6 +274,7 @@ class UnauthorizedError(SemanticAppError):
     """Raised when authentication is missing or invalid."""
 
     _code = ErrorCode.UNAUTHORIZED
+    _default_headers = {"WWW-Authenticate": "Bearer"}
 
 
 class ForbiddenError(SemanticAppError):

@@ -12,7 +12,7 @@ from starlette.types import Scope
 from backend.api.errors.handlers import render_error_response
 from backend.api.errors.mapping import payload_from_app_error
 from backend.core.config import Settings
-from backend.core.errors import AppError, ErrorCode, NotFoundError
+from backend.core.errors import AppError, ErrorCode, NotFoundError, UnauthorizedError
 from backend.main import create_app
 
 
@@ -179,7 +179,16 @@ async def test_http_exception_non_string_detail_is_structured(
 async def test_500_hides_details_in_production() -> None:
     """Hide unexpected error details when debug mode is off."""
 
-    app = create_app(Settings(_env_file=None, app_env="production", debug=False, log_json=False))
+    app = create_app(
+        Settings(
+            _env_file=None,
+            app_env="production",
+            debug=False,
+            log_json=False,
+            telegram_bot_token="123:token",
+            auth_jwt_secret="a" * 32,
+        )
+    )
 
     async def boom() -> None:
         """Raise an unexpected error."""
@@ -227,6 +236,8 @@ async def test_500_includes_security_and_cors_headers() -> None:
             debug=False,
             log_json=False,
             cors_origins=["http://example.com"],
+            telegram_bot_token="123:token",
+            auth_jwt_secret="a" * 32,
         )
     )
 
@@ -328,7 +339,16 @@ async def test_non_finite_details_keep_intended_status(
 async def test_explicit_internal_error_hides_details_in_production() -> None:
     """Drop details of an explicit internal error outside debug mode."""
 
-    app = create_app(Settings(_env_file=None, app_env="production", debug=False, log_json=False))
+    app = create_app(
+        Settings(
+            _env_file=None,
+            app_env="production",
+            debug=False,
+            log_json=False,
+            telegram_bot_token="123:token",
+            auth_jwt_secret="a" * 32,
+        )
+    )
 
     async def internal() -> None:
         """Raise an internal application error with details."""
@@ -379,6 +399,23 @@ async def test_app_error_headers_are_preserved(app: FastAPI, client: AsyncClient
     assert response.headers["retry-after"] == "1"
 
 
+async def test_unauthorized_error_defaults_to_bearer_challenge(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    """Add a bearer challenge to unauthorized errors by default."""
+
+    async def unauthorized() -> None:
+        """Raise an unauthorized application error."""
+        raise UnauthorizedError()
+
+    app.add_api_route("/_test/unauthorized", unauthorized, methods=["GET"])
+    response = await client.get("/_test/unauthorized")
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert response.json()["code"] == "unauthorized"
+
+
 @pytest.mark.parametrize("header_name", ["X-Request-ID", "x-request-id"])
 def test_app_error_cannot_override_request_id_header(header_name: str) -> None:
     """Discard conflicting request ID headers supplied by an application error."""
@@ -424,7 +461,15 @@ def test_app_error_payload_uses_overrides() -> None:
 
 async def test_docs_disabled_in_production() -> None:
     """Disable interactive docs when the environment is production."""
-    app = create_app(Settings(_env_file=None, app_env="production", log_json=False))
+    app = create_app(
+        Settings(
+            _env_file=None,
+            app_env="production",
+            log_json=False,
+            telegram_bot_token="123:token",
+            auth_jwt_secret="a" * 32,
+        )
+    )
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as http_client:
         response = await http_client.get("/docs")
