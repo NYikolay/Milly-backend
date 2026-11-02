@@ -40,4 +40,4 @@ async def test_enqueue_ping_failure_returns_500(
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post("/api/v1/tasks/ping")
     assert response.status_code == 500
-    assert response.json()["error"]["code"] == "internal_error"
+    assert response.json()["code"] == "internal_error"

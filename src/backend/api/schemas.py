@@ -14,18 +14,3 @@ class TaskEnqueuedResponse(BaseModel):
     """Response containing the enqueued task identifier."""
 
     task_id: str
-
-
-class ErrorDetail(BaseModel):
-    """Machine-readable error payload."""
-
-    code: str
-    message: str
-    details: object | None = None
-    request_id: str | None = None
-
-
-class ErrorResponse(BaseModel):
-    """Unified API error envelope."""
-
-    error: ErrorDetail

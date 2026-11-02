@@ -12,10 +12,10 @@ from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from taskiq import AsyncBroker
 
+from backend.api.errors.handlers import register_exception_handlers
 from backend.api.router import api_router
 from backend.api.routes import health
 from backend.core.config import Settings, get_settings
-from backend.core.errors import register_exception_handlers
 from backend.core.logging import configure_logging
 from backend.core.middleware import RequestContextMiddleware, SecurityHeadersMiddleware
 from backend.db.session import Database

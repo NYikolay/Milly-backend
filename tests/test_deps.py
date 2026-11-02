@@ -215,7 +215,7 @@ async def test_session_dependency_commit_failure_returns_500(app: FastAPI) -> No
         response = await http_client.get("/_test/session")
 
     assert response.status_code == 500
-    assert response.json()["error"]["code"] == "internal_error"
+    assert response.json()["code"] == "internal_error"
     assert database.session_calls == 1
     assert session.committed is True
     assert session.rolled_back is True

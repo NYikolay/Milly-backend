@@ -1,356 +1,288 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import ClassVar
 
-import structlog
-from fastapi import FastAPI, Request
-from fastapi.encoders import jsonable_encoder
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response
-from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from backend.api.schemas import ErrorDetail, ErrorResponse
-from backend.core.config import Settings
-from backend.core.middleware import SECURITY_HEADERS
+class ErrorCode(StrEnum):
+    """Stable machine-readable error codes returned by the API."""
 
-logger = structlog.get_logger(__name__)
+    BAD_REQUEST = "bad_request"
+    VALIDATION_ERROR = "validation_error"
+    UNAUTHORIZED = "unauthorized"
+    FORBIDDEN = "forbidden"
+    NOT_FOUND = "not_found"
+    METHOD_NOT_ALLOWED = "method_not_allowed"
+    CONFLICT = "conflict"
+    PAYLOAD_TOO_LARGE = "payload_too_large"
+    UNSUPPORTED_MEDIA_TYPE = "unsupported_media_type"
+    RATE_LIMITED = "rate_limited"
+    INTERNAL_ERROR = "internal_error"
+    NOT_IMPLEMENTED = "not_implemented"
+    SERVICE_UNAVAILABLE = "service_unavailable"
+    DATABASE_UNAVAILABLE = "database_unavailable"
+    TASK_ENQUEUE_FAILED = "task_enqueue_failed"
+    HTTP_ERROR = "http_error"
+
+
+@dataclass(frozen=True)
+class ErrorSpec:
+    """Registry entry describing the transport-independent behavior of an error code."""
+
+    status_code: int
+    log_level: int
+    message: str
+    description: str
+
+
+ERROR_SPECS: dict[ErrorCode, ErrorSpec] = {
+    ErrorCode.BAD_REQUEST: ErrorSpec(
+        status_code=400,
+        log_level=logging.WARNING,
+        message="Bad request",
+        description="Некорректный запрос",
+    ),
+    ErrorCode.VALIDATION_ERROR: ErrorSpec(
+        status_code=422,
+        log_level=logging.INFO,
+        message="Request validation failed",
+        description="Проверьте правильность заполнения полей",
+    ),
+    ErrorCode.UNAUTHORIZED: ErrorSpec(
+        status_code=401,
+        log_level=logging.WARNING,
+        message="Authentication required",
+        description="Требуется авторизация",
+    ),
+    ErrorCode.FORBIDDEN: ErrorSpec(
+        status_code=403,
+        log_level=logging.WARNING,
+        message="Permission denied",
+        description="Недостаточно прав",
+    ),
+    ErrorCode.NOT_FOUND: ErrorSpec(
+        status_code=404,
+        log_level=logging.INFO,
+        message="Resource not found",
+        description="Запрошенный ресурс не найден",
+    ),
+    ErrorCode.METHOD_NOT_ALLOWED: ErrorSpec(
+        status_code=405,
+        log_level=logging.WARNING,
+        message="Method not allowed",
+        description="Метод не поддерживается",
+    ),
+    ErrorCode.CONFLICT: ErrorSpec(
+        status_code=409,
+        log_level=logging.WARNING,
+        message="Conflict",
+        description="Операция конфликтует с текущим состоянием",
+    ),
+    ErrorCode.PAYLOAD_TOO_LARGE: ErrorSpec(
+        status_code=413,
+        log_level=logging.WARNING,
+        message="Payload too large",
+        description="Слишком большой запрос",
+    ),
+    ErrorCode.UNSUPPORTED_MEDIA_TYPE: ErrorSpec(
+        status_code=415,
+        log_level=logging.WARNING,
+        message="Unsupported media type",
+        description="Неподдерживаемый тип содержимого",
+    ),
+    ErrorCode.RATE_LIMITED: ErrorSpec(
+        status_code=429,
+        log_level=logging.WARNING,
+        message="Too many requests",
+        description="Слишком много запросов",
+    ),
+    ErrorCode.INTERNAL_ERROR: ErrorSpec(
+        status_code=500,
+        log_level=logging.ERROR,
+        message="Internal server error",
+        description="Внутренняя ошибка сервера",
+    ),
+    ErrorCode.NOT_IMPLEMENTED: ErrorSpec(
+        status_code=501,
+        log_level=logging.WARNING,
+        message="Not implemented",
+        description="Функция не реализована",
+    ),
+    ErrorCode.SERVICE_UNAVAILABLE: ErrorSpec(
+        status_code=503,
+        log_level=logging.ERROR,
+        message="Service unavailable",
+        description="Сервис временно недоступен",
+    ),
+    ErrorCode.DATABASE_UNAVAILABLE: ErrorSpec(
+        status_code=503,
+        log_level=logging.ERROR,
+        message="Database is unavailable",
+        description="База данных временно недоступна",
+    ),
+    ErrorCode.TASK_ENQUEUE_FAILED: ErrorSpec(
+        status_code=503,
+        log_level=logging.ERROR,
+        message="Failed to enqueue task",
+        description="Не удалось поставить задачу в очередь",
+    ),
+    ErrorCode.HTTP_ERROR: ErrorSpec(
+        status_code=500,
+        log_level=logging.WARNING,
+        message="HTTP error",
+        description="Ошибка запроса",
+    ),
+}
+
+
+def get_error_spec(code: ErrorCode) -> ErrorSpec:
+    """
+    Return the registered specification for an error code.
+
+    Purpose:
+        Centralize access to the status, logging level, and default texts of an
+        error code used by exceptions and transport mappers.
+
+    Args:
+        code: Error code whose specification is requested.
+
+    Returns:
+        ErrorSpec: The registered specification for `code`.
+
+    Raises:
+        KeyError: If `code` has no registered specification.
+    """
+    return ERROR_SPECS[code]
 
 
 class AppError(Exception):
-    """Base error for expected application failures."""
+    """Expected application failure that carries a registry-backed error code."""
 
     def __init__(
         self,
-        status_code: int,
-        code: str,
-        message: str,
-        details: object | None = None,
+        code: ErrorCode,
+        message: str | None = None,
+        *,
+        description: str | None = None,
+        details: Mapping[str, object] | None = None,
+        headers: Mapping[str, str] | None = None,
+        log_level: int | None = None,
     ) -> None:
         """
-        Initialize an expected application error.
+        Initialize an application error with registry defaults and overrides.
 
         Purpose:
-            Carry the HTTP status and machine-readable code used by the unified
-            error envelope.
+            Carry the error code and optional per-instance overrides so the API
+            layer can render a consistent error response without importing
+            transport-specific types.
 
         Args:
-            status_code: HTTP status code returned to the client.
             code: Stable machine-readable error code.
-            message: Human-readable error message.
-            details: Optional JSON-serializable error details.
+            message: Technical English message. Defaults to the registry
+                message.
+            description: Client-facing Russian description. Defaults to the
+                registry description.
+            details: Optional JSON-serializable details.
+            headers: Optional response headers associated with the error.
+            log_level: Logging level for client errors. Defaults to the
+                registry level.
 
         Notes:
-            - The message is also passed to ``Exception`` for standard
+            - `details` and `headers` are copied into plain dicts.
+            - The resolved message is also passed to ``Exception`` for standard
               exception reporting.
         """
-        super().__init__(message)
-        self.status_code = status_code
+        spec = get_error_spec(code)
         self.code = code
-        self.message = message
-        self.details = details
+        self.message = spec.message if message is None else message
+        self.description = spec.description if description is None else description
+        self.log_level = spec.log_level if log_level is None else log_level
+        self.details = dict(details) if details is not None else None
+        self.headers = dict(headers) if headers is not None else None
+        super().__init__(self.message)
 
 
-class NotFoundError(AppError):
+class SemanticAppError(AppError):
+    """Application error that derives its code from a semantic subclass."""
+
+    _code: ClassVar[ErrorCode]
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        description: str | None = None,
+        details: Mapping[str, object] | None = None,
+        headers: Mapping[str, str] | None = None,
+        log_level: int | None = None,
+    ) -> None:
+        """
+        Initialize a semantic application error using its class error code.
+
+        Purpose:
+            Let domain subclasses declare a fixed error code while callers pass
+            only the failure-specific overrides.
+
+        Args:
+            message: Technical English message. Defaults to the registry
+                message.
+            description: Client-facing Russian description. Defaults to the
+                registry description.
+            details: Optional JSON-serializable details.
+            headers: Optional response headers associated with the error.
+            log_level: Logging level for client errors. Defaults to the
+                registry level.
+        """
+        super().__init__(
+            self._code,
+            message,
+            description=description,
+            details=details,
+            headers=headers,
+            log_level=log_level,
+        )
+
+
+class BadRequestError(SemanticAppError):
+    """Raised when a request is malformed or invalid."""
+
+    _code = ErrorCode.BAD_REQUEST
+
+
+class UnauthorizedError(SemanticAppError):
+    """Raised when authentication is missing or invalid."""
+
+    _code = ErrorCode.UNAUTHORIZED
+
+
+class ForbiddenError(SemanticAppError):
+    """Raised when the caller lacks permission for an operation."""
+
+    _code = ErrorCode.FORBIDDEN
+
+
+class NotFoundError(SemanticAppError):
     """Raised when a requested resource does not exist."""
 
-    def __init__(
-        self,
-        message: str = "Not found",
-        details: object | None = None,
-    ) -> None:
-        """
-        Initialize a not-found error with its default status and code.
-
-        Purpose:
-            Provide the standard 404 ``not_found`` error for business code.
-
-        Args:
-            message: Human-readable error message.
-            details: Optional JSON-serializable error details.
-        """
-        super().__init__(
-            status_code=404,
-            code="not_found",
-            message=message,
-            details=details,
-        )
+    _code = ErrorCode.NOT_FOUND
 
 
-class ConflictError(AppError):
+class ConflictError(SemanticAppError):
     """Raised when an operation conflicts with current state."""
 
-    def __init__(
-        self,
-        message: str = "Conflict",
-        details: object | None = None,
-    ) -> None:
-        """
-        Initialize a conflict error with its default status and code.
-
-        Purpose:
-            Provide the standard 409 ``conflict`` error for business code.
-
-        Args:
-            message: Human-readable error message.
-            details: Optional JSON-serializable error details.
-        """
-        super().__init__(
-            status_code=409,
-            code="conflict",
-            message=message,
-            details=details,
-        )
+    _code = ErrorCode.CONFLICT
 
 
-def _request_id(request: Request) -> str | None:
-    """
-    Read the current request ID from request state or logging context.
+class RateLimitedError(SemanticAppError):
+    """Raised when a caller exceeds an allowed request rate."""
 
-    Purpose:
-        Supply the request ID for error envelopes even when the request context
-        middleware has already cleared its context variables.
-
-    Args:
-        request: Request being handled.
-
-    Returns:
-        str | None: The request ID when one is available.
-    """
-    request_id = getattr(request.state, "request_id", None)
-    if isinstance(request_id, str):
-        return request_id
-    contextual_request_id = structlog.contextvars.get_contextvars().get("request_id")
-    return contextual_request_id if isinstance(contextual_request_id, str) else None
+    _code = ErrorCode.RATE_LIMITED
 
 
-def _cors_headers(request: Request, settings: Settings | None) -> dict[str, str]:
-    """
-    Build CORS headers for a response that bypasses ``CORSMiddleware``.
+class ServiceUnavailableError(SemanticAppError):
+    """Raised when a required service is temporarily unavailable."""
 
-    Purpose:
-        Keep unhandled 500 responses readable by browser clients when the
-        request origin is allowed by the application settings.
-
-    Args:
-        request: Request being handled.
-        settings: Application settings, or ``None`` when unavailable.
-
-    Returns:
-        dict[str, str]: CORS headers for the explicit request origin, or an
-            empty mapping when the request has no allowed origin.
-
-    Notes:
-        - The application configures credentials, so an allowed wildcard
-          origin is echoed explicitly, matching ``CORSMiddleware`` behavior.
-        - The returned headers are meant to be merged into an error response.
-    """
-    if not isinstance(settings, Settings):
-        return {}
-    origin = request.headers.get("origin")
-    if origin is None:
-        return {}
-    allowed = "*" in settings.cors_origins or origin in settings.cors_origins
-    if not allowed:
-        return {}
-    return {
-        "Access-Control-Allow-Origin": origin,
-        "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Expose-Headers": "X-Request-ID",
-        "Vary": "Origin",
-    }
-
-
-def _error_response(
-    status_code: int,
-    code: str,
-    message: str,
-    details: object | None,
-    request_id: str | None,
-    headers: Mapping[str, str] | None = None,
-) -> JSONResponse:
-    """
-    Build a response with the unified error envelope.
-
-    Purpose:
-        Serialize one error payload consistently for every exception handler.
-
-    Args:
-        status_code: HTTP status code of the response.
-        code: Stable machine-readable error code.
-        message: Human-readable error message.
-        details: Optional error details; encoded to JSON-safe values.
-        request_id: Request ID associated with the failure.
-        headers: Optional extra response headers.
-
-    Returns:
-        JSONResponse: Response containing the error envelope.
-
-    Notes:
-        - Every envelope carries the shared security headers because unhandled
-          500 responses bypass ``SecurityHeadersMiddleware``.
-        - ``X-Request-ID`` is added to the response headers when known, which
-          also covers responses produced outside the request context
-          middleware.
-    """
-    response_headers = dict(SECURITY_HEADERS)
-    response_headers.update(headers or {})
-    if request_id is not None:
-        response_headers.setdefault("X-Request-ID", request_id)
-    payload = ErrorResponse(
-        error=ErrorDetail(
-            code=code,
-            message=message,
-            details=jsonable_encoder(details),
-            request_id=request_id,
-        )
-    )
-    return JSONResponse(
-        status_code=status_code,
-        content=payload.model_dump(),
-        headers=response_headers,
-    )
-
-
-async def _handle_app_error(request: Request, exc: Exception) -> Response:
-    """
-    Render an expected application error.
-
-    Purpose:
-        Convert ``AppError`` instances into the unified error envelope using
-        their status, code, and details.
-
-    Args:
-        request: Request being handled.
-        exc: Expected application error.
-
-    Returns:
-        Response: JSON response with the error envelope.
-    """
-    assert isinstance(exc, AppError)
-    return _error_response(
-        status_code=exc.status_code,
-        code=exc.code,
-        message=exc.message,
-        details=exc.details,
-        request_id=_request_id(request),
-    )
-
-
-async def _handle_validation_error(request: Request, exc: Exception) -> Response:
-    """
-    Render a request validation failure.
-
-    Purpose:
-        Convert ``RequestValidationError`` into a 422 envelope with JSON-safe
-        Pydantic error details.
-
-    Args:
-        request: Request being handled.
-        exc: Validation error raised while parsing the request.
-
-    Returns:
-        Response: JSON response with the error envelope.
-    """
-    assert isinstance(exc, RequestValidationError)
-    return _error_response(
-        status_code=422,
-        code="validation_error",
-        message="Validation failed",
-        details=exc.errors(),
-        request_id=_request_id(request),
-    )
-
-
-async def _handle_http_exception(request: Request, exc: Exception) -> Response:
-    """
-    Render an HTTP exception with a status-derived code.
-
-    Purpose:
-        Convert Starlette and FastAPI HTTP exceptions into the unified error
-        envelope.
-
-    Args:
-        request: Request being handled.
-        exc: HTTP exception raised by the application or router.
-
-    Returns:
-        Response: JSON response with the error envelope.
-    """
-    assert isinstance(exc, StarletteHTTPException)
-    message = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-    return _error_response(
-        status_code=exc.status_code,
-        code=f"http_{exc.status_code}",
-        message=message,
-        details=None,
-        request_id=_request_id(request),
-        headers=exc.headers,
-    )
-
-
-async def _handle_unexpected_error(request: Request, exc: Exception) -> Response:
-    """
-    Render an unexpected exception and log its traceback.
-
-    Purpose:
-        Hide implementation details in production while retaining full
-        diagnostics in debug mode and the server log.
-
-    Args:
-        request: Request being handled.
-        exc: Unexpected exception that escaped the application.
-
-    Returns:
-        Response: JSON response with the unified error envelope.
-
-    Notes:
-        - Details are included only when the application settings enable
-          ``debug``.
-        - Security and CORS headers are added here because the response is
-          produced by Starlette's outer ``ServerErrorMiddleware`` and never
-          reaches ``SecurityHeadersMiddleware`` or ``CORSMiddleware``.
-        - The log record includes the request ID, method, and path because the
-          request context variables have already been cleared.
-    """
-    settings = getattr(request.app.state, "settings", None)
-    debug = settings.debug if isinstance(settings, Settings) else False
-    logger.exception(
-        "http.request.failed",
-        exc_info=exc,
-        request_id=_request_id(request),
-        method=request.method,
-        path=request.url.path,
-    )
-    details = {"exception": type(exc).__name__, "message": str(exc)} if debug else None
-    return _error_response(
-        status_code=500,
-        code="internal_error",
-        message="Internal server error",
-        details=details,
-        request_id=_request_id(request),
-        headers=_cors_headers(request, settings if isinstance(settings, Settings) else None),
-    )
-
-
-def register_exception_handlers(app: FastAPI) -> None:
-    """
-    Register handlers that produce the unified error envelope.
-
-    Purpose:
-        Install handlers for expected application errors, validation failures,
-        HTTP exceptions, and unexpected exceptions.
-
-    Args:
-        app: FastAPI application receiving the handlers.
-
-    Returns:
-        None: This function only registers handlers.
-
-    Notes:
-        - Handler registration replaces FastAPI's default HTTP and validation
-          handlers.
-    """
-    app.add_exception_handler(AppError, _handle_app_error)
-    app.add_exception_handler(RequestValidationError, _handle_validation_error)
-    app.add_exception_handler(StarletteHTTPException, _handle_http_exception)
-    app.add_exception_handler(Exception, _handle_unexpected_error)
+    _code = ErrorCode.SERVICE_UNAVAILABLE
