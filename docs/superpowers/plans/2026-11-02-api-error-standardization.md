@@ -425,8 +425,10 @@ Update `tests/test_tasks_api.py`:
 ```python
 from taskiq.exceptions import SendTaskError
 
+
 async def failing_kiq() -> FakeTask:
     raise SendTaskError()
+
 
 monkeypatch.setattr(ping, "kiq", failing_kiq)
 ...
