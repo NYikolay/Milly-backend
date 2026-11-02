@@ -1,0 +1,57 @@
+x-dev-environment: &dev-environment
+  APP_ENV: local
+  LOG_JSON: "false"
+  ENABLE_DOCS: "true"
+
+x-dev-volumes: &dev-volumes
+  - ./src:/app/src
+  - ./tests:/app/tests
+  - ./alembic:/app/alembic
+
+services:
+  db:
+    ports:
+      - "5432:5432"
+
+  pgbouncer:
+    ports:
+      - "6432:6432"
+
+  nats:
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+
+  redis:
+    ports:
+      - "6379:6379"
+
+  api:
+    build:
+      target: dev
+    image: milly-backend:dev
+    command:
+      - "uvicorn"
+      - "backend.main:app"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--reload"
+      - "--no-access-log"
+    environment: *dev-environment
+    volumes: *dev-volumes
+
+  worker:
+    build:
+      target: dev
+    image: milly-backend:dev
+    environment: *dev-environment
+    volumes: *dev-volumes
+
+  scheduler:
+    build:
+      target: dev
+    image: milly-backend:dev
+    environment: *dev-environment
+    volumes: *dev-volumes

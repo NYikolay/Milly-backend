@@ -1,0 +1,241 @@
+name: milly-backend
+
+x-app-build: &app-build
+  context: .
+  target: runtime
+
+x-app-environment: &app-environment
+  APP_NAME: ${APP_NAME:-Milly API}
+  APP_ENV: production
+  DEBUG: "false"
+  API_V1_STR: ${API_V1_STR:-/api/v1}
+  ENABLE_DOCS: "false"
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_JSON: "true"
+  CORS_ORIGINS: ${CORS_ORIGINS:-[]}
+  ALLOWED_HOSTS: ${ALLOWED_HOSTS:-["*"]}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@pgbouncer:6432/${POSTGRES_DB:?}
+  DIRECT_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@db:5432/${POSTGRES_DB:?}
+  DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
+  DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-5}
+  DB_POOL_RECYCLE: ${DB_POOL_RECYCLE:-1800}
+  SQL_ECHO: ${SQL_ECHO:-false}
+  NATS_URL: nats://nats:4222
+  NATS_USER: ${NATS_USER:?}
+  NATS_PASSWORD: ${NATS_PASSWORD:?}
+  NATS_STREAM: ${NATS_STREAM:-MILLY_TASKS}
+  NATS_SUBJECT: ${NATS_SUBJECT:-milly.tasks}
+  NATS_DURABLE: ${NATS_DURABLE:-milly-workers}
+  NATS_STREAM_MAX_AGE: ${NATS_STREAM_MAX_AGE:-604800}
+  NATS_ACK_WAIT: ${NATS_ACK_WAIT:-300}
+  NATS_MAX_DELIVER: ${NATS_MAX_DELIVER:-5}
+  REDIS_URL: redis://:${REDIS_PASSWORD:?}@redis:6379/0
+  TASKIQ_RESULT_EX_TIME: ${TASKIQ_RESULT_EX_TIME:-86400}
+  TASKIQ_KEEP_RESULTS: ${TASKIQ_KEEP_RESULTS:-true}
+
+services:
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:?}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - data
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: ${POSTGRES_USER:?}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?}
+      DB_NAME: ${POSTGRES_DB:?}
+      LISTEN_PORT: "6432"
+      POOL_MODE: transaction
+      AUTH_TYPE: scram-sha-256
+      MAX_CLIENT_CONN: "200"
+      DEFAULT_POOL_SIZE: "20"
+      MIN_POOL_SIZE: "5"
+      RESERVE_POOL_SIZE: "5"
+      MAX_DB_CONNECTIONS: "40"
+      MAX_PREPARED_STATEMENTS: "200"
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits
+    healthcheck:
+      test: ["CMD-SHELL", 'pg_isready -h 127.0.0.1 -p 6432 -U "$$DB_USER" -d "$$DB_NAME"']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app
+      - data
+
+  nats:
+    image: nats:2.10-alpine
+    command:
+      - "-js"
+      - "-m"
+      - "8222"
+      - "--store_dir"
+      - "/data"
+      - "--user"
+      - "${NATS_USER:?}"
+      - "--pass"
+      - "${NATS_PASSWORD:?}"
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - app
+      - data
+
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?}"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", 'redis-cli -a "$$REDIS_PASSWORD" ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - app
+      - data
+
+  migrate:
+    build: *app-build
+    image: milly-backend:runtime
+    command: ["alembic", "upgrade", "head"]
+    environment: *app-environment
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - app
+      - data
+
+  api:
+    build: *app-build
+    image: milly-backend:runtime
+    command:
+      - "uvicorn"
+      - "backend.main:app"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--no-access-log"
+    environment: *app-environment
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - 'import json, os, urllib.request; hosts = json.loads(os.environ.get("ALLOWED_HOSTS") or "[]"); host = next((item for item in hosts if item not in ("*", "")), "127.0.0.1"); urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8000/health/ready", headers={"Host": host}), timeout=5)'
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      pgbouncer:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app
+
+  worker:
+    build: *app-build
+    image: milly-backend:runtime
+    command:
+      - "taskiq"
+      - "worker"
+      - "backend.tasks.worker:broker"
+      - "backend.tasks.example"
+      - "--workers"
+      - "2"
+      - "--max-async-tasks"
+      - "20"
+      - "--wait-tasks-timeout"
+      - "300"
+      - "--no-configure-logging"
+    environment: *app-environment
+    stop_grace_period: 330s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      pgbouncer:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app
+
+  scheduler:
+    build: *app-build
+    image: milly-backend:runtime
+    command:
+      - "taskiq"
+      - "scheduler"
+      - "backend.tasks.worker:scheduler"
+      - "backend.tasks.example"
+      - "--skip-first-run"
+      - "--no-configure-logging"
+    environment: *app-environment
+    deploy:
+      replicas: 1
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app
+
+networks:
+  app:
+    driver: bridge
+  data:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  nats-data:
+  redis-data:
