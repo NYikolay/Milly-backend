@@ -167,7 +167,8 @@ Flow:
 1. `POST /api/v1/auth/telegram` с `{"init_data": "<raw initData>"}` —
    валидирует данные, создаёт или обновляет `User` и `TelegramProfile` и
    возвращает access-токен. Refresh-токен приходит только в HttpOnly-cookie.
-2. Access-токен (JWT HS256, 15 минут) клиент хранит только в памяти и
+2. Access-токен (JWT HS256, TTL 900 секунд плюс 30-секундный leeway при
+   проверке — фактически около 15 минут) клиент хранит только в памяти и
    передаёт в `Authorization: Bearer`.
 3. `POST /api/v1/auth/refresh` без тела — читает refresh из cookie, ротирует
    его и возвращает новый access; cookie перезаписывается.
@@ -189,6 +190,11 @@ Set-Cookie: milly_refresh=<opaque>; HttpOnly; Secure; SameSite=Lax;
 
 POST /api/v1/auth/logout
 204
+
+GET /api/v1/auth/me
+Authorization: Bearer <jwt>
+200 {"id": 1, "created_at": "...",
+     "telegram_profile": {"telegram_id": 123, "first_name": "Ivan", "..."}}
 ```
 
 Refresh-токен непрозрачный; в БД хранится только его SHA-256 хеш. Cookie
@@ -206,11 +212,17 @@ Refresh-токен непрозрачный; в БД хранится тольк
 Refresh строго ротируется: повтор старого токена вне 30-секундного
 grace-окна отзывает всё семейство. Ошибки refresh не очищают cookie, logout
 очищает. Access после logout не отзывается мгновенно и остаётся валидным до
-`exp` — не более 15 минут.
+`exp` — около 15 минут (900 секунд TTL плюс 30-секундный leeway).
 
-Контракт рассчитан на same-site (или same-origin) frontend и API:
-`SameSite=None` не поддерживается, а `Origin` login/refresh/logout
-проверяется по `CORS_ORIGINS` и origin самого API.
+Контракт рассчитан на same-site (или same-origin) frontend и API.
+`SameSite=None` в production не поддерживается: validation отклоняет
+`AUTH_REFRESH_COOKIE_SAMESITE=none`. `Origin` login/refresh/logout
+проверяется по origin самого API и `CORS_ORIGINS`. Если TLS завершается на
+reverse proxy, ASGI-схема запроса может быть `http`, а Origin браузера —
+`https://...`; в этом случае публичный origin frontend/API обязан быть явно
+добавлен в `CORS_ORIGINS` (либо на прокси настраивается доверие
+forwarded-заголовкам и соответствующая настройка приложения). Приложение не
+доверяет неверифицированным `X-Forwarded-*` при проверке Origin.
 
 Если Mini App открыт кнопкой-клавиатурой, `initData` может быть пустым;
 авторизоваться по пустым или неподписанным данным нельзя. Клиент показывает

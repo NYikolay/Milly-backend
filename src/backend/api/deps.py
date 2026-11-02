@@ -63,13 +63,18 @@ def get_database_probe(request: Request) -> DatabaseProbe:
     return DatabaseProbe(database.engine)
 
 
+SessionDep = Annotated[AsyncSession, Depends(get_session, scope="function")]
+DatabaseProbeDep = Annotated[DatabaseProbe, Depends(get_database_probe)]
+
+
 async def get_auth_service(request: Request, session: SessionDep) -> AuthService:
     """
     Build the authentication service for the current request.
 
     Purpose:
         Bind the SQLAlchemy auth repository and application settings to the
-        request-scoped session used by login, refresh, and logout.
+        request-scoped session used by login, refresh, logout, and the ``/me``
+        current-user lookup.
 
     Args:
         request: Incoming request carrying the application settings.
@@ -110,6 +115,7 @@ async def get_current_access(
         AccessTokenClaims: Verified identity and session claims.
 
     Raises:
+        AuthNotConfiguredError: If no JWT secret is configured.
         UnauthorizedError: If the Authorization header is missing or the token
             fails verification.
 
@@ -155,6 +161,4 @@ async def get_current_user(
     return user
 
 
-SessionDep = Annotated[AsyncSession, Depends(get_session, scope="function")]
-DatabaseProbeDep = Annotated[DatabaseProbe, Depends(get_database_probe)]
 CurrentUserDep = Annotated[User, Depends(get_current_user)]

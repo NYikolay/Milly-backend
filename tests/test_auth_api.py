@@ -189,6 +189,23 @@ async def test_login_forbidden_origin(fake_service: FakeAuthService) -> None:
     assert fake_service.login_calls == 0
 
 
+async def test_login_allowed_cors_origin(fake_service: FakeAuthService) -> None:
+    """Accept a login from an explicitly allowed CORS origin."""
+    settings = Settings(_env_file=None, cors_origins=["https://app.example.com"])
+    app = create_app(settings)
+    app.dependency_overrides[get_auth_service] = lambda: fake_service
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/auth/telegram",
+            json={"init_data": "valid"},
+            headers={"Origin": "https://app.example.com"},
+        )
+    assert response.status_code == 200
+    assert response.json()["access_token"]
+    assert fake_service.login_calls == 1
+
+
 async def test_refresh_without_cookie_returns_401(
     auth_client: AsyncClient,
     fake_service: FakeAuthService,

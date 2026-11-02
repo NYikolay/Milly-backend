@@ -165,11 +165,6 @@ class FakeAuthRepository:
         self.events.append(("get_session_for_update", refresh_token_hash))
         return self.session
 
-    async def get_session_by_token_hash(self, refresh_token_hash: str) -> AuthSession | None:
-        """Record a non-locking session lookup and return the prepared session."""
-        self.events.append(("get_session_by_token_hash", refresh_token_hash))
-        return self.session
-
     async def revoke_session(self, session: AuthSession, revoked_at: datetime) -> None:
         """Record a session revocation request."""
         self.events.append(("revoke_session", (session, revoked_at)))
@@ -509,7 +504,7 @@ async def test_logout_revokes_family_by_refresh_token() -> None:
     await service.logout("old-refresh-token")
 
     assert repository.events == [
-        ("get_session_by_token_hash", hash_refresh_token("old-refresh-token")),
+        ("get_session_for_update", hash_refresh_token("old-refresh-token")),
         ("revoke_family", (old_session.family_id, NOW)),
     ]
 
@@ -521,7 +516,7 @@ async def test_logout_with_unknown_token_is_idempotent() -> None:
 
     await service.logout("unknown-refresh-token")
 
-    assert repository.call_names == ["get_session_by_token_hash"]
+    assert repository.call_names == ["get_session_for_update"]
 
 
 async def test_logout_without_token_is_idempotent() -> None:

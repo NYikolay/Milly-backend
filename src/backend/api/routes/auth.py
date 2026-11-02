@@ -144,7 +144,6 @@ async def logout(
 
     Raises:
         ForbiddenError: If the request origin is not allowed.
-        AuthNotConfiguredError: If authentication settings are missing.
 
     Notes:
         - Logout is idempotent and does not reveal whether the cookie existed.
@@ -175,7 +174,8 @@ async def read_current_user(user: CurrentUserDep) -> UserResponse:
         UserResponse: Public user fields and the Telegram profile.
 
     Raises:
-        UnauthorizedError: If the bearer token is missing or invalid, or the
-            user no longer exists.
+        AuthNotConfiguredError: If no JWT secret is configured.
+        UnauthorizedError: If the bearer token is missing or invalid, the user
+            no longer exists, or the user has no Telegram profile.
     """
     return UserResponse.model_validate(user)

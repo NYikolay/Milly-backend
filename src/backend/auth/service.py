@@ -127,16 +127,17 @@ class AuthService:
         """
         bot_token = self._require_configuration()
 
-        now = self._clock()
+        validation_now = self._clock()
         data = validate_init_data(
             raw_init_data,
             bot_token=bot_token,
             max_age_seconds=self._settings.telegram_init_data_max_age_seconds,
             max_future_skew_seconds=self._settings.telegram_init_data_max_future_skew_seconds,
-            now=now,
+            now=validation_now,
         )
 
         await self._repository.acquire_telegram_lock(data.id)
+        now = self._clock()
         profile = await self._repository.get_profile_by_telegram_id(data.id)
         is_new = profile is None
         if profile is None:
@@ -206,10 +207,10 @@ class AuthService:
               receive the generic message. Raw tokens are never logged.
         """
         self._require_configuration()
-        now = self._clock()
         session = await self._repository.get_session_for_update(
             hash_refresh_token(raw_refresh_token)
         )
+        now = self._clock()
         if session is None:
             logger.warning("auth.refresh_rejected", reason="unknown")
             raise UnauthorizedError(_INVALID_REFRESH_TOKEN)
@@ -305,6 +306,9 @@ class AuthService:
 
         Notes:
             - Logout is idempotent and does not reveal whether the token existed.
+            - The session row is read with ``SELECT ... FOR UPDATE`` so logout
+              serializes with refresh rotation and cannot miss a newly created
+              session in the same family.
             - Only the SHA-256 hash of the refresh token is sent to the
               repository.
             - Does not commit; the request unit of work owns the transaction
@@ -313,7 +317,7 @@ class AuthService:
         """
         if raw_refresh_token is None:
             return
-        session = await self._repository.get_session_by_token_hash(
+        session = await self._repository.get_session_for_update(
             hash_refresh_token(raw_refresh_token)
         )
         if session is None:

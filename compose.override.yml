@@ -26,6 +26,13 @@ services:
     ports:
       - "6379:6379"
 
+  migrate:
+    build:
+      target: dev
+    image: milly-backend:dev
+    environment: *dev-environment
+    volumes: *dev-volumes
+
   api:
     build:
       target: dev

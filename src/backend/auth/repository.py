@@ -142,21 +142,6 @@ class AuthRepository(Protocol):
         """
         ...
 
-    async def get_session_by_token_hash(self, refresh_token_hash: str) -> AuthSession | None:
-        """
-        Load a session by refresh-token hash without locking.
-
-        Purpose:
-            Resolve a session for read-only logout handling.
-
-        Args:
-            refresh_token_hash: SHA-256 hex digest of the raw refresh token.
-
-        Returns:
-            AuthSession | None: The matching session, or ``None``.
-        """
-        ...
-
     async def revoke_session(self, session: AuthSession, revoked_at: datetime) -> None:
         """
         Mark one session as revoked.
@@ -454,24 +439,6 @@ class SqlAlchemyAuthRepository:
             select(AuthSession)
             .where(AuthSession.refresh_token_hash == refresh_token_hash)
             .with_for_update()
-        )
-        return result.scalar_one_or_none()
-
-    async def get_session_by_token_hash(self, refresh_token_hash: str) -> AuthSession | None:
-        """
-        Load a session by refresh-token hash without locking.
-
-        Purpose:
-            Resolve a session for read-only logout handling.
-
-        Args:
-            refresh_token_hash: SHA-256 hex digest of the raw refresh token.
-
-        Returns:
-            AuthSession | None: The matching session, or ``None``.
-        """
-        result = await self._session.execute(
-            select(AuthSession).where(AuthSession.refresh_token_hash == refresh_token_hash)
         )
         return result.scalar_one_or_none()
 
