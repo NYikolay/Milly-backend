@@ -65,7 +65,9 @@ async def test_middleware_error_uses_envelope(settings: Settings) -> None:
 
 def test_error_envelope_is_inside_request_context(settings: Settings) -> None:
     """Install the error envelope directly inside the request context."""
-    middleware_classes = [middleware.cls for middleware in create_app(settings).user_middleware]
+    middleware_classes: list[object] = [
+        middleware.cls for middleware in create_app(settings).user_middleware
+    ]
     request_context_index = middleware_classes.index(RequestContextMiddleware)
     assert middleware_classes.index(ErrorEnvelopeMiddleware) == request_context_index + 1
 
