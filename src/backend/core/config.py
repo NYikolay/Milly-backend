@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     auth_jwt_leeway_seconds: int = Field(default=30, ge=0)
     auth_access_ttl_seconds: int = Field(default=900, gt=0)
     auth_refresh_ttl_seconds: int = Field(default=2592000, gt=0)
-    auth_refresh_reuse_grace_seconds: int = Field(default=30, ge=0)
+    auth_refresh_reuse_grace_seconds: int = Field(default=30, gt=0)
     auth_refresh_cookie_name: str = "milly_refresh"
     auth_refresh_cookie_secure: bool = True
     auth_refresh_cookie_samesite: Literal["lax", "strict", "none"] = "lax"

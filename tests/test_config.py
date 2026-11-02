@@ -158,6 +158,12 @@ def test_auth_ttls_must_be_positive() -> None:
         Settings(_env_file=None, auth_refresh_ttl_seconds=0)
 
 
+def test_auth_refresh_grace_must_be_positive() -> None:
+    """Reject a non-positive refresh reuse grace window."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, auth_refresh_reuse_grace_seconds=0)
+
+
 def test_extra_env_is_ignored() -> None:
     """Ignore unknown environment keys such as provider credentials."""
     settings = Settings(_env_file=None, provider_api_key="ignored")

@@ -58,7 +58,7 @@ def test_rejects_malformed_hash() -> None:
 
 def test_rejects_duplicate_keys() -> None:
     """Reject init data containing the same field more than once."""
-    raw = make_init_data() + "&auth_date=1"
+    raw = make_init_data() + f"&auth_date={int(NOW.timestamp())}"
     with pytest.raises(UnauthorizedError):
         validate_init_data(raw, bot_token=BOT_TOKEN, max_age_seconds=3600, now=NOW)
 
@@ -96,6 +96,14 @@ def test_rejects_invalid_user_json() -> None:
 def test_rejects_non_integer_user_id() -> None:
     """Reject a user ID that is not a strict integer."""
     raw = make_init_data(user={"id": "123", "first_name": "Ivan"})
+    with pytest.raises(UnauthorizedError):
+        validate_init_data(raw, bot_token=BOT_TOKEN, max_age_seconds=3600, now=NOW)
+
+
+@pytest.mark.parametrize("user_id", [0, -1])
+def test_rejects_non_positive_user_id(user_id: int) -> None:
+    """Reject a user ID that is not greater than zero."""
+    raw = make_init_data(user={"id": user_id, "first_name": "Ivan"})
     with pytest.raises(UnauthorizedError):
         validate_init_data(raw, bot_token=BOT_TOKEN, max_age_seconds=3600, now=NOW)
 

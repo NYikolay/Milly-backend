@@ -11,6 +11,7 @@ from starlette.types import Scope
 
 from backend.api.errors.handlers import render_error_response
 from backend.api.errors.mapping import payload_from_app_error
+from backend.auth.errors import AuthNotConfiguredError
 from backend.core.config import Settings
 from backend.core.errors import AppError, ErrorCode, NotFoundError, UnauthorizedError
 from backend.main import create_app
@@ -414,6 +415,24 @@ async def test_unauthorized_error_defaults_to_bearer_challenge(
     assert response.status_code == 401
     assert response.headers["www-authenticate"] == "Bearer"
     assert response.json()["code"] == "unauthorized"
+
+
+async def test_auth_not_configured_error_renders_503(app: FastAPI, client: AsyncClient) -> None:
+    """Render the authentication-not-configured error from its registry spec."""
+
+    async def not_configured() -> None:
+        """Raise an authentication-not-configured application error."""
+        raise AuthNotConfiguredError()
+
+    app.add_api_route("/_test/auth-not-configured", not_configured, methods=["GET"])
+    response = await client.get("/_test/auth-not-configured")
+
+    assert response.status_code == 503
+    body = response.json()
+    _assert_error_envelope(body)
+    assert body["code"] == "auth_not_configured"
+    assert body["message"] == "Authentication is not configured"
+    assert body["description"] == "Аутентификация не настроена"
 
 
 @pytest.mark.parametrize("header_name", ["X-Request-ID", "x-request-id"])

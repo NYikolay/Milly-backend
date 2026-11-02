@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from backend.auth.errors import AuthNotConfiguredError
 from backend.core.errors import ERROR_SPECS, ErrorCode, get_error_spec
 
 
@@ -27,3 +28,21 @@ def test_get_error_spec_returns_registered_spec() -> None:
     spec = get_error_spec(ErrorCode.BAD_REQUEST)
     assert spec.status_code == 400
     assert spec.description == "Некорректный запрос"
+
+
+def test_auth_not_configured_spec() -> None:
+    """Register the exact authentication-not-configured contract."""
+    spec = get_error_spec(ErrorCode.AUTH_NOT_CONFIGURED)
+    assert spec.status_code == 503
+    assert spec.message == "Authentication is not configured"
+    assert spec.description == "Аутентификация не настроена"
+
+
+def test_auth_not_configured_error_uses_registered_spec() -> None:
+    """Build the semantic error from the registered specification."""
+    exc = AuthNotConfiguredError()
+    spec = get_error_spec(exc.code)
+    assert exc.code is ErrorCode.AUTH_NOT_CONFIGURED
+    assert spec.status_code == 503
+    assert exc.message == spec.message
+    assert exc.description == spec.description

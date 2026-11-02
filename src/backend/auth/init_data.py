@@ -71,6 +71,7 @@ def validate_init_data(
     Notes:
         - Every rejection uses the same message so the failed check is not
           disclosed to the client.
+        - A naive ``now`` is interpreted as UTC.
         - The ``signature`` field remains part of the signed data-check-string.
         - Raw init data is never logged or included in error details.
     """
@@ -109,19 +110,21 @@ def validate_init_data(
         _invalid()
 
     current = now if now is not None else datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
     age_seconds = int(current.timestamp()) - auth_date
     if age_seconds > max_age_seconds or age_seconds < -max_future_skew_seconds:
         _invalid()
 
     try:
         user_payload = json.loads(fields["user"])
-    except json.JSONDecodeError, TypeError:
-        _invalid()
+    except json.JSONDecodeError:
+        raise UnauthorizedError(_INVALID_INIT_DATA) from None
 
     try:
         user = TelegramUser.model_validate(user_payload)
     except ValidationError:
-        _invalid()
+        raise UnauthorizedError(_INVALID_INIT_DATA) from None
 
     if user.is_bot is True:
         _invalid()
