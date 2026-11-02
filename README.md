@@ -13,8 +13,11 @@ backend/
 ├── src/backend/
 │   ├── main.py              # app factory, lifespan, middleware
 │   ├── api/                 # роутеры, зависимости и Pydantic-схемы
+│   │   ├── errors/          # схемы, нормализация валидации, маппинг,
+│   │   │                    # обработчики, middleware, OpenAPI-класс роутов
 │   │   └── routes/          # health.py, tasks.py
-│   ├── core/                # настройки, логирование, ошибки, middleware
+│   ├── core/                # настройки, логирование, middleware
+│   │   └── errors.py        # коды ошибок и исключения
 │   ├── db/                  # engine/session, declarative base, readiness
 │   ├── models/              # место для ORM-моделей (пока пусто)
 │   └── tasks/               # broker, worker, scheduler, примеры задач
@@ -26,9 +29,8 @@ backend/
 ```
 
 Правило зависимостей: `main.py` собирает слои; `api` зависит от `db` и
-`tasks`; `tasks` — от `db` и `core`; `db` — от `core`. `core.errors`
-использует схемы конверта ошибок из `api.schemas`, поэтому `core` не
-является полностью независимым от `api`.
+`tasks`; `tasks` — от `db` и `core`; `db` — от `core`. `api.errors`
+зависит от `core.errors` и FastAPI; `core.errors` не импортирует `api`.
 
 ## Быстрый старт
 
@@ -63,9 +65,86 @@ curl -fsS http://localhost:8000/health/live
 - `GET /health/live` — liveness процесса, не обращается к зависимостям:
   `200 {"status": "ok"}`.
 - `GET /health/ready` — readiness с проверкой PostgreSQL через PgBouncer:
-  `200 {"status": "ok", "database": "ok"}` либо
-  `503 {"status": "unavailable", "database": "down"}`.
+
+  ```text
+  GET /health/ready — 200 {"status": "ok", "database": "ok"} либо
+  503 {"error": true, "code": "database_unavailable", "message": "Database is unavailable",
+       "description": "База данных временно недоступна",
+       "details": {"database": "down"}, "request_id": "<id>"}
+  ```
 - Docker healthcheck API использует `/health/ready`.
+
+## Ошибки API
+
+Все ошибки API возвращаются в едином плоском конверте: неизвестные маршруты,
+ошибки middleware и проверки Host, readiness, SQLAlchemy и Taskiq используют
+одну и ту же схему.
+
+```json
+{
+  "error": true,
+  "code": "validation_error",
+  "message": "Request validation failed",
+  "description": "Проверьте правильность заполнения полей",
+  "details": {
+    "fields": [
+      {
+        "field": "body.value",
+        "code": "invalid_type",
+        "description": "Некорректный тип значения"
+      }
+    ]
+  },
+  "request_id": "<id>"
+}
+```
+
+- `error` — всегда `true`;
+- `code` — стабильный машиночитаемый код ошибки;
+- `message` — техническое сообщение на английском для логов и разработчиков;
+- `description` — описание для клиента на русском;
+- `details` — необязательные структурированные детали; поле отсутствует, если
+  деталей нет;
+- `request_id` — идентификатор запроса, совпадает с заголовком `X-Request-ID`.
+
+Ошибки валидации возвращают `422`; нормализованные ошибки полей находятся в
+`details.fields`, каждый элемент содержит `field` (путь с точками), `code` и
+русскоязычный `description`. Некорректный JSON возвращает `400` с кодом
+`bad_request`.
+
+Коды полей: `required`, `invalid_type`, `invalid_format`, `too_short`,
+`too_long`, `out_of_range`, `invalid_value`, `invalid_json`. Входные
+значения и сообщения Pydantic в ответ не попадают.
+
+В production ответ `500` никогда не содержит `details`. Для диагностики
+используйте `request_id`: это ключ поддержки, по которому находятся связанные
+записи в логах. В debug-режиме `details` может содержать тип и сообщение
+исключения.
+
+Стабильные коды ошибок:
+
+| `code` | HTTP | Значение |
+| --- | --- | --- |
+| `bad_request` | 400 | некорректный запрос, включая malformed JSON |
+| `validation_error` | 422 | ошибка валидации полей |
+| `unauthorized` | 401 | требуется авторизация |
+| `forbidden` | 403 | недостаточно прав |
+| `not_found` | 404 | ресурс не найден |
+| `method_not_allowed` | 405 | метод не поддерживается |
+| `conflict` | 409 | конфликт с текущим состоянием |
+| `payload_too_large` | 413 | слишком большой запрос |
+| `unsupported_media_type` | 415 | неподдерживаемый тип содержимого |
+| `rate_limited` | 429 | слишком много запросов |
+| `internal_error` | 500 | внутренняя ошибка сервера |
+| `not_implemented` | 501 | функция не реализована |
+| `service_unavailable` | 503 | сервис временно недоступен |
+| `database_unavailable` | 503 | база данных временно недоступна |
+| `task_enqueue_failed` | 503 | не удалось поставить задачу в очередь |
+| `http_error` | исходный | прочий HTTP-статус без отдельного кода |
+
+В OpenAPI для каждой операции документируется схема `ErrorResponse` для
+ответов `400`, `404`, `422`, `500` и `503`; для `422` больше не используется
+`HTTPValidationError`.
 
 ## Миграции
 
