@@ -172,6 +172,13 @@ def test_json_invalid_is_normalized() -> None:
         [{"type": "json_invalid", "loc": ("body",), "msg": "JSON decode error", "input": {}}]
     )
     assert normalize_validation_errors(exc)[0].code == ValidationCode.INVALID_JSON
+
+
+def test_url_parsing_is_invalid_format() -> None:
+    exc = RequestValidationError(
+        [{"type": "url_parsing", "loc": ("body", "url"), "msg": "bad url", "input": "x"}]
+    )
+    assert normalize_validation_errors(exc)[0].code == ValidationCode.INVALID_FORMAT
 ```
 
 Rewrite `tests/test_errors.py`. It must include a helper and these tests:
@@ -203,6 +210,7 @@ Test names and exact assertions:
 - `test_response_validation_error_returns_500` — a route with `response_model=int` returning `"not-an-int"` is 500 with `code == "internal_error"`.
 - `test_unserializable_details_are_dropped` — a route raising `AppError(ErrorCode.CONFLICT, "custom", details={"obj": object()})` returns 409 with `"details" not in body`.
 - `test_app_error_headers_are_preserved` — `AppError(ErrorCode.CONFLICT, "custom", headers={"Retry-After": "1"})` returns header `retry-after == "1"`.
+- `test_app_error_payload_uses_overrides` — unit-test `payload_from_app_error` directly: `AppError(ErrorCode.CONFLICT, "custom", description="custom description", details={"key": "value"}, headers={"Retry-After": "1"}, log_level=logging.ERROR)` yields status 409, message `"custom"`, description `"custom description"`, log level `logging.ERROR`, details `{"key": "value"}`, headers `{"Retry-After": "1"}`.
 - `test_docs_disabled_in_production` — keep the existing test unchanged.
 - `test_error_log_contains_code_and_request_id` — use `caplog.at_level(logging.ERROR)` around a 500 request with `X-Request-ID: log-id`; assert `"api.error"`, `"internal_error"`, and `"log-id"` appear in `caplog.text`.
 - `test_validation_log_does_not_include_input` — use `caplog.at_level(logging.INFO)` around the invalid `{"value": "not-an-int"}` request; assert `"not-an-int" not in caplog.text`.
@@ -303,8 +311,8 @@ json_invalid -> INVALID_JSON
 *too_short* -> TOO_SHORT
 *too_long* -> TOO_LONG
 greater_than, greater_than_equal, less_than, less_than_equal -> OUT_OF_RANGE
-*parsing*, *_type -> INVALID_TYPE
 *pattern*, *url*, *email* -> INVALID_FORMAT
+*parsing*, *_type -> INVALID_TYPE
 everything else -> INVALID_VALUE
 ```
 
@@ -325,7 +333,7 @@ invalid_json -> "Некорректный JSON"
 
 Create `api/errors/mapping.py` with `ErrorPayload` and the four mappers. Exact behavior:
 
-- `payload_from_app_error`: status/description/log level from `get_error_spec(exc.code)`; `details`/`headers` from the exception; `message` from the exception.
+- `payload_from_app_error`: status from `get_error_spec(exc.code)`; `message`, `description`, `log_level`, `details`, and `headers` from the exception (its constructor already fills omitted fields from the spec).
 - `payload_from_http_exception`: status from `exc.status_code`; code from this table:
   `400 bad_request`, `401 unauthorized`, `403 forbidden`, `404 not_found`, `405 method_not_allowed`, `409 conflict`, `413 payload_too_large`, `415 unsupported_media_type`, `422 validation_error`, `429 rate_limited`, `500 internal_error`, `501 not_implemented`, `503 service_unavailable`; any other status uses `http_error`.
   For 4xx with a string `detail`, use it as `message`; for 4xx with a non-string non-None `detail`, put it in `details={"detail": exc.detail}`; for 5xx ignore `detail` and use the spec message/description. Preserve `exc.headers` for all statuses.
@@ -517,7 +525,7 @@ Tests:
 
 - `test_middleware_error_uses_envelope` — `GET /` on `_middleware_app(settings)` returns 400; body `code == "bad_request"`; body `request_id == response.headers["x-request-id"]`; the header is 32 chars because no incoming ID was supplied.
 - `test_error_envelope_is_inside_request_context` — `create_app(settings).user_middleware` has `RequestContextMiddleware` before `ErrorEnvelopeMiddleware`.
-- `test_access_log_uses_rendered_status` — call `configure_logging(settings)`, then run `_middleware_app(settings)` under `caplog.at_level(logging.INFO)`; assert `"status_code=400"` appears in `caplog.text`.
+- `test_access_log_uses_rendered_status` — call `configure_logging(settings)`, then run `_middleware_app(settings)` under `caplog.at_level(logging.INFO)`; assert at least one captured `caplog.records` entry has `record.msg` dict with `event == "http.request.completed"` and `status_code == 400`.
 - `test_disallowed_host_uses_error_envelope` — `create_app(Settings(_env_file=None, allowed_hosts=["api.example.com"], log_json=False))`; request `http://other.example.com/health/live` returns 400; body `code == "bad_request"`; body has `request_id`.
 - `test_www_redirect_preserved` — `allowed_hosts=["www.example.com"]`; request `http://example.com/health/live` returns 307 with `location == "http://www.example.com/health/live"`.
 - `test_allowed_hosts_passes_non_http_scope` — call `AllowedHostsMiddleware` directly with a `{"type": "websocket"}` scope and assert the inner app was called.
