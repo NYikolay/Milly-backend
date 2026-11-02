@@ -137,6 +137,8 @@ def render_error_response(
         - Response headers include the shared security headers, payload
           headers, ``X-Request-ID``, and explicit CORS headers for the request
           origin.
+        - Any case variant of ``X-Request-ID`` supplied by payload headers is
+          discarded so the resolved request ID is always used.
         - Client errors use the payload log level; server errors are logged at
           error level with the original exception traceback.
         - Error details are never written to the log.
@@ -167,7 +169,9 @@ def render_error_response(
     headers = dict(SECURITY_HEADERS)
     if payload.headers:
         headers.update(payload.headers)
-    headers.setdefault("X-Request-ID", request_id)
+    for name in [name for name in headers if name.lower() == "x-request-id"]:
+        del headers[name]
+    headers["X-Request-ID"] = request_id
     headers.update(_cors_headers(scope, settings))
 
     log_fields: dict[str, object] = {

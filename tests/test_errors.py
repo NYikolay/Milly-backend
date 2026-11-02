@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
+from starlette.types import Scope
 
+from backend.api.errors.handlers import render_error_response
 from backend.api.errors.mapping import payload_from_app_error
 from backend.core.config import Settings
 from backend.core.errors import AppError, ErrorCode, NotFoundError
@@ -303,6 +306,30 @@ async def test_app_error_headers_are_preserved(app: FastAPI, client: AsyncClient
     response = await client.get("/_test/headers")
     assert response.status_code == 409
     assert response.headers["retry-after"] == "1"
+
+
+@pytest.mark.parametrize("header_name", ["X-Request-ID", "x-request-id"])
+def test_app_error_cannot_override_request_id_header(header_name: str) -> None:
+    """Discard conflicting request ID headers supplied by an application error."""
+    exc = AppError(ErrorCode.CONFLICT, "custom", headers={header_name: "other"})
+    scope: Scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/_test/request-id",
+        "headers": [],
+        "state": {"request_id": "test-request-id"},
+    }
+    response = render_error_response(
+        payload_from_app_error(exc),
+        scope=scope,
+        settings=Settings(_env_file=None, log_json=False),
+    )
+    assert response.status_code == 409
+    body = json.loads(bytes(response.body))
+    header_values = response.headers.getlist("x-request-id")
+    assert header_values == ["test-request-id"]
+    assert body["request_id"] == header_values[0]
+    assert "other" not in header_values
 
 
 def test_app_error_payload_uses_overrides() -> None:
