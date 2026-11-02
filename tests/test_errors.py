@@ -295,6 +295,77 @@ async def test_unserializable_details_are_dropped(app: FastAPI, client: AsyncCli
     assert "details" not in body
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="inf"),
+    ],
+)
+async def test_non_finite_details_keep_intended_status(
+    app: FastAPI,
+    client: AsyncClient,
+    caplog: pytest.LogCaptureFixture,
+    value: float,
+) -> None:
+    """Drop non-finite details instead of turning a client error into a 500."""
+
+    async def conflict() -> None:
+        """Raise a conflict whose details cannot be serialized to strict JSON."""
+        raise AppError(ErrorCode.CONFLICT, "custom", details={"value": value})
+
+    app.add_api_route("/_test/non-finite", conflict, methods=["GET"])
+    with caplog.at_level(logging.WARNING):
+        response = await client.get("/_test/non-finite")
+    assert response.status_code == 409
+    body = response.json()
+    _assert_error_envelope(body)
+    assert body["code"] == "conflict"
+    assert "details" not in body
+    assert "api.error_details_dropped" in caplog.text
+
+
+async def test_explicit_internal_error_hides_details_in_production() -> None:
+    """Drop details of an explicit internal error outside debug mode."""
+
+    app = create_app(Settings(_env_file=None, app_env="production", debug=False, log_json=False))
+
+    async def internal() -> None:
+        """Raise an internal application error with details."""
+        raise AppError(ErrorCode.INTERNAL_ERROR, details={"internal": "detail"})
+
+    app.add_api_route("/_test/internal", internal, methods=["GET"])
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test") as http_client:
+        response = await http_client.get("/_test/internal")
+    assert response.status_code == 500
+    body = response.json()
+    _assert_error_envelope(body)
+    assert body["code"] == "internal_error"
+    assert "details" not in body
+    assert "detail" not in response.text
+
+
+async def test_explicit_internal_error_keeps_details_in_debug() -> None:
+    """Keep details of an explicit internal error in debug mode."""
+
+    app = create_app(Settings(_env_file=None, app_env="local", debug=True, log_json=False))
+
+    async def internal() -> None:
+        """Raise an internal application error with details."""
+        raise AppError(ErrorCode.INTERNAL_ERROR, details={"internal": "detail"})
+
+    app.add_api_route("/_test/internal", internal, methods=["GET"])
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test") as http_client:
+        response = await http_client.get("/_test/internal")
+    assert response.status_code == 500
+    body = response.json()
+    _assert_error_envelope(body)
+    assert body["code"] == "internal_error"
+    assert body["details"] == {"internal": "detail"}
+
+
 async def test_app_error_headers_are_preserved(app: FastAPI, client: AsyncClient) -> None:
     """Preserve headers declared on an application error."""
 

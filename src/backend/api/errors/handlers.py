@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from uuid import uuid4
 
 import structlog
@@ -136,8 +137,11 @@ def render_error_response(
         JSONResponse: Response containing the flat error envelope.
 
     Notes:
-        - Details that cannot be encoded or validated are dropped and logged as
-          ``api.error_details_dropped``.
+        - Details of HTTP 500 responses are dropped outside debug mode, so even
+          an explicit internal error cannot expose them in production.
+        - Details that cannot be encoded or serialized to final JSON are dropped
+          and logged as ``api.error_details_dropped``; the intended status is
+          preserved.
         - Response headers include the shared security headers, payload
           headers, ``X-Request-ID``, and explicit CORS headers for the request
           origin.
@@ -148,14 +152,18 @@ def render_error_response(
         - Error details are never written to the log.
     """
     request_id = resolve_request_id(scope)
+    details = payload.details
+    if payload.status_code == 500 and not settings.debug:
+        details = None
     try:
         content = ErrorResponse(
             code=payload.code,
             message=payload.message,
             description=payload.description,
-            details=jsonable_encoder(payload.details),
+            details=jsonable_encoder(details),
             request_id=request_id,
         ).model_dump(exclude_none=True)
+        json.dumps(content, allow_nan=False)
     except Exception:
         logger.warning(
             "api.error_details_dropped",

@@ -428,6 +428,13 @@ RequestContext
 `RequestContextMiddleware`, её обработает запасной `Exception` handler
 Starlette.
 
+Документированное исключение из конверта — отклонённый CORS preflight:
+`CORSMiddleware` отвечает plain-text `400 "Disallowed CORS origin"` до того,
+как ошибка может быть отрендерена, поэтому этот ответ остаётся без конверта.
+Это протокольный handshake браузера, прикладной JS не читает его тело;
+`CORSMiddleware` не заменяется и не наследуется, а поведение закреплено
+тестом.
+
 ### 11.2 `AllowedHostsMiddleware`
 
 - Повторяет правила `TrustedHostMiddleware`: `*`, точное совпадение,
