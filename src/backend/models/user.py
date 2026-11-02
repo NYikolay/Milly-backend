@@ -33,5 +33,7 @@ class User(Base):
 
     telegram_profile: Mapped[TelegramProfile | None] = relationship(
         back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
         uselist=False,
     )

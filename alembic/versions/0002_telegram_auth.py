@@ -17,7 +17,18 @@ depends_on: str | None = None
 
 
 def upgrade() -> None:
-    """Create the users, Telegram profiles, and auth sessions tables."""
+    """
+    Create the users, Telegram profiles, and auth sessions tables.
+
+    Purpose:
+        Add the Telegram authentication schema on top of the baseline revision,
+        including identity primary keys, uniqueness constraints, the profile
+        foreign-key cascade, and session lookup indexes.
+
+    Notes:
+        - Tables are created in dependency order: users, telegram_profiles,
+          then auth_sessions.
+    """
     op.create_table(
         "users",
         sa.Column("id", sa.BigInteger(), sa.Identity(), nullable=False),
@@ -91,7 +102,16 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop the auth tables and indexes in reverse dependency order."""
+    """
+    Drop the auth tables and indexes in reverse dependency order.
+
+    Purpose:
+        Revert the Telegram authentication schema back to the baseline revision.
+
+    Notes:
+        - Session indexes are dropped before their table, and dependent tables
+          are dropped before users.
+    """
     op.drop_index("ix_auth_sessions_expires_at", table_name="auth_sessions")
     op.drop_index("ix_auth_sessions_family_id", table_name="auth_sessions")
     op.drop_index("ix_auth_sessions_user_id", table_name="auth_sessions")
