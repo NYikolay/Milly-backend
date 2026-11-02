@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter
 
 from backend.api.deps import DatabaseProbeDep
 from backend.api.schemas import HealthResponse
+from backend.core.errors import AppError, ErrorCode
 
 router = APIRouter(prefix="/health", tags=["health"])
 
@@ -26,12 +27,8 @@ async def live() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@router.get(
-    "/ready",
-    response_model=HealthResponse,
-    responses={status.HTTP_503_SERVICE_UNAVAILABLE: {"model": HealthResponse}},
-)
-async def ready(response: Response, probe: DatabaseProbeDep) -> HealthResponse:
+@router.get("/ready", response_model=HealthResponse)
+async def ready(probe: DatabaseProbeDep) -> HealthResponse:
     """
     Report readiness by probing the database.
 
@@ -39,18 +36,24 @@ async def ready(response: Response, probe: DatabaseProbeDep) -> HealthResponse:
         Expose a probe that reports whether the API can reach its database.
 
     Args:
-        response: Response object used to set a 503 status when unavailable.
         probe: Database readiness probe bound to the application engine.
 
     Returns:
-        HealthResponse: Healthy status with ``database="ok"`` or unavailable
-            status with ``database="down"``.
+        HealthResponse: Healthy status with ``database="ok"``.
+
+    Raises:
+        AppError: With ``DATABASE_UNAVAILABLE`` when the probe fails; rendered
+            as the unified HTTP 503 error envelope.
 
     Notes:
-        - Returns HTTP 200 when the probe succeeds and HTTP 503 otherwise.
+        - Returns HTTP 200 when the probe succeeds and the unified 503 error
+          envelope otherwise.
         - The probe itself bounds the database check with a timeout.
     """
     if await probe.check():
         return HealthResponse(status="ok", database="ok")
-    response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-    return HealthResponse(status="unavailable", database="down")
+    raise AppError(
+        ErrorCode.DATABASE_UNAVAILABLE,
+        message="Database is unavailable",
+        details={"database": "down"},
+    )

@@ -36,11 +36,15 @@ async def test_ready_ok(app: FastAPI, client: AsyncClient) -> None:
 
 
 async def test_ready_down(app: FastAPI, client: AsyncClient) -> None:
-    """Report unavailability when the database probe fails."""
+    """Report unavailability through the unified error envelope when the probe fails."""
     app.dependency_overrides[get_database_probe] = lambda: FakeProbe(False)
     response = await client.get("/health/ready")
     assert response.status_code == 503
-    assert response.json() == {"status": "unavailable", "database": "down"}
+    body = response.json()
+    assert body["error"] is True
+    assert body["code"] == "database_unavailable"
+    assert body["details"] == {"database": "down"}
+    assert "status" not in body
 
 
 async def test_live_with_configured_allowed_host() -> None:

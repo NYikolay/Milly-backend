@@ -4,7 +4,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from fastapi.exceptions import RequestValidationError
+from sqlalchemy import exc as sqlalchemy_exc
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from taskiq.exceptions import TaskiqError
 
 from backend.api.errors.schemas import ValidationCode
 from backend.api.errors.validation import normalize_validation_errors
@@ -25,6 +27,13 @@ _HTTP_ERROR_CODES: dict[int, ErrorCode] = {
     501: ErrorCode.NOT_IMPLEMENTED,
     503: ErrorCode.SERVICE_UNAVAILABLE,
 }
+
+_UNAVAILABLE_DATABASE_ERRORS: tuple[type[sqlalchemy_exc.SQLAlchemyError], ...] = (
+    sqlalchemy_exc.OperationalError,
+    sqlalchemy_exc.InterfaceError,
+    sqlalchemy_exc.DisconnectionError,
+    sqlalchemy_exc.TimeoutError,
+)
 
 
 @dataclass(frozen=True)
@@ -63,6 +72,67 @@ def payload_from_app_error(exc: AppError) -> ErrorPayload:
         log_level=exc.log_level,
         details=exc.details,
         headers=exc.headers,
+    )
+
+
+def payload_from_sqlalchemy_error(exc: sqlalchemy_exc.SQLAlchemyError) -> ErrorPayload:
+    """
+    Build an error payload from a SQLAlchemy failure.
+
+    Purpose:
+        Classify database connectivity failures as unavailability while
+        treating every other database failure as an internal error; business
+        conflicts must be raised as explicit application errors.
+
+    Args:
+        exc: SQLAlchemy exception that escaped the application.
+
+    Returns:
+        ErrorPayload: Database-unavailable payload for connectivity failures,
+            otherwise an internal-error payload.
+
+    Notes:
+        - No details are exposed for infrastructure failures.
+    """
+    code = (
+        ErrorCode.DATABASE_UNAVAILABLE
+        if isinstance(exc, _UNAVAILABLE_DATABASE_ERRORS)
+        else ErrorCode.INTERNAL_ERROR
+    )
+    spec = get_error_spec(code)
+    return ErrorPayload(
+        status_code=spec.status_code,
+        code=code,
+        message=spec.message,
+        description=spec.description,
+        log_level=spec.log_level,
+    )
+
+
+def payload_from_taskiq_error(exc: TaskiqError) -> ErrorPayload:
+    """
+    Build an error payload from a task broker failure.
+
+    Purpose:
+        Render broker delivery failures as a task enqueue failure instead of a
+        generic internal error.
+
+    Args:
+        exc: Taskiq exception raised while enqueuing a task.
+
+    Returns:
+        ErrorPayload: Task-enqueue-failed payload.
+
+    Notes:
+        - No details are exposed for infrastructure failures.
+    """
+    spec = get_error_spec(ErrorCode.TASK_ENQUEUE_FAILED)
+    return ErrorPayload(
+        status_code=spec.status_code,
+        code=ErrorCode.TASK_ENQUEUE_FAILED,
+        message=spec.message,
+        description=spec.description,
+        log_level=spec.log_level,
     )
 
 

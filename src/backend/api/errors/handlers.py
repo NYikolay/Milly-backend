@@ -7,14 +7,18 @@ from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from fastapi.responses import JSONResponse, Response
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
+from taskiq.exceptions import TaskiqError
 
 from backend.api.errors.mapping import (
     ErrorPayload,
     payload_from_app_error,
     payload_from_http_exception,
+    payload_from_sqlalchemy_error,
+    payload_from_taskiq_error,
     payload_from_unexpected_error,
     payload_from_validation_error,
 )
@@ -260,6 +264,53 @@ async def handle_http_exception(request: Request, exc: Exception) -> Response:
     )
 
 
+async def handle_sqlalchemy_error(request: Request, exc: Exception) -> Response:
+    """
+    Render a SQLAlchemy failure.
+
+    Purpose:
+        Convert database connectivity failures into a 503 database error and
+        every other database failure into an internal error envelope.
+
+    Args:
+        request: Request being handled.
+        exc: SQLAlchemy exception that escaped the application.
+
+    Returns:
+        Response: JSON response with the error envelope.
+    """
+    assert isinstance(exc, SQLAlchemyError)
+    return render_error_response(
+        payload_from_sqlalchemy_error(exc),
+        scope=request.scope,
+        settings=_resolve_settings(request),
+        exc=exc,
+    )
+
+
+async def handle_taskiq_error(request: Request, exc: Exception) -> Response:
+    """
+    Render a task broker failure.
+
+    Purpose:
+        Convert task enqueue failures into the task-enqueue-failed envelope.
+
+    Args:
+        request: Request being handled.
+        exc: Taskiq exception raised while enqueuing a task.
+
+    Returns:
+        Response: JSON response with the error envelope.
+    """
+    assert isinstance(exc, TaskiqError)
+    return render_error_response(
+        payload_from_taskiq_error(exc),
+        scope=request.scope,
+        settings=_resolve_settings(request),
+        exc=exc,
+    )
+
+
 async def handle_response_validation_error(request: Request, exc: Exception) -> Response:
     """
     Render a response validation failure.
@@ -323,8 +374,8 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     Purpose:
         Install handlers for expected application errors, validation failures,
-        response validation failures, HTTP exceptions, and unexpected
-        exceptions.
+        database failures, task broker failures, response validation failures,
+        HTTP exceptions, and unexpected exceptions.
 
     Args:
         app: FastAPI application receiving the handlers.
@@ -338,6 +389,8 @@ def register_exception_handlers(app: FastAPI) -> None:
     """
     app.add_exception_handler(AppError, handle_app_error)
     app.add_exception_handler(RequestValidationError, handle_validation_error)
+    app.add_exception_handler(SQLAlchemyError, handle_sqlalchemy_error)
+    app.add_exception_handler(TaskiqError, handle_taskiq_error)
     app.add_exception_handler(ResponseValidationError, handle_response_validation_error)
     app.add_exception_handler(StarletteHTTPException, handle_http_exception)
     app.add_exception_handler(Exception, handle_unexpected_error)
