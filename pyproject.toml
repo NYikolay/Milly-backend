@@ -17,7 +17,8 @@ dependencies = [
     "taskiq-redis (>=1.2.4,<2.0.0)",
     "structlog (>=26.1.0,<27.0.0)",
     "pydantic (>=2.14.1,<3.0.0)",
-    "pydantic-settings (>=2.16.1,<3.0.0)"
+    "pydantic-settings (>=2.16.1,<3.0.0)",
+    "pyjwt (>=2.10,<3.0)"
 ]
 
 [tool.poetry]
