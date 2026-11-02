@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
-
 from backend.api.deps import DatabaseProbeDep
+from backend.api.errors.openapi import StandardizedAPIRouter
 from backend.api.schemas import HealthResponse
 from backend.core.errors import AppError, ErrorCode
 
-router = APIRouter(prefix="/health", tags=["health"])
+router = StandardizedAPIRouter(prefix="/health", tags=["health"])
 
 
 @router.get("/live")

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from fastapi import status
 
+from backend.api.errors.openapi import StandardizedAPIRouter
 from backend.api.schemas import TaskEnqueuedResponse
 from backend.tasks.example import ping
 
-router = APIRouter(prefix="/tasks", tags=["tasks"])
+router = StandardizedAPIRouter(prefix="/tasks", tags=["tasks"])
 
 
 @router.post("/ping", status_code=status.HTTP_202_ACCEPTED)
