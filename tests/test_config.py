@@ -176,3 +176,98 @@ def test_get_settings_is_cached(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     get_settings.cache_clear()
     assert get_settings() is get_settings()
     get_settings.cache_clear()
+
+
+def test_admin_is_disabled_by_default() -> None:
+    """Keep the admin panel disabled when no credentials are configured."""
+    settings = Settings(_env_file=None)
+    assert settings.admin_username == "admin"
+    assert settings.admin_password is None
+    assert settings.admin_session_max_age_seconds == 43_200
+    assert settings.admin_enabled is False
+
+
+def test_admin_enabled_requires_password_and_jwt_secret() -> None:
+    """Enable the admin panel only when both credentials are present."""
+    assert Settings(_env_file=None, admin_password="s" * 16).admin_enabled is False
+    assert Settings(_env_file=None, auth_jwt_secret="a" * 32).admin_enabled is False
+    assert (
+        Settings(
+            _env_file=None,
+            admin_password="s" * 16,
+            auth_jwt_secret="",
+        ).admin_enabled
+        is False
+    )
+    assert (
+        Settings(
+            _env_file=None,
+            admin_password="s" * 16,
+            auth_jwt_secret="a" * 32,
+        ).admin_enabled
+        is True
+    )
+
+
+def test_admin_password_of_spaces_disables_admin() -> None:
+    """Treat a whitespace-only admin password as not configured."""
+    settings = Settings(
+        _env_file=None,
+        admin_password=" " * 16,
+        auth_jwt_secret="a" * 32,
+    )
+    assert settings.admin_enabled is False
+
+
+def test_production_rejects_short_admin_password() -> None:
+    """Reject an admin password shorter than 16 characters in production."""
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            telegram_bot_token="123:token",
+            auth_jwt_secret="a" * 32,
+            admin_password="short",
+        )
+
+
+def test_production_rejects_change_me_admin_password() -> None:
+    """Reject a placeholder admin password in any case in production."""
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            telegram_bot_token="123:token",
+            auth_jwt_secret="a" * 32,
+            admin_password="Change-Me-Admin-Password",
+        )
+
+
+def test_production_rejects_whitespace_admin_password() -> None:
+    """Reject a whitespace-only admin password in production."""
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            telegram_bot_token="123:token",
+            auth_jwt_secret="a" * 32,
+            admin_password=" " * 16,
+        )
+
+
+def test_production_accepts_strong_admin_password() -> None:
+    """Accept a strong admin password in production."""
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        telegram_bot_token="123:token",
+        auth_jwt_secret="a" * 32,
+        admin_password="correct-horse-battery-staple",
+    )
+    assert settings.admin_enabled is True
+
+
+def test_admin_session_max_age_must_be_positive() -> None:
+    """Reject a non-positive admin session lifetime."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, admin_session_max_age_seconds=0)

@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     auth_refresh_cookie_secure: bool = True
     auth_refresh_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
 
+    admin_username: str = Field(default="admin", min_length=1)
+    admin_password: SecretStr | None = None
+    admin_session_max_age_seconds: int = Field(default=43_200, gt=0)
+
     @field_validator("database_url", "direct_database_url")
     @classmethod
     def validate_asyncpg_url(cls, value: str) -> str:
@@ -103,8 +107,8 @@ class Settings(BaseSettings):
 
         Raises:
             ValueError: If production enables debug, lacks a real Telegram bot
-                token or a strong JWT secret, or configures an insecure refresh
-                cookie.
+                token or a strong JWT secret, configures a weak admin password,
+                or configures an insecure refresh cookie.
         """
         if self.app_env == "production" and self.debug:
             raise ValueError("DEBUG must be false in production")
@@ -122,6 +126,10 @@ class Settings(BaseSettings):
             )
             if len(jwt_secret) < 32 or "change-me" in jwt_secret.lower():
                 raise ValueError("AUTH_JWT_SECRET must be a strong secret in production")
+            if self.admin_password is not None:
+                admin_password = self.admin_password.get_secret_value()
+                if len(admin_password.strip()) < 16 or "change-me" in admin_password.lower():
+                    raise ValueError("ADMIN_PASSWORD must be a strong password in production")
             if not self.auth_refresh_cookie_secure:
                 raise ValueError("AUTH_REFRESH_COOKIE_SECURE must be true in production")
             if self.auth_refresh_cookie_samesite == "none":
@@ -134,6 +142,15 @@ class Settings(BaseSettings):
         if self.enable_docs is not None:
             return self.enable_docs
         return self.app_env != "production"
+
+    @property
+    def admin_enabled(self) -> bool:
+        """Return whether the admin panel has all required credentials."""
+        if self.admin_password is None or self.auth_jwt_secret is None:
+            return False
+        return bool(self.admin_password.get_secret_value().strip()) and bool(
+            self.auth_jwt_secret.get_secret_value()
+        )
 
 
 @lru_cache
