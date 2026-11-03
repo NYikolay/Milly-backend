@@ -119,6 +119,9 @@ class AuthService:
         Notes:
             - The advisory lock serializes concurrent logins for one Telegram
               identity.
+            - Every other active session of the user is revoked in the same
+              transaction, so only the newly created refresh session remains
+              active.
             - Only the refresh-token hash is persisted; the raw token is
               returned to the caller only.
             - Does not commit; the request unit of work owns the transaction
@@ -145,6 +148,7 @@ class AuthService:
         else:
             await self._repository.update_profile(profile, data)
 
+        await self._repository.revoke_user_sessions(profile.user_id, now)
         refresh_token = generate_refresh_token()
         refresh_expires_at = now + timedelta(seconds=self._settings.auth_refresh_ttl_seconds)
         session = await self._repository.create_session(
@@ -199,6 +203,10 @@ class AuthService:
         Notes:
             - Only the SHA-256 hash of the refresh token is sent to the
               repository.
+            - The Telegram advisory lock serializes refresh with login and
+              prevents multiple active sessions for one user.
+            - An unknown token is rejected after the non-locking Telegram id
+              lookup without acquiring the lock or locking a session row.
             - Reuse outside grace and expiry revoke session state and commit
               before raising because the request unit of work would roll back.
             - Normal rotation revokes the old session and creates the new one
@@ -207,9 +215,14 @@ class AuthService:
               receive the generic message. Raw tokens are never logged.
         """
         self._require_configuration()
-        session = await self._repository.get_session_for_update(
-            hash_refresh_token(raw_refresh_token)
-        )
+        token_hash = hash_refresh_token(raw_refresh_token)
+        telegram_id = await self._repository.get_telegram_id_for_session(token_hash)
+        if telegram_id is None:
+            logger.warning("auth.refresh_rejected", reason="unknown")
+            raise UnauthorizedError(_INVALID_REFRESH_TOKEN)
+
+        await self._repository.acquire_telegram_lock(telegram_id)
+        session = await self._repository.get_session_for_update(token_hash)
         now = self._clock()
         if session is None:
             logger.warning("auth.refresh_rejected", reason="unknown")

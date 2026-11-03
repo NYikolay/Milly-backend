@@ -1,12 +1,59 @@
 # AGENTS.md
 
 Инженерные правила и факты проекта Milly backend для coding-агентов.
-Продуктовое описание — в `README.md`; в каталоге `backend/` он пока не создан, поэтому не выдумывай продуктовые детали.
+Продуктовое описание — в `README.md` в корне `backend/`; контракт ошибок API — в `README.md` и `docs/superpowers/specs/2026-11-02-api-error-standardization-design.md`.
 Здесь — только конвенции работы с кодом и актуальное состояние проекта.
 
 Обязательный процесс разработки — SOLID+KISS+TDD; докстринги обязательны и поддерживаются в актуальном состоянии.
 
-## 7. Докстринги
+## 1. Проверка изменений
+
+Перед завершением задачи обязательно выполни:
+
+```bash
+poetry run pytest -q
+poetry run ruff check .
+poetry run ruff format --check src tests
+poetry run mypy src tests
+graphify update .
+```
+
+Проект работает на Python 3.14, FastAPI 0.156.x, Pydantic 2.x и SQLAlchemy 2.x. Новые runtime/dev-зависимости не добавляй без явной необходимости.
+
+## 2. Границы слоёв
+
+- `src/backend/core/` — конфиг, логирование, общие middleware, реестр ошибок и исключения. `core.errors` не импортирует FastAPI/Starlette и не знает про HTTP.
+- `src/backend/api/` — FastAPI-слой: роуты, зависимости, Pydantic-схемы и транспорт ошибок. `api.errors` зависит от `core.errors` и FastAPI.
+- `src/backend/db/`, `src/backend/tasks/` — инфраструктура БД и Taskiq.
+- `src/backend/main.py` — только сборка приложения; бизнес-логику туда не добавляй.
+
+## 3. Ошибки API
+
+Все ошибки API используют единый плоский конверт:
+
+```json
+{"error": true, "code": "not_found", "message": "Resource not found", "description": "Запрошенный ресурс не найден", "details": null, "request_id": "..."}
+```
+
+- Все машинные коды — только через `ErrorCode` и `ERROR_SPECS` в `core/errors.py`; строковые коды в роутах запрещены.
+- Доменные ошибки поднимай через `AppError` или семантические подклассы. `HTTPException` допустим для HTTP-семантики, но его ответ всё равно проходит через общий маппер; для бизнес-ошибок используй `AppError`.
+- `message` — технический английский для логов; `description` — русский текст для клиента.
+- `request_id` всегда присутствует и совпадает с заголовком `X-Request-ID`.
+- `details` — только безопасные данные. Тела запросов, токены, пароли, SQL, stack trace и Pydantic `input`/`ctx`/`url` в ответ не попадают.
+- В production ответ 500 не содержит `details`; в debug допустимы тип и текст исключения.
+- Неизвестные маршруты, ошибки middleware, Host, readiness, SQLAlchemy и Taskiq должны проходить через общий рендерер ошибок.
+- Новые роутеры создавай через `StandardizedAPIRouter`, чтобы OpenAPI документировал `400`, `404`, `422`, `500`, `503`.
+- Порядок middleware не меняй без причины (изнутри наружу): `AllowedHosts` → `GZip` → `CORS` → `SecurityHeaders` → `BodySizeLimit` → `ErrorEnvelope` → `RequestContext`.
+- Отклонённый CORS preflight остаётся plain-text `400` от Starlette — это документированное исключение из конверта.
+
+## 4. Тесты ошибок
+
+- Поведение ошибок проверяй в `tests/test_errors.py`, `tests/test_error_mapping.py`, `tests/test_error_middleware.py` и `tests/test_error_validation.py`.
+- Для ошибок проверяй HTTP-статус, `code`, `description`, `request_id` и отсутствие утечек в `details`.
+- Для 5xx проверяй отсутствие `details` в production; debug-поведение покрывай отдельным тестом.
+- Новые коды ошибок и ветки маппинга должны иметь тест на точный статус и текст.
+
+## 5. Докстринги
 
 Докстринги обязательны для всех новых функций, методов и классов. **Докстринг поддерживается в актуальном состоянии**: при изменении сигнатуры, поведения или состава исключений функции обновляй её докстринг в том же изменении. Устаревший или неверный докстринг — такой же дефект, как падающий тест.
 
@@ -46,7 +93,7 @@ def calculate_order_total(items: list[dict], discount_percent: float = 0) -> flo
     """
 ```
 
-## 8. graphify
+## 6. graphify
 
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
 

@@ -142,6 +142,46 @@ class AuthRepository(Protocol):
         """
         ...
 
+    async def get_telegram_id_for_session(self, refresh_token_hash: str) -> int | None:
+        """
+        Resolve the Telegram identity owning a refresh-token session.
+
+        Purpose:
+            Read the Telegram id needed to acquire the login advisory lock
+            before locking the session row during refresh.
+
+        Args:
+            refresh_token_hash: SHA-256 hex digest of the raw refresh token.
+
+        Returns:
+            int | None: The Telegram id linked to the session user, or ``None``
+                when no session matches the hash.
+
+        Notes:
+            - Uses a non-locking SELECT joining sessions to Telegram profiles.
+        """
+        ...
+
+    async def revoke_user_sessions(self, user_id: int, revoked_at: datetime) -> None:
+        """
+        Revoke every active session of one user.
+
+        Purpose:
+            Enforce a single active refresh session per user on a new login.
+
+        Args:
+            user_id: Internal user identifier whose sessions are revoked.
+            revoked_at: Revocation timestamp.
+
+        Returns:
+            None: The change stays in the current unit of work.
+
+        Notes:
+            - Only sessions whose ``revoked_at`` is unset are updated.
+            - Does not commit; the caller owns the transaction boundary.
+        """
+        ...
+
     async def revoke_session(self, session: AuthSession, revoked_at: datetime) -> None:
         """
         Mark one session as revoked.
@@ -441,6 +481,58 @@ class SqlAlchemyAuthRepository:
             .with_for_update()
         )
         return result.scalar_one_or_none()
+
+    async def get_telegram_id_for_session(self, refresh_token_hash: str) -> int | None:
+        """
+        Resolve the Telegram identity owning a refresh-token session.
+
+        Purpose:
+            Read the Telegram id needed to acquire the login advisory lock
+            before locking the session row during refresh.
+
+        Args:
+            refresh_token_hash: SHA-256 hex digest of the raw refresh token.
+
+        Returns:
+            int | None: The Telegram id linked to the session user, or ``None``
+                when no session matches the hash.
+
+        Notes:
+            - Uses a non-locking SELECT joining sessions to Telegram profiles.
+        """
+        result = await self._session.execute(
+            select(TelegramProfile.telegram_id)
+            .join(AuthSession, AuthSession.user_id == TelegramProfile.user_id)
+            .where(AuthSession.refresh_token_hash == refresh_token_hash)
+        )
+        return result.scalar_one_or_none()
+
+    async def revoke_user_sessions(self, user_id: int, revoked_at: datetime) -> None:
+        """
+        Revoke every active session of one user.
+
+        Purpose:
+            Enforce a single active refresh session per user on a new login.
+
+        Args:
+            user_id: Internal user identifier whose sessions are revoked.
+            revoked_at: Revocation timestamp.
+
+        Returns:
+            None: The change stays in the current unit of work.
+
+        Notes:
+            - Only sessions whose ``revoked_at`` is unset are updated.
+            - Does not commit; the caller owns the transaction boundary.
+        """
+        await self._session.execute(
+            update(AuthSession)
+            .where(
+                AuthSession.user_id == user_id,
+                AuthSession.revoked_at.is_(None),
+            )
+            .values(revoked_at=revoked_at)
+        )
 
     async def revoke_session(self, session: AuthSession, revoked_at: datetime) -> None:
         """

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from fastapi import APIRouter
 from fastapi.routing import APIRoute
 
 from backend.api.errors.schemas import ErrorResponse
+from backend.core.errors import ErrorCode, get_error_spec
 
 ERROR_RESPONSES: dict[int, dict[str, object]] = {
     400: {"model": ErrorResponse, "description": "Bad Request"},
@@ -16,6 +18,56 @@ ERROR_RESPONSES: dict[int, dict[str, object]] = {
     500: {"model": ErrorResponse, "description": "Internal Server Error"},
     503: {"model": ErrorResponse, "description": "Service Unavailable"},
 }
+
+
+def document_errors(
+    errors: Mapping[ErrorCode, str],
+) -> dict[int | str, dict[str, Any]]:
+    """
+    Build OpenAPI responses for operation-specific error codes.
+
+    Purpose:
+        Document the concrete HTTP status and machine-readable code of every
+        error an operation can return, deriving the status from the error
+        registry so documentation cannot drift from runtime behavior.
+
+    Args:
+        errors: Mapping from an error code to an operation-specific English
+            explanation of when the operation returns it.
+
+    Returns:
+        dict[int | str, dict[str, Any]]: Response documentation keyed by HTTP
+            status, ready to pass to FastAPI's ``responses`` argument.
+
+    Raises:
+        KeyError: If a code has no registered specification.
+
+    Examples:
+        >>> responses = document_errors(
+        ...     {ErrorCode.FORBIDDEN: "The request origin is not allowed."}
+        ... )
+        >>> responses[403]["description"]
+        '- forbidden: The request origin is not allowed.'
+
+    Notes:
+        - Codes sharing one status are merged into a single response
+          description in mapping order.
+        - Passing the result as ``responses`` to a standardized route replaces
+          the generic description for the same status.
+    """
+    grouped: dict[int, list[str]] = {}
+    for code, description in errors.items():
+        spec = get_error_spec(code)
+        grouped.setdefault(spec.status_code, []).append(f"- {code.value}: {description}")
+
+    responses: dict[int | str, dict[str, Any]] = {
+        status: {
+            "model": ErrorResponse,
+            "description": "\n".join(descriptions),
+        }
+        for status, descriptions in grouped.items()
+    }
+    return responses
 
 
 class StandardizedAPIRoute(APIRoute):

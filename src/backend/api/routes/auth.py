@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import Request, Response, status
 
 from backend.api.deps import AuthServiceDep, CurrentUserDep
-from backend.api.errors.openapi import StandardizedAPIRouter
+from backend.api.errors.openapi import StandardizedAPIRouter, document_errors
 from backend.auth.cookies import (
     clear_refresh_cookie,
     set_refresh_cookie,
@@ -17,12 +17,28 @@ from backend.auth.schemas import (
     UserResponse,
 )
 from backend.core.config import Settings
-from backend.core.errors import UnauthorizedError
+from backend.core.errors import ErrorCode, UnauthorizedError
 
 router = StandardizedAPIRouter(prefix="/auth", tags=["auth"])
 
+_ORIGIN_FORBIDDEN = "The `Origin` header is neither the API origin nor an allowed CORS origin."
 
-@router.post("/telegram", response_model=AuthResponse)
+
+@router.post(
+    "/telegram",
+    response_model=AuthResponse,
+    responses=document_errors(
+        {
+            ErrorCode.FORBIDDEN: _ORIGIN_FORBIDDEN,
+            ErrorCode.AUTH_NOT_CONFIGURED: (
+                "The Telegram bot token or JWT secret is not configured."
+            ),
+            ErrorCode.UNAUTHORIZED: (
+                "The Telegram init data is invalid, stale, or belongs to a bot."
+            ),
+        }
+    ),
+)
 async def telegram_login(
     payload: TelegramAuthRequest,
     request: Request,
@@ -48,10 +64,11 @@ async def telegram_login(
             with the Telegram profile.
 
     Raises:
-        ForbiddenError: If the request origin is not allowed.
-        AuthNotConfiguredError: If authentication settings are missing.
-        UnauthorizedError: If the init data is invalid, stale, or belongs to a
-            bot.
+        ForbiddenError (HTTP 403): If the request origin is not allowed.
+        AuthNotConfiguredError (HTTP 503): If authentication settings are
+            missing.
+        UnauthorizedError (HTTP 401): If the init data is invalid, stale, or
+            belongs to a bot.
 
     Notes:
         - The refresh token is returned only as an HttpOnly cookie and never in
@@ -73,7 +90,19 @@ async def telegram_login(
     )
 
 
-@router.post("/refresh", response_model=TokenResponse)
+@router.post(
+    "/refresh",
+    response_model=TokenResponse,
+    responses=document_errors(
+        {
+            ErrorCode.FORBIDDEN: _ORIGIN_FORBIDDEN,
+            ErrorCode.UNAUTHORIZED: (
+                "The refresh cookie is missing, unknown, expired, revoked, or reused."
+            ),
+            ErrorCode.AUTH_NOT_CONFIGURED: "The JWT secret is not configured.",
+        }
+    ),
+)
 async def refresh_tokens(
     request: Request,
     response: Response,
@@ -96,12 +125,13 @@ async def refresh_tokens(
         TokenResponse: Newly issued access token and token metadata.
 
     Raises:
-        ForbiddenError: If the request origin is not allowed.
-        UnauthorizedError: If the refresh cookie is missing, unknown, expired,
-            revoked, or reused.
-        RefreshTokenGraceError: If a just-rotated token is reused within the
-            grace window; this is an ``UnauthorizedError`` subclass.
-        AuthNotConfiguredError: If authentication settings are missing.
+        ForbiddenError (HTTP 403): If the request origin is not allowed.
+        UnauthorizedError (HTTP 401): If the refresh cookie is missing,
+            unknown, expired, revoked, or reused.
+        RefreshTokenGraceError (HTTP 401): If a just-rotated token is reused
+            within the grace window; this is an ``UnauthorizedError`` subclass.
+        AuthNotConfiguredError (HTTP 503): If authentication settings are
+            missing.
 
     Notes:
         - Refresh errors propagate before the cookie is modified, so a failed
@@ -121,7 +151,11 @@ async def refresh_tokens(
     )
 
 
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+@router.post(
+    "/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses=document_errors({ErrorCode.FORBIDDEN: _ORIGIN_FORBIDDEN}),
+)
 async def logout(
     request: Request,
     response: Response,
@@ -143,7 +177,7 @@ async def logout(
         Response: Empty 204 response with the expiry cookie.
 
     Raises:
-        ForbiddenError: If the request origin is not allowed.
+        ForbiddenError (HTTP 403): If the request origin is not allowed.
 
     Notes:
         - Logout is idempotent and does not reveal whether the cookie existed.
@@ -158,7 +192,19 @@ async def logout(
     return response
 
 
-@router.get("/me", response_model=UserResponse)
+@router.get(
+    "/me",
+    response_model=UserResponse,
+    responses=document_errors(
+        {
+            ErrorCode.AUTH_NOT_CONFIGURED: "The JWT secret is not configured.",
+            ErrorCode.UNAUTHORIZED: (
+                "The bearer token is missing or invalid, the user no longer "
+                "exists, or the user has no Telegram profile."
+            ),
+        }
+    ),
+)
 async def read_current_user(user: CurrentUserDep) -> UserResponse:
     """
     Return the authenticated user with the Telegram profile.
@@ -174,8 +220,9 @@ async def read_current_user(user: CurrentUserDep) -> UserResponse:
         UserResponse: Public user fields and the Telegram profile.
 
     Raises:
-        AuthNotConfiguredError: If no JWT secret is configured.
-        UnauthorizedError: If the bearer token is missing or invalid, the user
-            no longer exists, or the user has no Telegram profile.
+        AuthNotConfiguredError (HTTP 503): If no JWT secret is configured.
+        UnauthorizedError (HTTP 401): If the bearer token is missing or
+            invalid, the user no longer exists, or the user has no Telegram
+            profile.
     """
     return UserResponse.model_validate(user)

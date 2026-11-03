@@ -53,7 +53,7 @@ curl -fsS http://localhost:8000/health/live
   `compose.override.yml`: API/worker/scheduler собираются из target `dev`,
   исходники и `alembic/` монтируются в контейнеры, API работает с
   `--reload`, включены `/docs`, console-логи и опубликованы порты
-  `8000`, `5432`, `6432`, `4222`, `8222`, `6379`.
+  `8000`, `5432`, `6432`, `4222`, `8222`, `6380` (Redis).
 - **Production-подобный** — `docker compose -f compose.yml up -d --build`.
   Используется только базовый файл: runtime-образ под non-root, docs
   отключены, логи JSON, наружу опубликован только `8000`. One-shot
@@ -152,7 +152,11 @@ origin`) до рендеринга ошибок. Это протокольный
 
 В OpenAPI для каждой операции документируется схема `ErrorResponse` для
 ответов `400`, `404`, `422`, `500` и `503`; для `422` больше не используется
-`HTTPValidationError`.
+`HTTPValidationError`. Если операция возвращает специфичные ошибки (`401`,
+`403`, `409`, `503` и т.п.), они документируются отдельно: статус берётся из
+`ERROR_SPECS`, а описание начинается с машинного `code` и поясняет, когда
+именно операция его возвращает. Например, для `POST /api/v1/auth/telegram`
+`403` описан как `forbidden`, а `503` — как `auth_not_configured`.
 
 ## Аутентификация Telegram Mini App
 
@@ -333,7 +337,8 @@ docker compose config --quiet
 - PostgreSQL: `POSTGRES_*`, `DATABASE_URL`, `DIRECT_DATABASE_URL`,
   `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_RECYCLE`, `SQL_ECHO`;
 - NATS/taskiq: `NATS_*`, `TASKIQ_RESULT_EX_TIME`, `TASKIQ_KEEP_RESULTS`;
-- Redis: `REDIS_URL`, `REDIS_PASSWORD`;
+- Redis: `REDIS_URL`, `REDIS_PASSWORD`, `REDIS_HOST_PORT` (host-порт dev
+  Compose, по умолчанию `6380`);
 - Telegram Mini App auth: `TELEGRAM_*`, `AUTH_*`;
 - `PROVIDER_BASE_URL`, `PROVIDER_API_KEY` — зарезервированы для будущих
   интеграций и текущим скелетом не используются.

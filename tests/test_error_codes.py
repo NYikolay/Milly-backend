@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from backend.auth.errors import AuthNotConfiguredError
-from backend.core.errors import ERROR_SPECS, ErrorCode, get_error_spec
+from backend.core.errors import (
+    ERROR_SPECS,
+    ErrorCode,
+    PayloadTooLargeError,
+    get_error_spec,
+)
 
 
 def test_every_error_code_has_exactly_one_spec() -> None:
@@ -36,6 +41,24 @@ def test_auth_not_configured_spec() -> None:
     assert spec.status_code == 503
     assert spec.message == "Authentication is not configured"
     assert spec.description == "Аутентификация не настроена"
+
+
+def test_payload_too_large_spec() -> None:
+    """Register the exact payload-too-large contract."""
+    spec = get_error_spec(ErrorCode.PAYLOAD_TOO_LARGE)
+    assert spec.status_code == 413
+    assert spec.message == "Payload too large"
+    assert spec.description == "Слишком большой запрос"
+
+
+def test_payload_too_large_error_uses_registered_spec() -> None:
+    """Build the semantic error from the registered specification."""
+    exc = PayloadTooLargeError()
+    spec = get_error_spec(exc.code)
+    assert exc.code is ErrorCode.PAYLOAD_TOO_LARGE
+    assert spec.status_code == 413
+    assert exc.message == spec.message
+    assert exc.description == spec.description
 
 
 def test_auth_not_configured_error_uses_registered_spec() -> None:

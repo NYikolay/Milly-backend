@@ -88,6 +88,7 @@ class FakeAuthRepository:
         profile: TelegramProfile | None = None,
         user: User | None = None,
         next_session_id: int = SESSION_ID,
+        session_telegram_id: int = 123,
     ) -> None:
         """Store prepared return values and initialize the call log."""
         self.events: list[tuple[str, object]] = []
@@ -96,6 +97,7 @@ class FakeAuthRepository:
         self.lock_ids: list[int] = []
         self.session_kwargs: dict[str, object] | None = None
         self.session: AuthSession | None = None
+        self.session_telegram_id = session_telegram_id
         self._next_session_id = next_session_id
 
     @property
@@ -165,6 +167,13 @@ class FakeAuthRepository:
         self.events.append(("get_session_for_update", refresh_token_hash))
         return self.session
 
+    async def get_telegram_id_for_session(self, refresh_token_hash: str) -> int | None:
+        """Record a non-locking Telegram identity lookup for a session hash."""
+        self.events.append(("get_telegram_id_for_session", refresh_token_hash))
+        if self.session is None:
+            return None
+        return self.session_telegram_id
+
     async def revoke_session(self, session: AuthSession, revoked_at: datetime) -> None:
         """Record a session revocation request."""
         self.events.append(("revoke_session", (session, revoked_at)))
@@ -172,6 +181,10 @@ class FakeAuthRepository:
     async def revoke_family(self, family_id: UUID, revoked_at: datetime) -> None:
         """Record a family revocation request."""
         self.events.append(("revoke_family", (family_id, revoked_at)))
+
+    async def revoke_user_sessions(self, user_id: int, revoked_at: datetime) -> None:
+        """Record a bulk revocation of every active session of a user."""
+        self.events.append(("revoke_user_sessions", (user_id, revoked_at)))
 
     async def revoke_session_and_commit(
         self,
@@ -228,6 +241,19 @@ async def test_login_acquires_telegram_lock() -> None:
     names = repository.call_names
     assert names.index("acquire_telegram_lock") < names.index("get_profile_by_telegram_id")
     assert repository.lock_ids == [123]
+
+
+async def test_login_revokes_user_sessions_before_creating_new_session() -> None:
+    """Revoke every active session of the user before creating the new one."""
+    _, profile = _user_and_profile()
+    repository = FakeAuthRepository(profile=profile)
+    service = AuthService(repository, _settings(), clock=clock)
+
+    result = await service.login(make_init_data())
+
+    assert ("revoke_user_sessions", (result.user.id, NOW)) in repository.events
+    names = repository.call_names
+    assert names.index("revoke_user_sessions") < names.index("create_session")
 
 
 async def test_login_creates_session_with_new_family() -> None:
@@ -363,6 +389,26 @@ async def test_refresh_rotates_tokens_and_family() -> None:
     assert result.refresh_expires_at == NOW + timedelta(seconds=settings.auth_refresh_ttl_seconds)
 
 
+async def test_refresh_locks_telegram_before_session_row() -> None:
+    """Look up the Telegram identity and lock it before locking the session row."""
+    repository = FakeAuthRepository(user=_user_and_profile()[0])
+    repository.session = _session()
+    service = AuthService(repository, _settings(), clock=clock)
+
+    await service.refresh("old-refresh-token")
+
+    assert repository.call_names[:3] == [
+        "get_telegram_id_for_session",
+        "acquire_telegram_lock",
+        "get_session_for_update",
+    ]
+    assert repository.events[0] == (
+        "get_telegram_id_for_session",
+        hash_refresh_token("old-refresh-token"),
+    )
+    assert repository.lock_ids == [123]
+
+
 async def test_refresh_rejects_unknown_token() -> None:
     """Reject a refresh token that has no stored session."""
     repository = FakeAuthRepository()
@@ -372,7 +418,8 @@ async def test_refresh_rejects_unknown_token() -> None:
         await service.refresh("unknown-refresh-token")
 
     assert str(exc_info.value) == "Invalid refresh token"
-    assert repository.call_names == ["get_session_for_update"]
+    assert repository.call_names == ["get_telegram_id_for_session"]
+    assert repository.lock_ids == []
 
 
 async def test_refresh_rejects_expired_and_revokes() -> None:

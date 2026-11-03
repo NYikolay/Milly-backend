@@ -158,6 +158,35 @@ async def test_login_does_not_return_refresh_in_body(auth_client: AsyncClient) -
     assert "refresh-token" in response.headers["set-cookie"]
 
 
+async def test_login_rejects_oversized_init_data(
+    auth_client: AsyncClient,
+    fake_service: FakeAuthService,
+) -> None:
+    """Reject init data longer than 8192 characters before calling the service."""
+    response = await auth_client.post(
+        "/api/v1/auth/telegram",
+        json={"init_data": "x" * 8193},
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "validation_error"
+    assert body["details"]["fields"][0]["field"] == "body.init_data"
+    assert fake_service.login_calls == 0
+
+
+async def test_login_accepts_init_data_at_max_length(
+    auth_client: AsyncClient,
+    fake_service: FakeAuthService,
+) -> None:
+    """Accept init data of exactly 8192 characters."""
+    response = await auth_client.post(
+        "/api/v1/auth/telegram",
+        json={"init_data": "x" * 8192},
+    )
+    assert response.status_code == 200
+    assert fake_service.login_calls == 1
+
+
 async def test_login_invalid_init_data_returns_401(
     auth_client: AsyncClient,
     fake_service: FakeAuthService,

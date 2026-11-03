@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     log_json: bool = True
     cors_origins: list[str] = []
     allowed_hosts: list[str] = ["*"]
+    max_request_body_bytes: int = Field(default=1_048_576, gt=0)
+    rate_limit_enabled: bool = True
+    rate_limit_requests: int = Field(default=60, gt=0)
+    rate_limit_window_seconds: int = Field(default=60, gt=0)
 
     database_url: str = "postgresql+asyncpg://milly:milly@localhost:6432/milly"
     direct_database_url: str = "postgresql+asyncpg://milly:milly@localhost:5432/milly"

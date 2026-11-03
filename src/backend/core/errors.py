@@ -295,6 +295,12 @@ class ConflictError(SemanticAppError):
     _code = ErrorCode.CONFLICT
 
 
+class PayloadTooLargeError(SemanticAppError):
+    """Raised when a request body exceeds the configured size limit."""
+
+    _code = ErrorCode.PAYLOAD_TOO_LARGE
+
+
 class RateLimitedError(SemanticAppError):
     """Raised when a caller exceeds an allowed request rate."""
 

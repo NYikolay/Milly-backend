@@ -2,14 +2,21 @@ from __future__ import annotations
 
 from fastapi import status
 
-from backend.api.errors.openapi import StandardizedAPIRouter
+from backend.api.errors.openapi import StandardizedAPIRouter, document_errors
 from backend.api.schemas import TaskEnqueuedResponse
+from backend.core.errors import ErrorCode
 from backend.tasks.example import ping
 
 router = StandardizedAPIRouter(prefix="/tasks", tags=["tasks"])
 
 
-@router.post("/ping", status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/ping",
+    status_code=status.HTTP_202_ACCEPTED,
+    responses=document_errors(
+        {ErrorCode.TASK_ENQUEUE_FAILED: "The broker failed to enqueue the ping task."}
+    ),
+)
 async def enqueue_ping() -> TaskEnqueuedResponse:
     """
     Enqueue the ping task and return its task ID.

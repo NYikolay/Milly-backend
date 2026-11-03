@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from backend.api.deps import DatabaseProbeDep
-from backend.api.errors.openapi import StandardizedAPIRouter
+from backend.api.errors.openapi import StandardizedAPIRouter, document_errors
 from backend.api.schemas import HealthResponse
 from backend.core.errors import AppError, ErrorCode
 
@@ -26,7 +26,13 @@ async def live() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@router.get("/ready", response_model=HealthResponse)
+@router.get(
+    "/ready",
+    response_model=HealthResponse,
+    responses=document_errors(
+        {ErrorCode.DATABASE_UNAVAILABLE: "The database readiness probe failed."}
+    ),
+)
 async def ready(probe: DatabaseProbeDep) -> HealthResponse:
     """
     Report readiness by probing the database.

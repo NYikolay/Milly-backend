@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class TelegramAuthRequest(BaseModel):
     """Telegram Mini App login request carrying raw init data."""
 
-    init_data: str = Field(min_length=1)
+    init_data: str = Field(min_length=1, max_length=8192)
 
 
 class TelegramProfileResponse(BaseModel):

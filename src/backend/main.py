@@ -20,7 +20,12 @@ from backend.api.router import api_router
 from backend.api.routes import health
 from backend.core.config import Settings, get_settings
 from backend.core.logging import configure_logging
-from backend.core.middleware import RequestContextMiddleware, SecurityHeadersMiddleware
+from backend.core.middleware import (
+    BodySizeLimitMiddleware,
+    RateLimitMiddleware,
+    RequestContextMiddleware,
+    SecurityHeadersMiddleware,
+)
 from backend.db.session import Database
 
 
@@ -145,6 +150,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             expose_headers=["X-Request-ID"],
         )
     app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(
+        BodySizeLimitMiddleware,
+        max_body_bytes=settings.max_request_body_bytes,
+    )
+    if settings.rate_limit_enabled:
+        app.add_middleware(
+            RateLimitMiddleware,
+            max_requests=settings.rate_limit_requests,
+            window_seconds=settings.rate_limit_window_seconds,
+        )
     app.add_middleware(ErrorEnvelopeMiddleware, settings=settings)
     app.add_middleware(RequestContextMiddleware)
 
