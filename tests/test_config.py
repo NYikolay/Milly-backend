@@ -271,3 +271,80 @@ def test_admin_session_max_age_must_be_positive() -> None:
     """Reject a non-positive admin session lifetime."""
     with pytest.raises(ValidationError):
         Settings(_env_file=None, admin_session_max_age_seconds=0)
+
+
+def test_admin_session_max_age_rejects_negative_value() -> None:
+    """Reject a negative admin session lifetime."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, admin_session_max_age_seconds=-1)
+
+
+def test_admin_username_must_not_be_empty() -> None:
+    """Reject an empty admin username."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, admin_username="")
+
+
+def test_explicit_empty_admin_password_keeps_admin_disabled() -> None:
+    """Treat an explicitly empty ADMIN_PASSWORD as not configured."""
+    settings = Settings(
+        _env_file=None,
+        admin_password="",
+        auth_jwt_secret="a" * 32,
+    )
+    assert settings.admin_enabled is False
+
+
+def test_production_rejects_whitespace_jwt_secret() -> None:
+    """Reject a whitespace-only JWT secret in production."""
+    with pytest.raises(
+        ValidationError,
+        match="AUTH_JWT_SECRET must be a strong secret in production",
+    ):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            telegram_bot_token="123:token",
+            auth_jwt_secret=" " * 32,
+        )
+
+
+def test_production_validation_hides_secrets_on_weak_admin_password() -> None:
+    """Keep configured secrets out of errors for a weak admin password."""
+    admin_password = "leaky-admin-pw"
+    jwt_secret = "j" * 32
+    telegram_token = "123:telegram-secret-token"
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            _env_file=None,
+            app_env="production",
+            telegram_bot_token=telegram_token,
+            auth_jwt_secret=jwt_secret,
+            admin_password=admin_password,
+        )
+    message = str(exc_info.value)
+    assert "ADMIN_PASSWORD must be a strong password in production" in message
+    assert admin_password not in message
+    assert jwt_secret not in message
+    assert telegram_token not in message
+
+
+def test_production_validation_hides_secrets_on_unrelated_failure() -> None:
+    """Keep configured secrets out of errors for an insecure refresh cookie."""
+    admin_password = "leaky-admin-password"
+    jwt_secret = "j" * 32
+    telegram_token = "123:telegram-secret-token"
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            _env_file=None,
+            app_env="production",
+            telegram_bot_token=telegram_token,
+            auth_jwt_secret=jwt_secret,
+            admin_password=admin_password,
+            auth_refresh_cookie_secure=False,
+        )
+    message = str(exc_info.value)
+    assert "AUTH_REFRESH_COOKIE_SECURE must be true in production" in message
+    assert admin_password not in message
+    assert jwt_secret not in message
+    assert telegram_token not in message

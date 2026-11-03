@@ -63,6 +63,52 @@ def test_admin_is_disabled_without_jwt_secret() -> None:
     assert app.state.admin is None
 
 
+class RecordingLogger:
+    """Minimal structlog-compatible logger recording calls."""
+
+    def __init__(self) -> None:
+        """Initialize the recorded call list."""
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def info(self, event: str, **kwargs: Any) -> None:
+        """Record an informational event."""
+        self.calls.append(("info", event, kwargs))
+
+    def warning(self, event: str, **kwargs: Any) -> None:
+        """Record a warning event."""
+        self.calls.append(("warning", event, kwargs))
+
+
+def test_admin_disabled_without_password_logs_info(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Log an informational reason when the password is not configured."""
+    recorder = RecordingLogger()
+    monkeypatch.setattr("backend.admin.setup.logger", recorder)
+    create_app(Settings(_env_file=None, auth_jwt_secret=JWT_SECRET, log_json=False))
+    disabled = [call for call in recorder.calls if call[1] == "admin.disabled"]
+    assert disabled[-1][0] == "info"
+    assert "ADMIN_PASSWORD" in disabled[-1][2]["reason"]
+
+
+def test_admin_disabled_without_jwt_secret_logs_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warn when the password is configured but the session secret is missing."""
+    recorder = RecordingLogger()
+    monkeypatch.setattr("backend.admin.setup.logger", recorder)
+    create_app(
+        Settings(
+            _env_file=None,
+            admin_password=ADMIN_PASSWORD,
+            log_json=False,
+        )
+    )
+    disabled = [call for call in recorder.calls if call[1] == "admin.disabled"]
+    assert disabled[-1][0] == "warning"
+    assert "AUTH_JWT_SECRET" in disabled[-1][2]["reason"]
+
+
 def test_create_app_exposes_database_before_lifespan(app: FastAPI) -> None:
     """Create the shared database instance during application assembly."""
     assert app.state.db is not None

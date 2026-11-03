@@ -273,6 +273,8 @@ SQLAdmin доступна по `/admin` и включается, когда од
   JSON API это не затрагивает.
 - Rate limiting и остальные общие middleware применяются к `/admin` как к
   обычному маршруту.
+- Docker Compose передаёт `ADMIN_*` из `.env`; пустой `ADMIN_PASSWORD`
+  оставляет `/admin` выключенной.
 
 ## Миграции
 

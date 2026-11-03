@@ -304,6 +304,14 @@ async def test_me_returns_user(
     assert response.json()["telegram_profile"]["telegram_id"] == 123
 
 
+class ExplodingDatabase:
+    """Database double that fails when any session is opened."""
+
+    def session(self) -> None:
+        """Raise immediately when the route tries to open a session."""
+        raise AssertionError("protected route must not open a database session")
+
+
 async def test_protected_route_uses_access_claims_without_session(
     auth_app: FastAPI,
     auth_client: AsyncClient,
@@ -316,7 +324,7 @@ async def test_protected_route_uses_access_claims_without_session(
         return {"user_id": claims.user_id}
 
     auth_app.add_api_route("/_test/protected", protected, methods=["GET"])
-    assert auth_app.state.db is not None
+    auth_app.state.db = ExplodingDatabase()
     response = await auth_client.get("/_test/protected")
     assert response.status_code == 200
     assert response.json() == {"user_id": 1}

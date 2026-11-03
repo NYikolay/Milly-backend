@@ -10,6 +10,22 @@ from backend.core.config import Settings
 from backend.main import create_app
 
 
+@pytest.fixture(autouse=True)
+def isolated_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear ambient application environment variables for test isolation."""
+    for name in (
+        "ADMIN_USERNAME",
+        "ADMIN_PASSWORD",
+        "ADMIN_SESSION_MAX_AGE_SECONDS",
+        "AUTH_JWT_SECRET",
+        "APP_ENV",
+        "DEBUG",
+        "AUTH_REFRESH_COOKIE_SECURE",
+        "TELEGRAM_BOT_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def settings() -> Settings:
     """Build settings without reading a local .env file."""

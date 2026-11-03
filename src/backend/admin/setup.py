@@ -34,16 +34,24 @@ def setup_admin(
             panel is disabled.
 
     Notes:
-        - A missing or whitespace-only ``ADMIN_PASSWORD`` disables the panel.
-        - ``AUTH_JWT_SECRET`` is required because it signs the session cookie.
+        - A missing or whitespace-only ``ADMIN_PASSWORD`` disables the panel
+          and is logged at ``info``.
+        - ``AUTH_JWT_SECRET`` is required because it signs the session cookie;
+          when only it is missing, ``admin.disabled`` is logged at ``warning``.
         - No secret values are logged.
     """
     admin_password = settings.admin_password
     auth_jwt_secret = settings.auth_jwt_secret
-    if not settings.admin_enabled or admin_password is None or auth_jwt_secret is None:
+    if admin_password is None or not admin_password.get_secret_value().strip():
         logger.info(
             "admin.disabled",
-            reason="ADMIN_PASSWORD or AUTH_JWT_SECRET is not set",
+            reason="ADMIN_PASSWORD is missing or whitespace-only",
+        )
+        return None
+    if auth_jwt_secret is None or not auth_jwt_secret.get_secret_value():
+        logger.warning(
+            "admin.disabled",
+            reason="ADMIN_PASSWORD is set but AUTH_JWT_SECRET is missing or empty",
         )
         return None
 

@@ -62,6 +62,13 @@ def test_auth_session_view_hides_refresh_token_hash() -> None:
     assert "family_id" in _column_keys(AuthSessionAdmin.column_searchable_list)
 
 
+def test_views_include_primary_keys_in_forms() -> None:
+    """Keep explicit form_include_pk enabled on every model view."""
+    assert UserAdmin.form_include_pk is True
+    assert TelegramProfileAdmin.form_include_pk is True
+    assert AuthSessionAdmin.form_include_pk is True
+
+
 def test_views_register_on_admin() -> None:
     """Register all three views with stable identities."""
     admin = Admin(app=Starlette(), engine=None)
@@ -95,6 +102,7 @@ async def test_forms_include_foreign_keys_without_primary_keys() -> None:
     session_form = await session_view.scaffold_form()
     session_fields = session_form()._fields
     assert "user_id" in session_fields
+    assert "refresh_token_hash" in session_fields
     assert "id" not in session_fields
 
     user_view = next(view for view in admin.views if view.identity == "user")

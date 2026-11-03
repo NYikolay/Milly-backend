@@ -15,6 +15,7 @@ class Settings(BaseSettings):
         env_ignore_empty=True,
         extra="ignore",
         case_sensitive=False,
+        hide_input_in_errors=True,
     )
 
     app_name: str = "Milly API"
@@ -124,7 +125,7 @@ class Settings(BaseSettings):
             jwt_secret = (
                 self.auth_jwt_secret.get_secret_value() if self.auth_jwt_secret is not None else ""
             )
-            if len(jwt_secret) < 32 or "change-me" in jwt_secret.lower():
+            if len(jwt_secret.strip()) < 32 or "change-me" in jwt_secret.lower():
                 raise ValueError("AUTH_JWT_SECRET must be a strong secret in production")
             if self.admin_password is not None:
                 admin_password = self.admin_password.get_secret_value()

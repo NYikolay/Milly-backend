@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 from urllib.parse import urlencode
 
 from pydantic import SecretStr
@@ -61,6 +63,23 @@ async def test_login_accepts_valid_credentials() -> None:
     request = _request(form={"username": "admin", "password": "correct-horse-battery"})
     assert await auth.login(request) is True
     assert await auth.authenticate(request) is True
+
+
+async def test_login_stores_only_password_fingerprint() -> None:
+    """Store the HMAC-SHA256 fingerprint instead of the raw password."""
+    auth = _auth()
+    request = _request(form={"username": "admin", "password": "correct-horse-battery"})
+    assert await auth.login(request) is True
+    expected_fingerprint = hmac.new(
+        b"a" * 32,
+        b"admin:correct-horse-battery",
+        hashlib.sha256,
+    ).hexdigest()
+    fingerprint = request.session["authenticated"]
+    assert fingerprint == expected_fingerprint
+    assert fingerprint != "correct-horse-battery"
+    assert len(fingerprint) == 64
+    assert all(character in "0123456789abcdef" for character in fingerprint)
 
 
 async def test_login_rejects_wrong_username_or_password() -> None:
