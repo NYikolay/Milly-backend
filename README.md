@@ -16,6 +16,7 @@ backend/
 │   │   ├── errors/          # схемы, нормализация валидации, маппинг,
 │   │   │                    # обработчики, middleware, OpenAPI-класс роутов
 │   │   └── routes/          # health.py, tasks.py, auth.py
+│   ├── admin/               # SQLAdmin: вьюхи, вход, монтирование
 │   ├── auth/                # initData, JWT, refresh-сессии и cookie
 │   ├── core/                # настройки, логирование, middleware
 │   │   └── errors.py        # коды ошибок и исключения
@@ -249,6 +250,30 @@ forwarded-заголовкам и соответствующая настрой�
 `AUTH_REFRESH_COOKIE_SAMESITE=none`. Реальные значения не коммитятся: их
 задают через окружение или secret manager.
 
+## Админка
+
+SQLAdmin доступна по `/admin` и включается, когда одновременно заданы
+непустой `ADMIN_PASSWORD` и `AUTH_JWT_SECRET`; иначе `/admin` отвечает
+стандартным JSON `404`, а приложение работает как обычно.
+
+- Вход: `ADMIN_USERNAME` (по умолчанию `admin`) и `ADMIN_PASSWORD`;
+  пароль сравнивается за постоянное время.
+- Сессия: HttpOnly-cookie `milly_admin_session` с `SameSite=Lax`,
+  `Path=/admin`, TTL `ADMIN_SESSION_MAX_AGE_SECONDS` (12 часов) и
+  `Secure=AUTH_REFRESH_COOKIE_SECURE`.
+- Cookie подписывается `AUTH_JWT_SECRET`; смена `ADMIN_PASSWORD`
+  инвалидирует старые сессии.
+- Доступны CRUD, поиск, сортировка и базовые фильтры для `User`,
+  `TelegramProfile` и `AuthSession`. `refresh_token_hash` не показывается
+  в списке и деталях.
+- В production `ADMIN_PASSWORD` при включённой админке должен быть не
+  короче 16 символов и не содержать `change-me`.
+- `/admin` — HTML-интерфейс. Ошибка логина и необработанные ошибки
+  SQLAdmin отдаются HTML/plain-text, а не в JSON-конверте; публичный
+  JSON API это не затрагивает.
+- Rate limiting и остальные общие middleware применяются к `/admin` как к
+  обычному маршруту.
+
 ## Миграции
 
 Приложение ходит в PostgreSQL через PgBouncer (`DATABASE_URL`), а Alembic —
@@ -340,6 +365,8 @@ docker compose config --quiet
 - Redis: `REDIS_URL`, `REDIS_PASSWORD`, `REDIS_HOST_PORT` (host-порт dev
   Compose, по умолчанию `6380`);
 - Telegram Mini App auth: `TELEGRAM_*`, `AUTH_*`;
+- админка: `ADMIN_USERNAME`, `ADMIN_PASSWORD`,
+  `ADMIN_SESSION_MAX_AGE_SECONDS`;
 - `PROVIDER_BASE_URL`, `PROVIDER_API_KEY` — зарезервированы для будущих
   интеграций и текущим скелетом не используются.
 

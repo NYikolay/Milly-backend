@@ -304,7 +304,7 @@ async def test_me_returns_user(
     assert response.json()["telegram_profile"]["telegram_id"] == 123
 
 
-async def test_protected_route_uses_access_claims_without_db(
+async def test_protected_route_uses_access_claims_without_session(
     auth_app: FastAPI,
     auth_client: AsyncClient,
 ) -> None:
@@ -316,7 +316,7 @@ async def test_protected_route_uses_access_claims_without_db(
         return {"user_id": claims.user_id}
 
     auth_app.add_api_route("/_test/protected", protected, methods=["GET"])
-    assert not hasattr(auth_app.state, "db")
+    assert auth_app.state.db is not None
     response = await auth_client.get("/_test/protected")
     assert response.status_code == 200
     assert response.json() == {"user_id": 1}

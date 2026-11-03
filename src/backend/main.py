@@ -11,6 +11,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from taskiq import AsyncBroker
 
+from backend.admin.setup import setup_admin
 from backend.api.errors.handlers import register_exception_handlers
 from backend.api.errors.middleware import (
     AllowedHostsMiddleware,
@@ -57,28 +58,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Manage application startup and shutdown resources.
 
     Purpose:
-        Create the process-wide database, start the task broker, and release
-        both when the application stops.
+        Start the task broker and release it together with the shared database
+        when the application stops.
 
     Args:
-        app: Application whose state receives the database instance.
+        app: Application whose state provides the database instance created
+            during assembly.
 
     Yields:
         None: Control returns to the server while the application runs.
 
     Notes:
-        - ``app.state.settings`` is set by ``create_app`` before startup.
+        - ``app.state.settings`` and ``app.state.db`` are set by ``create_app``
+          before startup; the database is created during application assembly,
+          not by the lifespan.
         - The broker singleton is created when ``backend.tasks.broker`` is
           imported; the API router imports example tasks at module import. The
           lifespan only starts and shuts it down.
-        - The database is created when the lifespan runs.
         - Unit tests using the ASGI transport without a lifespan neither start
-          the broker nor create a database.
+          the broker nor dispose the database.
         - The database is disposed even if broker shutdown fails.
     """
-    settings: Settings = app.state.settings
-    database = Database(settings)
-    app.state.db = database
+    database: Database = app.state.db
     broker = cast(
         AsyncBroker,
         importlib.import_module("backend.tasks.broker").broker,
@@ -100,7 +101,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     Purpose:
         Assemble the application factory with logging, middleware, exception
-        handlers, health routes, and the versioned API router.
+        handlers, health routes, the versioned API router, the shared database,
+        and the optional SQLAdmin panel.
 
     Args:
         settings: Optional settings; environment-backed settings are used when
@@ -115,10 +117,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     Notes:
         - ``app.state.settings`` is populated eagerly so exception handlers can
           read the debug flag without relying on the lifespan.
+        - ``app.state.db`` is created during application assembly and disposed
+          by the lifespan.
+        - The admin panel is mounted only when both ``ADMIN_PASSWORD`` and
+          ``AUTH_JWT_SECRET`` are configured; otherwise ``app.state.admin`` is
+          ``None`` and ``/admin`` keeps the public JSON 404.
         - The broker singleton is created when ``backend.tasks.broker`` is
           imported, which happens while this module loads the API router; the
           lifespan only starts and shuts it down.
-        - The database is created when the lifespan runs.
         - Middleware is added innermost first, so ``RequestContextMiddleware``
           remains the outermost layer with ``ErrorEnvelopeMiddleware`` directly
           inside it.
@@ -136,6 +142,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+
+    database = Database(settings)
+    app.state.db = database
 
     if settings.allowed_hosts != ["*"]:
         app.add_middleware(AllowedHostsMiddleware, allowed_hosts=settings.allowed_hosts)
@@ -167,6 +176,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(api_router, prefix=settings.api_v1_str)
+    app.state.admin = setup_admin(app, database, settings)
     return app
 
 
