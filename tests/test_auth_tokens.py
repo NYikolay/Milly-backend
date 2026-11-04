@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -18,6 +20,7 @@ from backend.core.errors import UnauthorizedError
 
 NOW = datetime(2026, 11, 2, 12, 0, tzinfo=UTC)
 SECRET = "a" * 32
+REQUIRED_CLAIMS = ("exp", "iat", "iss", "sub", "sid", "telegram_id", "jti", "type")
 
 
 def _settings(**overrides: Any) -> Settings:
@@ -30,7 +33,11 @@ def _settings(**overrides: Any) -> Settings:
     )
 
 
-def _token_with(payload_overrides: dict[str, object]) -> str:
+def _token_with(
+    payload_overrides: dict[str, object],
+    *,
+    omit: tuple[str, ...] = (),
+) -> str:
     """Encode an HS256 token with the standard access-token payload."""
     payload: dict[str, object] = {
         "sub": "1",
@@ -42,8 +49,43 @@ def _token_with(payload_overrides: dict[str, object]) -> str:
         "exp": int((NOW + timedelta(seconds=900)).timestamp()),
         "iss": "milly",
     }
+    for claim in omit:
+        payload.pop(claim, None)
     payload.update(payload_overrides)
     return jwt.encode(payload, SECRET, algorithm="HS256")
+
+
+def _token_with_header(header: dict[str, object], signature: str) -> str:
+    """
+    Build an unsigned token with a caller-controlled JOSE header.
+
+    Purpose:
+        Model algorithm-confusion attacks without requiring an RSA key.
+
+    Args:
+        header: JOSE header including the attacker-chosen ``alg``.
+        signature: Raw third JWT segment.
+
+    Returns:
+        str: Encoded token with the standard access-token payload.
+    """
+    payload: dict[str, object] = {
+        "sub": "1",
+        "sid": "2",
+        "telegram_id": 3,
+        "jti": "j",
+        "type": "access",
+        "iat": int(NOW.timestamp()),
+        "exp": int((NOW + timedelta(seconds=900)).timestamp()),
+        "iss": "milly",
+    }
+
+    def encode(value: dict[str, object]) -> str:
+        """Encode one JWT segment as unpadded base64url."""
+        raw = json.dumps(value, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    return f"{encode(header)}.{encode(payload)}.{signature}"
 
 
 def test_access_token_round_trip() -> None:
@@ -115,6 +157,80 @@ def test_decode_rejects_malformed_sub() -> None:
     """Reject a token whose subject is not an integer."""
     with pytest.raises(UnauthorizedError):
         decode_access_token(_token_with({"sub": "not-an-int"}), settings=_settings(), now=NOW)
+
+
+@pytest.mark.parametrize("claim", REQUIRED_CLAIMS)
+def test_decode_rejects_missing_required_claim(claim: str) -> None:
+    """Reject a token that omits any required access claim."""
+    token = _token_with({}, omit=(claim,))
+
+    with pytest.raises(UnauthorizedError):
+        decode_access_token(token, settings=_settings(), now=NOW)
+
+
+@pytest.mark.parametrize(
+    ("claim", "value"),
+    [
+        ("sid", "not-an-int"),
+        ("sid", [1]),
+        ("sid", None),
+        ("telegram_id", "not-an-int"),
+        ("telegram_id", {"id": 3}),
+        ("telegram_id", 3.5),
+        ("jti", 123),
+        ("jti", ""),
+        ("jti", None),
+    ],
+)
+def test_decode_rejects_invalid_identity_claim_types(
+    claim: str,
+    value: object,
+) -> None:
+    """Reject non-integer session/Telegram claims and non-string JWT ids."""
+    token = _token_with({claim: value})
+
+    with pytest.raises(UnauthorizedError):
+        decode_access_token(token, settings=_settings(), now=NOW)
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "signature"),
+    [
+        ("none", ""),
+        ("RS256", "c2lnbmF0dXJl"),
+    ],
+)
+def test_decode_rejects_unexpected_algorithms(
+    algorithm: str,
+    signature: str,
+) -> None:
+    """Reject tokens that use an algorithm other than the configured HS256."""
+    token = _token_with_header({"alg": algorithm, "typ": "JWT"}, signature)
+
+    with pytest.raises(UnauthorizedError):
+        decode_access_token(token, settings=_settings(), now=NOW)
+
+
+@pytest.mark.parametrize(
+    ("claim", "value"),
+    [
+        ("iat", "not-a-number"),
+        ("iat", None),
+        ("iat", 10**30),
+        ("exp", "not-a-number"),
+        ("exp", None),
+        ("exp", 10**30),
+    ],
+)
+def test_decode_rejects_non_numeric_and_overflowing_timestamps(
+    claim: str,
+    value: object,
+) -> None:
+    """Reject NumericDate claims that are not finite representable timestamps."""
+    token = _token_with({claim: value})
+
+    with pytest.raises(UnauthorizedError):
+        decode_access_token(token, settings=_settings(), now=NOW)
 
 
 def test_create_requires_jwt_secret() -> None:

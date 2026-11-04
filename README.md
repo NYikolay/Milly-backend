@@ -319,6 +319,17 @@ PATCH /api/v1/auth/me/timezone
 параметры передаются несколько раз, например
 `?project_ids=1&project_ids=2&priorities=urgent_important`.
 
+### Пагинация
+
+`GET /api/v1/tasks` и `GET /api/v1/projects` возвращают страницу в формате
+`{"items": [...], "next_cursor": "<opaque>"}`. По умолчанию `limit=50`,
+максимум — `100`. Если `next_cursor` не `null`, передайте его в параметр
+`cursor` вместе с теми же фильтрами, что и на предыдущей странице:
+`include_archived` для проектов и `date`, `project_ids`, `priorities`,
+`status`, `recurrence`, `q`, `include_archived_projects` для задач. Курсор
+привязан к пользователю и набору фильтров; изменение фильтров делает его
+недействительным (`400`).
+
 Завершение экземпляра серии останавливает напоминания только этого экземпляра
 и не завершает серию. `PATCH` экземпляра серии применяет изменения к серии и её
 будущим незавершённым экземплярам; `DELETE` экземпляра удаляет серию по
@@ -470,6 +481,12 @@ poetry run pytest -q
 poetry run ruff check .
 poetry run ruff format --check src tests
 poetry run mypy src tests
+```
+
+Покрытие кода измеряется локально и не имеет обязательного порога:
+
+```bash
+poetry run pytest --cov=backend --cov-report=term-missing
 ```
 
 Тесты unit-уровня и не требуют PostgreSQL, NATS или Redis. Дополнительно

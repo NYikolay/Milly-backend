@@ -968,3 +968,107 @@ async def test_list_tasks_batch_methods_filter_by_user_and_ids() -> None:
     assert "projects.user_id = 7" in projects_sql
     assert "projects.deleted_at IS NULL" in projects_sql
     assert "projects.id IN (5, 6)" in projects_sql
+
+
+async def test_get_task_and_series_are_tenant_scoped_and_lockable() -> None:
+    """Task and series lookups filter by owner and lock rows on demand."""
+    session = RecordingSession()
+    repository = make_repository(session)
+
+    await repository.get_task(USER_ID, 11)
+    task_sql = compile_statement(session.statements[-1])
+
+    await repository.get_task(USER_ID, 11, for_update=True)
+    locked_task_sql = compile_statement(session.statements[-1])
+
+    await repository.get_series(USER_ID, 3)
+    series_sql = compile_statement(session.statements[-1])
+
+    await repository.get_series(USER_ID, 3, for_update=True)
+    locked_series_sql = compile_statement(session.statements[-1])
+
+    assert "tasks.id = 11" in task_sql
+    assert "tasks.user_id = 7" in task_sql
+    assert "tasks.deleted_at IS NULL" in task_sql
+    assert "FOR UPDATE" not in task_sql
+    assert "FOR UPDATE" in locked_task_sql
+    assert "task_series.id = 3" in series_sql
+    assert "task_series.user_id = 7" in series_sql
+    assert "task_series.deleted_at IS NULL" in series_sql
+    assert "FOR UPDATE" not in series_sql
+    assert "FOR UPDATE" in locked_series_sql
+
+
+async def test_list_tasks_and_series_are_tenant_scoped() -> None:
+    """Task and series listings always filter by the owning user."""
+    session = RecordingSession()
+    repository = make_repository(session)
+
+    await repository.list_tasks(
+        USER_ID,
+        date_start=None,
+        date_end=None,
+        project_ids=(),
+        priorities=(),
+        status="all",
+        recurrence="all",
+        query=None,
+        include_archived_projects=False,
+        now=NOW,
+        limit=50,
+        after_due_at=None,
+        after_task_id=None,
+    )
+    tasks_sql = compile_statement(session.statements[-1])
+
+    await repository.list_series(USER_ID)
+    series_sql = compile_statement(session.statements[-1])
+
+    assert "tasks.user_id = 7" in tasks_sql
+    assert "tasks.deleted_at IS NULL" in tasks_sql
+    assert "LIMIT 50" in tasks_sql
+    assert "task_series.user_id = 7" in series_sql
+    assert "task_series.deleted_at IS NULL" in series_sql
+
+
+async def test_soft_delete_task_marks_only_the_scoped_task() -> None:
+    """Soft deletion mutates only the already owner-scoped task instance."""
+    session = RecordingSession()
+    repository = make_repository(session)
+    task = make_task(task_id=4, user_id=USER_ID, due_at=NOW)
+    other = make_task(task_id=5, user_id=USER_ID, due_at=NOW)
+
+    await repository.soft_delete_task(task, NOW, BATCH_ID)
+
+    assert task.deleted_at == NOW
+    assert task.deletion_batch_id == BATCH_ID
+    assert other.deleted_at is None
+    assert session.flush_count == 1
+
+
+async def test_add_task_labels_stamps_owner_on_every_row() -> None:
+    """Task label assignments persist the owner on every inserted row."""
+    session = RecordingSession()
+    repository = make_repository(session)
+
+    await repository.add_task_labels(11, USER_ID, (1, 2))
+
+    assert [(row.task_id, row.label_id, row.user_id) for row in session.added] == [
+        (11, 1, USER_ID),
+        (11, 2, USER_ID),
+    ]
+    assert session.flush_count == 1
+
+
+async def test_get_labels_by_ids_filters_by_owner_and_ids() -> None:
+    """Batch label lookup is tenant-scoped, non-deleted, and bounded by IN."""
+    session = RecordingSession()
+    repository = make_repository(session)
+
+    result = await repository.get_labels_by_ids(USER_ID, (1, 2))
+    sql = compile_statement(session.statements[-1])
+
+    assert list(result) == []
+    assert "labels.user_id = 7" in sql
+    assert "labels.deleted_at IS NULL" in sql
+    assert "labels.id IN (1, 2)" in sql
