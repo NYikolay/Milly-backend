@@ -368,6 +368,41 @@ async def test_task_list_rejects_invalid_cursor(task_client: AsyncClient) -> Non
     assert response.status_code == 400
 
 
+async def test_task_list_rejects_overlong_cursor(
+    task_client: AsyncClient,
+    fake_task_service: FakeTaskService,
+) -> None:
+    """Reject a cursor longer than the shared cursor limit as a bad request."""
+    fake_task_service.add_detail(_task_detail())
+
+    response = await task_client.get(
+        "/api/v1/tasks",
+        params={"cursor": "x" * 513},
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "bad_request"
+    assert body["message"] == "Invalid pagination cursor"
+
+
+async def test_task_list_openapi_documents_individual_filters(app: FastAPI) -> None:
+    """Document every task-list filter and pagination parameter individually."""
+    parameters = app.openapi()["paths"]["/api/v1/tasks"]["get"]["parameters"]
+
+    assert {parameter["name"] for parameter in parameters} == {
+        "date",
+        "project_ids",
+        "priorities",
+        "status",
+        "recurrence",
+        "q",
+        "include_archived_projects",
+        "limit",
+        "cursor",
+    }
+
+
 async def test_task_list_equal_due_at_uses_id_tiebreaker(
     task_client: AsyncClient,
     fake_task_service: FakeTaskService,

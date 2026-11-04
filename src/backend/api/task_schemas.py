@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from backend.api.pagination import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from backend.models.task_reminder import TaskReminder
 from backend.task_management.date_bounds import (
     require_supported_date,
@@ -633,6 +634,13 @@ class TaskFiltersQuery(BaseModel):
             query=self.q,
             include_archived_projects=self.include_archived_projects,
         )
+
+
+class TaskListQuery(TaskFiltersQuery):
+    """Task-list filters plus pagination parameters accepted by the endpoint."""
+
+    limit: int = Field(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE)
+    cursor: str | None = None
 
 
 class SeriesCreate(BaseModel):

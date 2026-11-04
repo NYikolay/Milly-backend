@@ -3,23 +3,17 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import Depends, Query, Response, status
+from fastapi import Query, Response, status
 
 from backend.api.deps import CurrentAccessDep, TaskServiceDep
 from backend.api.errors.openapi import StandardizedAPIRouter, document_errors
-from backend.api.pagination import (
-    DEFAULT_PAGE_SIZE,
-    MAX_CURSOR_LENGTH,
-    MAX_PAGE_SIZE,
-    decode_cursor,
-    encode_cursor,
-    filter_fingerprint,
-)
+from backend.api.pagination import decode_cursor, encode_cursor, filter_fingerprint
 from backend.api.task_schemas import (
     ReminderResponse,
     TaskCreate,
     TaskFiltersQuery,
     TaskLabelResponse,
+    TaskListQuery,
     TaskListResponse,
     TaskResponse,
     TaskUpdate,
@@ -89,25 +83,6 @@ def _task_changes(payload: TaskUpdate) -> dict[str, Any]:
             None if reminders is None else tuple(reminder.to_input() for reminder in reminders)
         )
     return changes
-
-
-def _task_filters(
-    filters: Annotated[TaskFiltersQuery, Query()],
-) -> TaskFiltersQuery:
-    """
-    Resolve task-list filters from the query string.
-
-    Purpose:
-        Keep the query model flattened into individual parameters while the
-        list route also accepts standalone ``limit`` and ``cursor`` parameters.
-
-    Args:
-        filters: Query parameters shared by all task filters.
-
-    Returns:
-        TaskFiltersQuery: The validated filter model.
-    """
-    return filters
 
 
 def _filters_fingerprint(filters: TaskFiltersQuery) -> str:
@@ -185,9 +160,7 @@ def _task_list_cursor(order_key: list[object]) -> TaskListCursor:
 async def list_tasks(
     claims: CurrentAccessDep,
     service: TaskServiceDep,
-    filters: Annotated[TaskFiltersQuery, Depends(_task_filters)],
-    limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
-    cursor: Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)] = None,
+    filters: Annotated[TaskListQuery, Query()],
 ) -> TaskListResponse:
     """
     List one page of the authenticated user's tasks.
@@ -200,9 +173,8 @@ async def list_tasks(
     Args:
         claims: Verified access-token claims.
         service: Task service resolving filtered details.
-        filters: Query parameters translated into service filters.
-        limit: Maximum number of tasks to return, from 1 to 100.
-        cursor: Opaque cursor returned as ``next_cursor`` by the previous page.
+        filters: Task-list filters plus ``limit`` and ``cursor`` pagination
+            parameters.
 
     Returns:
         TaskListResponse: Matching tasks in ``(due_at, id)`` order and the
@@ -212,29 +184,32 @@ async def list_tasks(
         UnauthorizedError (HTTP 401): If the bearer token is missing or
             invalid.
         BadRequestError (HTTP 400): If the stored user timezone is invalid or
-            the cursor is malformed, belongs to another user, or was issued
-            for different filters.
+            the cursor is malformed, overlong, belongs to another user, or was
+            issued for different filters.
 
     Notes:
         - The date filter uses UTC bounds of the user's local day.
         - The client must resend the same filters together with ``cursor``.
+        - ``limit`` is validated from 1 to 100 with a default of 50.
+        - ``cursor`` length is enforced by the cursor decoder so an overlong
+          token is a bad request rather than a validation error.
     """
     fingerprint = _filters_fingerprint(filters)
     after = (
         _task_list_cursor(
             decode_cursor(
-                cursor,
+                filters.cursor,
                 user_id=claims.user_id,
                 filter_fingerprint=fingerprint,
             )
         )
-        if cursor is not None
+        if filters.cursor is not None
         else None
     )
     page = await service.list(
         claims.user_id,
         filters.to_filters(),
-        limit=limit,
+        limit=filters.limit,
         after=after,
     )
     next_cursor = (
