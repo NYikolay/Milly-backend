@@ -487,6 +487,100 @@ async def test_unarchive_clears_archived_at() -> None:
     )
 
 
+async def test_unarchive_rebuilds_every_series_and_task_reminder() -> None:
+    """Unarchiving a project mutates reminder slots for every series and task."""
+    from datetime import date, time, timedelta
+
+    from backend.task_management.enums import ReminderKind
+    from tests.task_management_fakes import (
+        FakeTaskManagementRepository,
+        make_reminder,
+        make_series,
+        make_task,
+    )
+
+    repository = FakeTaskManagementRepository()
+    project = repository.insert_project(make_project(archived_at=NOW))
+    first_series = repository.insert_series(
+        make_series(
+            project_id=project.id,
+            time_of_day=time(9, 0),
+            timezone="Asia/Tokyo",
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    second_series = repository.insert_series(
+        make_series(
+            project_id=project.id,
+            time_of_day=time(10, 0),
+            timezone="Europe/Berlin",
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    first_template = repository.insert_reminder(
+        make_reminder(
+            series_id=first_series.id,
+            kind=ReminderKind.SCHEDULED,
+            offset_minutes=None,
+            interval_days=1,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+            next_run_at=NOW,
+        )
+    )
+    second_template = repository.insert_reminder(
+        make_reminder(
+            series_id=second_series.id,
+            kind=ReminderKind.SCHEDULED,
+            offset_minutes=None,
+            interval_days=1,
+            time_of_day=time(10, 0),
+            timezone="UTC",
+            next_run_at=NOW,
+        )
+    )
+    first_task = repository.insert_task(
+        make_task(
+            project_id=project.id,
+            due_at=NOW + timedelta(days=1),
+            reminders_enabled=True,
+        )
+    )
+    second_task = repository.insert_task(
+        make_task(
+            project_id=project.id,
+            due_at=NOW + timedelta(days=2),
+            reminders_enabled=True,
+        )
+    )
+    first_task_reminder = repository.insert_reminder(
+        make_reminder(
+            task_id=first_task.id,
+            kind=ReminderKind.BEFORE_DUE,
+            offset_minutes=30,
+            next_run_at=NOW,
+        )
+    )
+    second_task_reminder = repository.insert_reminder(
+        make_reminder(
+            task_id=second_task.id,
+            kind=ReminderKind.BEFORE_DUE,
+            offset_minutes=15,
+            next_run_at=NOW,
+        )
+    )
+    service = ProjectService(repository, PaletteService(repository), clock=clock)
+
+    await service.unarchive(USER_ID, project.id)
+
+    assert first_template.next_run_at is None
+    assert first_template.timezone == "Asia/Tokyo"
+    assert second_template.next_run_at is None
+    assert second_template.timezone == "Europe/Berlin"
+    assert first_task_reminder.next_run_at == first_task.due_at - timedelta(minutes=30)
+    assert second_task_reminder.next_run_at == second_task.due_at - timedelta(minutes=15)
+
+
 async def test_unarchive_rejects_name_conflict_with_active_project() -> None:
     """Unarchiving a project whose name is active elsewhere raises a conflict."""
     repository = make_repository()

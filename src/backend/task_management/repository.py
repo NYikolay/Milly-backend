@@ -1618,6 +1618,7 @@ class SqlAlchemyTaskManagementRepository:
             None: The changes stay in the current unit of work.
 
         Notes:
+            - Loads series and task reminders in two batched queries.
             - Template series reminders are retargeted to the series timezone
               and keep ``next_run_at=None``.
             - Incomplete task reminders, including overdue tasks, are
@@ -1635,14 +1636,22 @@ class SqlAlchemyTaskManagementRepository:
                 TaskSeries.deleted_at.is_(None),
             )
         )
-        for series in series_result.scalars().all():
-            reminders_result = await self._session.execute(
-                select(TaskReminder).where(
-                    TaskReminder.user_id == user_id,
-                    TaskReminder.series_id == series.id,
-                )
+        series_items = series_result.scalars().all()
+        series_ids = [series.id for series in series_items]
+        series_reminders_result = await self._session.execute(
+            select(TaskReminder)
+            .where(
+                TaskReminder.user_id == user_id,
+                TaskReminder.series_id.in_(series_ids),
             )
-            for reminder in reminders_result.scalars().all():
+            .order_by(TaskReminder.id)
+        )
+        series_reminders: dict[int, list[TaskReminder]] = {}
+        for reminder in series_reminders_result.scalars().all():
+            if reminder.series_id is not None:
+                series_reminders.setdefault(reminder.series_id, []).append(reminder)
+        for series in series_items:
+            for reminder in series_reminders.get(series.id, []):
                 reminder.next_run_at = None
                 if reminder.kind == ReminderKind.SCHEDULED.value:
                     reminder.timezone = series.timezone
@@ -1655,14 +1664,22 @@ class SqlAlchemyTaskManagementRepository:
                 Task.completed_at.is_(None),
             )
         )
-        for task in task_result.scalars().all():
-            reminders_result = await self._session.execute(
-                select(TaskReminder).where(
-                    TaskReminder.user_id == user_id,
-                    TaskReminder.task_id == task.id,
-                )
+        tasks = task_result.scalars().all()
+        task_ids = [task.id for task in tasks]
+        task_reminders_result = await self._session.execute(
+            select(TaskReminder)
+            .where(
+                TaskReminder.user_id == user_id,
+                TaskReminder.task_id.in_(task_ids),
             )
-            for reminder in reminders_result.scalars().all():
+            .order_by(TaskReminder.id)
+        )
+        task_reminders: dict[int, list[TaskReminder]] = {}
+        for reminder in task_reminders_result.scalars().all():
+            if reminder.task_id is not None:
+                task_reminders.setdefault(reminder.task_id, []).append(reminder)
+        for task in tasks:
+            for reminder in task_reminders.get(task.id, []):
                 try:
                     reminder.next_run_at = rebuild_reminder_slot(
                         reminder,

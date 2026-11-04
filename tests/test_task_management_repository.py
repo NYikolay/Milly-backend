@@ -840,15 +840,29 @@ async def test_resume_project_reminders_rebuilds_incomplete_and_overdue_tasks() 
     assert "task_series.project_id = 5" in series_sql
     assert "task_series.user_id = 7" in series_sql
     assert "task_series.deleted_at IS NULL" in series_sql
-    assert "task_reminders.series_id = 3" in template_sql
+    assert "task_reminders.series_id IN (3)" in template_sql
     assert "tasks.project_id = 5" in task_sql
     assert "tasks.deleted_at IS NULL" in task_sql
     assert "tasks.completed_at IS NULL" in task_sql
     assert "tasks.due_at >" not in task_sql
-    assert "task_reminders.task_id = 4" in task_reminder_sql
+    assert "task_reminders.task_id IN (4)" in task_reminder_sql
     assert template.next_run_at is None
     assert template.timezone == "Asia/Tokyo"
     assert task_reminder.next_run_at == task.due_at - timedelta(minutes=30)
+
+
+async def test_resume_project_reminders_batches_series_and_task_reminders() -> None:
+    """Unarchiving loads series and task reminders in two batched statements."""
+    session = RecordingSession()
+    repository = make_repository(session)
+
+    await repository.resume_project_reminders(USER_ID, PROJECT_ID, NOW)
+
+    statements = "\n".join(str(statement) for statement in session.statements)
+    assert statements.count("FROM task_reminders") == 2
+    assert "IN (" in statements
+    assert "task_reminders.series_id IN" in statements
+    assert "task_reminders.task_id IN" in statements
 
 
 async def test_get_telegram_id_reads_the_linked_profile() -> None:
@@ -885,6 +899,7 @@ async def test_resume_project_reminders_clears_slot_on_datetime_overflow() -> No
     )
     session = RecordingSession(
         results=[
+            RecordingResult(values=[]),
             RecordingResult(values=[]),
             RecordingResult(values=[task]),
             RecordingResult(values=[reminder]),
