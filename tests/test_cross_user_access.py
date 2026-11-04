@@ -376,34 +376,84 @@ async def test_update_series_with_foreign_labels_returns_not_found(
     assert _snapshot(repository) == before
 
 
-async def test_complete_and_uncomplete_foreign_task_return_not_found(
+async def test_complete_foreign_task_returns_not_found(
     user_one_client: AsyncClient,
     repository: FakeTaskManagementRepository,
 ) -> None:
-    """Reject completion changes on another user's task without mutation."""
+    """Reject completion of another user's task without mutation."""
     before = _snapshot(repository)
 
-    complete = await user_one_client.post("/api/v1/tasks/1/complete")
-    uncomplete = await user_one_client.post("/api/v1/tasks/1/uncomplete")
+    response = await user_one_client.post("/api/v1/tasks/1/complete")
 
-    _assert_not_found(complete)
-    _assert_not_found(uncomplete)
+    _assert_not_found(response)
     assert _snapshot(repository) == before
 
 
-async def test_archive_and_unarchive_foreign_project_return_not_found(
+async def test_uncomplete_foreign_task_returns_not_found(
     user_one_client: AsyncClient,
     repository: FakeTaskManagementRepository,
 ) -> None:
-    """Reject archive state changes on another user's project without mutation."""
+    """Reject reopening another user's task without mutation."""
     before = _snapshot(repository)
 
-    archive = await user_one_client.post("/api/v1/projects/1/archive")
-    unarchive = await user_one_client.post("/api/v1/projects/1/unarchive")
+    response = await user_one_client.post("/api/v1/tasks/1/uncomplete")
 
-    _assert_not_found(archive)
-    _assert_not_found(unarchive)
+    _assert_not_found(response)
     assert _snapshot(repository) == before
+
+
+async def test_archive_foreign_project_returns_not_found(
+    user_one_client: AsyncClient,
+    repository: FakeTaskManagementRepository,
+) -> None:
+    """Reject archiving another user's project without mutation."""
+    before = _snapshot(repository)
+
+    response = await user_one_client.post("/api/v1/projects/1/archive")
+
+    _assert_not_found(response)
+    assert _snapshot(repository) == before
+
+
+async def test_unarchive_foreign_project_returns_not_found(
+    user_one_client: AsyncClient,
+    repository: FakeTaskManagementRepository,
+) -> None:
+    """Reject unarchiving another user's project without mutation."""
+    before = _snapshot(repository)
+
+    response = await user_one_client.post("/api/v1/projects/1/unarchive")
+
+    _assert_not_found(response)
+    assert _snapshot(repository) == before
+
+
+async def test_delete_foreign_task_returns_not_found(
+    user_one_client: AsyncClient,
+    repository: FakeTaskManagementRepository,
+) -> None:
+    """Reject deleting another user's task and leave it intact."""
+    before = _snapshot(repository)
+
+    response = await user_one_client.delete("/api/v1/tasks/1")
+
+    _assert_not_found(response)
+    assert _snapshot(repository) == before
+    assert repository.tasks[1].deleted_at is None
+
+
+async def test_delete_foreign_series_returns_not_found(
+    user_one_client: AsyncClient,
+    repository: FakeTaskManagementRepository,
+) -> None:
+    """Reject deleting another user's series and leave it intact."""
+    before = _snapshot(repository)
+
+    response = await user_one_client.delete("/api/v1/task-series/1")
+
+    _assert_not_found(response)
+    assert _snapshot(repository) == before
+    assert repository.series[1].deleted_at is None
 
 
 async def test_delete_foreign_label_is_a_noop(
