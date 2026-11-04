@@ -559,3 +559,83 @@ async def test_re_enabling_reminders_rebuilds_slots_from_now() -> None:
     await service.update(USER_ID, task.id, reminders_enabled=False)
 
     assert all(reminder.next_run_at is None for reminder in repository.reminders.values())
+
+
+async def test_unarchive_resumes_scheduled_reminder_for_overdue_task() -> None:
+    """Unarchiving rebuilds scheduled slots for overdue incomplete tasks."""
+    repository = FakeTaskManagementRepository()
+    project = repository.insert_project(make_project(archived_at=fixed_now()))
+    overdue = repository.insert_task(
+        make_task(
+            task_id=1,
+            project_id=project.id,
+            due_at=fixed_now() - timedelta(days=1),
+            reminders_enabled=True,
+        )
+    )
+    reminder = repository.insert_reminder(
+        make_reminder(
+            reminder_id=1,
+            task_id=overdue.id,
+            kind=ReminderKind.SCHEDULED,
+            offset_minutes=None,
+            interval_days=1,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+            next_run_at=None,
+        )
+    )
+    service = ProjectService(
+        repository,
+        PaletteService(repository),
+        clock=fixed_now,
+    )
+
+    await service.unarchive(USER_ID, project.id)
+
+    assert reminder.next_run_at == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
+
+
+async def test_disabling_reminders_persists_supplied_rules_before_clearing_slots() -> None:
+    """Disabling with supplied rules stores them, then clears their slots."""
+    repository = FakeTaskManagementRepository()
+    task = repository.insert_task(
+        make_task(
+            task_id=1,
+            due_at=fixed_now() + timedelta(hours=2),
+            reminders_enabled=True,
+        )
+    )
+    repository.insert_reminder(
+        make_reminder(
+            reminder_id=1,
+            task_id=task.id,
+            kind=ReminderKind.BEFORE_DUE,
+            offset_minutes=30,
+            next_run_at=fixed_now() + timedelta(hours=1),
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(
+        USER_ID,
+        task.id,
+        reminders_enabled=False,
+        reminders=(
+            ReminderInput(
+                kind=ReminderKind.BEFORE_DUE,
+                offset_minutes=15,
+            ),
+        ),
+    )
+
+    assert detail.task.reminders_enabled is False
+    assert len(detail.reminders) == 1
+    assert detail.reminders[0].offset_minutes == 15
+    assert detail.reminders[0].next_run_at is None
+
+    reenabled = await service.update(USER_ID, task.id, reminders_enabled=True)
+
+    assert len(reenabled.reminders) == 1
+    assert reenabled.reminders[0].offset_minutes == 15
+    assert reenabled.reminders[0].next_run_at == task.due_at - timedelta(minutes=15)

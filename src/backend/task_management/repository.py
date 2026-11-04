@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfoNotFoundError
 
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,11 +20,8 @@ from backend.models.task_reminder import TaskReminder
 from backend.models.task_series import TaskSeries
 from backend.models.user import User
 from backend.task_management.enums import DeliveryStatus, ReminderKind
-from backend.task_management.schedule import (
-    HORIZON_DAYS,
-    before_due_time,
-    first_scheduled_time,
-)
+from backend.task_management.reminders import rebuild_reminder_slot
+from backend.task_management.schedule import HORIZON_DAYS
 
 
 class SqlAlchemyTaskManagementRepository:
@@ -1292,10 +1289,10 @@ class SqlAlchemyTaskManagementRepository:
         Notes:
             - Template series reminders are retargeted to the series timezone
               and keep ``next_run_at=None``.
-            - Future incomplete task reminders are recomputed: before-due
-              slots come from ``due_at`` and become ``None`` when past;
-              scheduled slots advance to the first suitable slot after
-              ``now``.
+            - Incomplete task reminders, including overdue tasks, are
+              recomputed: before-due slots come from ``due_at`` and become
+              ``None`` when past; scheduled slots advance to the first
+              suitable slot after ``now``.
             - Cancelled deliveries are left for the dispatcher to reactivate
               when their recomputed slot becomes current.
             - Flushes but does not commit.
@@ -1325,7 +1322,6 @@ class SqlAlchemyTaskManagementRepository:
                 Task.project_id == project_id,
                 Task.deleted_at.is_(None),
                 Task.completed_at.is_(None),
-                Task.due_at > now,
             )
         )
         for task in task_result.scalars().all():
@@ -1336,44 +1332,15 @@ class SqlAlchemyTaskManagementRepository:
                 )
             )
             for reminder in reminders_result.scalars().all():
-                if reminder.kind == ReminderKind.BEFORE_DUE.value:
-                    slot = before_due_time(
+                try:
+                    reminder.next_run_at = rebuild_reminder_slot(
+                        reminder,
                         due_at=task.due_at,
-                        offset_minutes=reminder.offset_minutes or 0,
-                    )
-                    reminder.next_run_at = slot if slot > now else None
-                elif reminder.kind == ReminderKind.SCHEDULED.value:
-                    timezone = self._reminder_timezone(reminder.timezone)
-                    reminder.next_run_at = first_scheduled_time(
-                        due_at=task.due_at,
-                        time_of_day=reminder.time_of_day or time(0, 0),
-                        timezone=timezone,
-                        interval_days=reminder.interval_days or 1,
                         now=now,
                     )
+                except (ZoneInfoNotFoundError, ValueError):  # fmt: skip
+                    reminder.next_run_at = None
         await self._session.flush()
-
-    def _reminder_timezone(self, name: str | None) -> ZoneInfo:
-        """
-        Resolve a stored reminder timezone with a UTC fallback.
-
-        Purpose:
-            Keep slot recomputation robust when legacy or corrupt timezone
-            values are encountered.
-
-        Args:
-            name: Stored IANA timezone name, if any.
-
-        Returns:
-            ZoneInfo: The resolved timezone, or UTC when the name is invalid.
-
-        Notes:
-            - Performs no writes.
-        """
-        try:
-            return ZoneInfo(name or "UTC")
-        except ZoneInfoNotFoundError, ValueError:
-            return ZoneInfo("UTC")
 
     async def project_is_active(self, user_id: int, project_id: int) -> bool:
         """

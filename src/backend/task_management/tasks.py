@@ -12,6 +12,7 @@ from backend.models.label import Label
 from backend.models.project import Project
 from backend.models.task import Task
 from backend.models.task_reminder import TaskReminder
+from backend.models.task_series import TaskSeries
 from backend.task_management.enums import Priority
 from backend.task_management.ports import TaskManagementRepository
 from backend.task_management.reminders import (
@@ -282,14 +283,18 @@ class TaskService:
             - For a series instance only future incomplete instances change.
             - Due-time, reminder, or re-enabled master-toggle changes rebuild
               the affected reminder rows from the current time.
-            - Disabling the master toggle clears reminder slots.
-            - Locks the task row and does not commit.
+            - Disabling the master toggle persists any supplied rules first,
+              then cancels deliveries and clears slots.
+            - For a series instance the series row is locked before the task
+              row; one-off tasks lock only the task row.
+            - Does not commit.
         """
-        task = await self._require_task(user_id, task_id, for_update=True)
-        if task.series_id is not None:
+        task, series = await self._lock_update_target(user_id, task_id)
+        if series is not None:
             return await self._update_series_task(
                 user_id,
                 task,
+                series,
                 title=title,
                 description=description,
                 priority=priority,
@@ -326,14 +331,17 @@ class TaskService:
         if reminders_enabled is not None:
             task.reminders_enabled = reminders_enabled
 
-        if toggle_changed and not reminders_enabled:
-            await self._repository.cancel_task_reminders(user_id, task.id)
-        elif due_changed or reminders is not None or (toggle_changed and reminders_enabled):
+        rebuild_reminders = (
+            due_changed or reminders is not None or (toggle_changed and reminders_enabled)
+        )
+        if rebuild_reminders:
             await self._rebuild_task_reminders(
                 user_id,
                 task,
                 reminders=reminders,
             )
+        if toggle_changed and not reminders_enabled:
+            await self._repository.cancel_task_reminders(user_id, task.id)
         await self._repository.flush()
         return await self._detail(user_id, task)
 
@@ -421,20 +429,71 @@ class TaskService:
         Notes:
             - A one-off task is soft-deleted and its deliveries are cancelled.
             - A series instance delegates to ``SeriesService.delete``.
-            - Locks the task row and does not commit.
+            - For a series instance the series row is locked before the task
+              row; one-off tasks lock only the task row.
+            - Does not commit.
         """
-        task = await self._require_task(user_id, task_id, for_update=True)
-        if task.series_id is not None:
-            await self._series_service.delete(user_id, task.series_id)
+        task, series = await self._lock_update_target(user_id, task_id)
+        if series is not None:
+            await self._series_service.delete(user_id, series.id)
             return
         await self._repository.cancel_task_reminders(user_id, task.id)
         await self._repository.soft_delete_task(task, self._clock(), uuid4())
         await self._repository.flush()
 
+    async def _lock_update_target(
+        self,
+        user_id: int,
+        task_id: int,
+    ) -> tuple[Task, TaskSeries | None]:
+        """
+        Lock the update targets in the canonical series-before-task order.
+
+        Purpose:
+            Avoid a deadlock between series-wide updates that lock the series
+            row before its instances and instance edits or deletes that would
+            otherwise lock the task row first.
+
+        Args:
+            user_id: Owner identifier.
+            task_id: Task identifier.
+
+        Returns:
+            tuple[Task, TaskSeries | None]: The locked task and its locked
+                series when the task belongs to one.
+
+        Raises:
+            NotFoundError: If the task or its series does not exist for this
+                user.
+
+        Notes:
+            - Reads the task without a lock to discover its series, locks the
+              series row, then locks the task row.
+            - One-off tasks lock only the task row.
+            - Does not commit.
+        """
+        initial = await self._repository.get_task(user_id, task_id)
+        if initial is None:
+            raise NotFoundError(_TASK_NOT_FOUND)
+        series: TaskSeries | None = None
+        if initial.series_id is not None:
+            series = await self._repository.get_series(
+                user_id,
+                initial.series_id,
+                for_update=True,
+            )
+            if series is None:
+                raise NotFoundError("Series not found")
+        task = await self._repository.get_task(user_id, task_id, for_update=True)
+        if task is None:
+            raise NotFoundError(_TASK_NOT_FOUND)
+        return task, series
+
     async def _update_series_task(
         self,
         user_id: int,
         task: Task,
+        series: TaskSeries,
         *,
         title: str | None,
         description: str | None | UnsetType,
@@ -454,6 +513,7 @@ class TaskService:
         Args:
             user_id: Owner identifier.
             task: Series instance being edited.
+            series: Series row already locked by the caller.
             title: New title, or ``None`` when unchanged.
             description: New description sentinel or value.
             priority: New priority, or ``None`` when unchanged.
@@ -473,14 +533,9 @@ class TaskService:
         Notes:
             - A changed due time moves the series ``time_of_day`` in the series
               timezone; individual detached instances are not supported.
+            - The series row is locked before the instance row by the caller.
             - Does not commit.
         """
-        series_id = task.series_id
-        if series_id is None:
-            raise NotFoundError("Series not found")
-        series = await self._repository.get_series(user_id, series_id)
-        if series is None:
-            raise NotFoundError("Series not found")
         time_of_day: time | None = None
         if due_at is not None:
             self._validate_due_at(due_at)

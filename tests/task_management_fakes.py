@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 from backend.models.color_palette import ColorPalette
 from backend.models.label import Label
@@ -14,11 +13,8 @@ from backend.models.task import Task
 from backend.models.task_reminder import TaskReminder
 from backend.models.task_series import TaskSeries
 from backend.task_management.enums import DeliveryStatus, ReminderKind
-from backend.task_management.schedule import (
-    HORIZON_DAYS,
-    before_due_time,
-    first_scheduled_time,
-)
+from backend.task_management.reminders import rebuild_reminder_slot
+from backend.task_management.schedule import HORIZON_DAYS
 
 _ACTIVE_DELIVERY_STATUSES = {
     DeliveryStatus.PENDING.value,
@@ -624,26 +620,16 @@ class FakeTaskManagementRepository:
                 or task.project_id != project_id
                 or task.deleted_at is not None
                 or task.completed_at is not None
-                or task.due_at <= now
             ):
                 continue
             for reminder in self.reminders.values():
                 if reminder.user_id != user_id or reminder.task_id != task.id:
                     continue
-                if reminder.kind == ReminderKind.BEFORE_DUE.value:
-                    slot = before_due_time(
-                        due_at=task.due_at,
-                        offset_minutes=reminder.offset_minutes or 0,
-                    )
-                    reminder.next_run_at = slot if slot > now else None
-                elif reminder.kind == ReminderKind.SCHEDULED.value:
-                    reminder.next_run_at = first_scheduled_time(
-                        due_at=task.due_at,
-                        time_of_day=reminder.time_of_day or time(0, 0),
-                        timezone=ZoneInfo(reminder.timezone or "UTC"),
-                        interval_days=reminder.interval_days or 1,
-                        now=now,
-                    )
+                reminder.next_run_at = rebuild_reminder_slot(
+                    reminder,
+                    due_at=task.due_at,
+                    now=now,
+                )
 
     async def project_is_active(self, user_id: int, project_id: int) -> bool:
         """Return whether a project exists and is neither archived nor deleted."""
