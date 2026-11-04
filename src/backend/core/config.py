@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     db_pool_size: int = 5
     db_max_overflow: int = 5
     db_pool_recycle: int = 1800
+    db_statement_timeout_ms: int = Field(default=30_000, gt=0)
+    db_pool_timeout_seconds: int = Field(default=10, gt=0)
     sql_echo: bool = False
 
     nats_url: str = "nats://localhost:4222"

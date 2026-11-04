@@ -24,11 +24,15 @@ class Database:
 
         Args:
             settings: Application settings providing the database URL, pool
-                tuning, SQL echo, and connection application name.
+                tuning, statement and pool timeouts, SQL echo, and connection
+                application name.
 
         Notes:
             - Engine creation is lazy; no connection is opened until the first
               session or query needs one.
+            - ``pool_timeout`` bounds waiting for a pooled connection;
+              ``command_timeout`` and ``statement_timeout`` bound the runtime
+              of a single statement.
             - ``dispose()`` releases the pool during application shutdown.
         """
         self.engine: AsyncEngine = create_async_engine(
@@ -38,10 +42,15 @@ class Database:
             pool_size=settings.db_pool_size,
             max_overflow=settings.db_max_overflow,
             pool_recycle=settings.db_pool_recycle,
+            pool_timeout=settings.db_pool_timeout_seconds,
             connect_args={
                 "statement_cache_size": 0,
                 "prepared_statement_cache_size": 0,
-                "server_settings": {"application_name": settings.app_name},
+                "command_timeout": settings.db_statement_timeout_ms / 1000,
+                "server_settings": {
+                    "application_name": settings.app_name,
+                    "statement_timeout": str(settings.db_statement_timeout_ms),
+                },
             },
         )
         self.session_factory = async_sessionmaker(

@@ -348,3 +348,19 @@ def test_production_validation_hides_secrets_on_unrelated_failure() -> None:
     assert admin_password not in message
     assert jwt_secret not in message
     assert telegram_token not in message
+
+
+def test_db_timeout_defaults() -> None:
+    """Use the default database statement and pool timeouts."""
+    settings = Settings(_env_file=None)
+    assert settings.db_statement_timeout_ms == 30_000
+    assert settings.db_pool_timeout_seconds == 10
+
+
+def test_db_timeout_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read database timeouts from environment variables."""
+    monkeypatch.setenv("DB_STATEMENT_TIMEOUT_MS", "5000")
+    monkeypatch.setenv("DB_POOL_TIMEOUT_SECONDS", "3")
+    settings = Settings(_env_file=None)
+    assert settings.db_statement_timeout_ms == 5000
+    assert settings.db_pool_timeout_seconds == 3
