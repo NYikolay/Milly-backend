@@ -185,6 +185,16 @@ class FakeTaskManagementRepository:
         """Return one palette color."""
         return self.colors.get(color_id)
 
+    async def get_palette_colors_by_ids(
+        self,
+        color_ids: Sequence[int],
+    ) -> dict[int, ColorPalette]:
+        """Return palette colors keyed by identifier and record the batch call."""
+        self.batch_calls.append(("get_palette_colors_by_ids", tuple(color_ids)))
+        return {
+            color_id: self.colors[color_id] for color_id in color_ids if color_id in self.colors
+        }
+
     async def get_default_palette_color(self) -> ColorPalette | None:
         """Return the first active palette color."""
         colors = await self.list_active_palette_colors()
@@ -213,16 +223,38 @@ class FakeTaskManagementRepository:
         user_id: int,
         *,
         include_archived: bool,
+        limit: int,
+        after_archived: bool | None,
+        after_name: str | None,
+        after_project_id: int | None,
     ) -> Sequence[Project]:
-        """List non-deleted projects owned by a user."""
-        projects = [
-            project
-            for project in self.projects.values()
-            if project.user_id == user_id
-            and project.deleted_at is None
-            and (include_archived or project.archived_at is None)
-        ]
-        return sorted(projects, key=lambda project: (project.name.lower(), project.id))
+        """List one cursor-bounded page of non-deleted projects owned by a user."""
+        projects = sorted(
+            (
+                project
+                for project in self.projects.values()
+                if project.user_id == user_id
+                and project.deleted_at is None
+                and (include_archived or project.archived_at is None)
+            ),
+            key=lambda project: (
+                project.archived_at is not None,
+                project.name.lower(),
+                project.id,
+            ),
+        )
+        if after_archived is not None and after_name is not None and after_project_id is not None:
+            projects = [
+                project
+                for project in projects
+                if (
+                    project.archived_at is not None,
+                    project.name.lower(),
+                    project.id,
+                )
+                > (after_archived, after_name, after_project_id)
+            ]
+        return projects[:limit]
 
     async def get_project(
         self,
@@ -286,6 +318,29 @@ class FakeTaskManagementRepository:
             if task.user_id == user_id and task.project_id == project_id and task.deleted_at is None
         ]
         return len(tasks), sum(1 for task in tasks if task.completed_at is not None)
+
+    async def project_progress_for_projects(
+        self,
+        user_id: int,
+        project_ids: Sequence[int],
+    ) -> dict[int, tuple[int, int]]:
+        """Count all and completed tasks grouped by project and record the batch call."""
+        self.batch_calls.append(("project_progress_for_projects", tuple(project_ids)))
+        progress: dict[int, tuple[int, int]] = {}
+        for project_id in project_ids:
+            tasks = [
+                task
+                for task in self.tasks.values()
+                if task.user_id == user_id
+                and task.project_id == project_id
+                and task.deleted_at is None
+            ]
+            if tasks:
+                progress[project_id] = (
+                    len(tasks),
+                    sum(1 for task in tasks if task.completed_at is not None),
+                )
+        return progress
 
     async def today_progress(
         self,

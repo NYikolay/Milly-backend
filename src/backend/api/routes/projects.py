@@ -1,9 +1,19 @@
 from __future__ import annotations
 
-from fastapi import Response, status
+from typing import Annotated
+
+from fastapi import Query, Response, status
+from pydantic import BaseModel, Field
 
 from backend.api.deps import CurrentAccessDep, ProjectServiceDep
 from backend.api.errors.openapi import StandardizedAPIRouter, document_errors
+from backend.api.pagination import (
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    decode_cursor,
+    encode_cursor,
+    filter_fingerprint,
+)
 from backend.api.task_schemas import (
     ColorResponse,
     ProjectCreate,
@@ -12,17 +22,29 @@ from backend.api.task_schemas import (
     ProjectResponse,
     ProjectUpdate,
 )
-from backend.core.errors import ErrorCode, NotFoundError
-from backend.task_management.projects import ProjectService, ProjectSummary
+from backend.core.errors import BadRequestError, ErrorCode
+from backend.task_management.projects import (
+    ProjectListCursor,
+    ProjectService,
+    ProjectSummary,
+)
 
 router = StandardizedAPIRouter(prefix="/projects", tags=["projects"])
 
 _ERRORS = {
     ErrorCode.NOT_FOUND: "The project does not exist for the authenticated user.",
     ErrorCode.CONFLICT: "Another active project already uses the requested name.",
-    ErrorCode.BAD_REQUEST: "The project name or palette color is invalid.",
+    ErrorCode.BAD_REQUEST: "The project name, palette color, or pagination cursor is invalid.",
     ErrorCode.UNAUTHORIZED: "The bearer token is missing or invalid.",
 }
+
+
+class ProjectListQuery(BaseModel):
+    """Project-list filters plus pagination parameters accepted by the endpoint."""
+
+    include_archived: bool = False
+    limit: int = Field(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE)
+    cursor: str | None = None
 
 
 def _project_response(summary: ProjectSummary) -> ProjectResponse:
@@ -56,30 +78,41 @@ def _project_response(summary: ProjectSummary) -> ProjectResponse:
     )
 
 
-def _find_summary(
-    summaries: list[ProjectSummary],
-    project_id: int,
-) -> ProjectSummary:
+def _project_list_cursor(order_key: list[object]) -> ProjectListCursor:
     """
-    Select the summary for one project.
+    Convert a decoded cursor ordering key into a typed project cursor.
 
     Purpose:
-        Resolve the enriched representation after a read or mutation.
+        Validate the ordering-key shape and types before querying the next
+        page.
 
     Args:
-        summaries: Project summaries returned by the project service.
-        project_id: Identifier of the requested project.
+        order_key: Decoded ordering values from the cursor.
 
     Returns:
-        ProjectSummary: The matching summary.
+        ProjectListCursor: Archive state, case-insensitive name key, and
+            identifier of the last project on the previous page.
 
     Raises:
-        NotFoundError: If no summary matches the identifier.
+        BadRequestError: If the key does not contain an archive flag of ``0``
+            or ``1``, a string name key, and a non-boolean integer project
+            identifier.
     """
-    for summary in summaries:
-        if summary.project.id == project_id:
-            return summary
-    raise NotFoundError("Project not found")
+    try:
+        if len(order_key) != 3:
+            raise ValueError
+        archived_value, name_key, project_id = order_key
+        if archived_value not in (0, 1) or not isinstance(name_key, str):
+            raise ValueError
+        if not isinstance(project_id, int) or isinstance(project_id, bool):
+            raise ValueError
+    except TypeError, ValueError:
+        raise BadRequestError("Invalid pagination cursor") from None
+    return ProjectListCursor(
+        is_archived=archived_value == 1,
+        name_key=name_key,
+        project_id=project_id,
+    )
 
 
 async def _load_summary(
@@ -92,7 +125,7 @@ async def _load_summary(
 
     Purpose:
         Combine project fields, progress counters, and color data after a read
-        or mutation.
+        or mutation without loading the project list.
 
     Args:
         service: Project service resolving summaries.
@@ -105,8 +138,7 @@ async def _load_summary(
     Raises:
         NotFoundError: If the project does not exist for this user.
     """
-    summaries = await service.list(user_id, include_archived=True)
-    return _find_summary(summaries, project_id)
+    return await service.get_summary(user_id, project_id)
 
 
 @router.get(
@@ -117,10 +149,10 @@ async def _load_summary(
 async def list_projects(
     claims: CurrentAccessDep,
     service: ProjectServiceDep,
-    include_archived: bool = False,
+    query: Annotated[ProjectListQuery, Query()],
 ) -> ProjectListResponse:
     """
-    List the authenticated user's projects.
+    List one page of the authenticated user's projects.
 
     Purpose:
         Return active projects by default, with progress counters and palette
@@ -129,21 +161,63 @@ async def list_projects(
     Args:
         claims: Verified access-token claims.
         service: Project service resolving summaries.
-        include_archived: Whether archived projects are included.
+        query: Archive filter plus ``limit`` and ``cursor`` pagination
+            parameters.
 
     Returns:
-        ProjectListResponse: Project summaries in repository order.
+        ProjectListResponse: Project summaries in
+            ``(is_archived, lower(name), id)`` order and the cursor for the
+            next page, or ``None`` on the last page.
 
     Raises:
         UnauthorizedError (HTTP 401): If the bearer token is missing or
             invalid.
         NotFoundError (HTTP 404): If a project references a missing color.
+        BadRequestError (HTTP 400): If the cursor is malformed, overlong,
+            belongs to another user, or was issued for different filters.
 
     Notes:
         - Archived projects are omitted unless ``include_archived`` is true.
+        - The client must resend ``include_archived`` together with ``cursor``.
+        - ``limit`` is validated from 1 to 100 with a default of 50.
+        - ``cursor`` length is enforced by the cursor decoder so an overlong
+          token is a bad request rather than a validation error.
     """
-    summaries = await service.list(claims.user_id, include_archived)
-    return ProjectListResponse(items=[_project_response(item) for item in summaries])
+    fingerprint = filter_fingerprint({"include_archived": query.include_archived})
+    after = (
+        _project_list_cursor(
+            decode_cursor(
+                query.cursor,
+                user_id=claims.user_id,
+                filter_fingerprint=fingerprint,
+            )
+        )
+        if query.cursor is not None
+        else None
+    )
+    page = await service.list(
+        claims.user_id,
+        query.include_archived,
+        limit=query.limit,
+        after=after,
+    )
+    next_cursor = (
+        encode_cursor(
+            user_id=claims.user_id,
+            filter_fingerprint=fingerprint,
+            order_key=[
+                1 if page.next_cursor.is_archived else 0,
+                page.next_cursor.name_key,
+                page.next_cursor.project_id,
+            ],
+        )
+        if page.next_cursor is not None
+        else None
+    )
+    return ProjectListResponse(
+        items=[_project_response(item) for item in page.items],
+        next_cursor=next_cursor,
+    )
 
 
 @router.post(

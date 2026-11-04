@@ -78,6 +78,29 @@ class TaskManagementRepository(Protocol):
         """
         ...
 
+    async def get_palette_colors_by_ids(
+        self,
+        color_ids: Sequence[int],
+    ) -> dict[int, ColorPalette]:
+        """
+        Load multiple palette colors by identifier.
+
+        Purpose:
+            Resolve project colors and label colors without one query per row.
+
+        Args:
+            color_ids: Palette color identifiers to load.
+
+        Returns:
+            dict[int, ColorPalette]: Matching colors keyed by identifier;
+                unknown identifiers are absent.
+
+        Notes:
+            - Returns an empty mapping without a query for an empty input.
+            - Performs no writes and does not commit.
+        """
+        ...
+
     async def get_default_palette_color(self) -> ColorPalette | None:
         """
         Load the first active palette color.
@@ -133,21 +156,36 @@ class TaskManagementRepository(Protocol):
         user_id: int,
         *,
         include_archived: bool,
+        limit: int,
+        after_archived: bool | None,
+        after_name: str | None,
+        after_project_id: int | None,
     ) -> Sequence[Project]:
         """
-        List non-deleted projects owned by a user.
+        List non-deleted projects owned by a user, at most one page.
 
         Purpose:
-            Power the active project list and the project archive.
+            Power the active project list and the project archive with
+            deterministic cursor pagination.
 
         Args:
             user_id: Owner identifier.
             include_archived: Whether archived projects are included.
+            limit: Maximum number of projects to return.
+            after_archived: Cursor archive state of the last project on the
+                previous page.
+            after_name: Cursor case-insensitive name key of the last project on
+                the previous page.
+            after_project_id: Cursor identifier of the last project on the
+                previous page.
 
         Returns:
-            Sequence[Project]: Non-deleted projects in display order.
+            Sequence[Project]: Non-deleted projects ordered by
+                ``(is_archived, lower(name), id)``.
 
         Notes:
+            - The cursor predicate is applied only when every cursor value is
+              provided.
             - Performs no writes and does not commit.
         """
         ...
@@ -260,6 +298,33 @@ class TaskManagementRepository(Protocol):
                 completion timestamp.
 
         Notes:
+            - Performs no writes and does not commit.
+        """
+        ...
+
+    async def project_progress_for_projects(
+        self,
+        user_id: int,
+        project_ids: Sequence[int],
+    ) -> dict[int, tuple[int, int]]:
+        """
+        Count all and completed tasks grouped by project.
+
+        Purpose:
+            Build a project page's progress summaries without one query per
+            project.
+
+        Args:
+            user_id: Owner identifier.
+            project_ids: Project identifiers to summarize.
+
+        Returns:
+            dict[int, tuple[int, int]]: Total non-deleted task count and the
+                subset with a completion timestamp, keyed by project
+                identifier; projects without tasks are absent.
+
+        Notes:
+            - Returns an empty mapping without a query for an empty input.
             - Performs no writes and does not commit.
         """
         ...

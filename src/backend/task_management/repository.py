@@ -6,7 +6,7 @@ from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfoNotFoundError
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.errors import BadRequestError
@@ -106,6 +106,34 @@ class SqlAlchemyTaskManagementRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_palette_colors_by_ids(
+        self,
+        color_ids: Sequence[int],
+    ) -> dict[int, ColorPalette]:
+        """
+        Load multiple palette colors by identifier.
+
+        Purpose:
+            Resolve project colors without one query per row.
+
+        Args:
+            color_ids: Palette color identifiers to load.
+
+        Returns:
+            dict[int, ColorPalette]: Matching colors keyed by identifier;
+                unknown identifiers are absent.
+
+        Notes:
+            - Returns an empty mapping without a query for an empty input.
+            - Performs no writes and does not commit.
+        """
+        if not color_ids:
+            return {}
+        result = await self._session.execute(
+            select(ColorPalette).where(ColorPalette.id.in_(color_ids))
+        )
+        return {color.id: color for color in result.scalars().all()}
+
     async def get_default_palette_color(self) -> ColorPalette | None:
         """
         Load the first active palette color.
@@ -173,36 +201,64 @@ class SqlAlchemyTaskManagementRepository:
         user_id: int,
         *,
         include_archived: bool,
+        limit: int,
+        after_archived: bool | None,
+        after_name: str | None,
+        after_project_id: int | None,
     ) -> Sequence[Project]:
         """
-        List non-deleted projects owned by a user.
+        List non-deleted projects owned by a user, at most one page.
 
         Purpose:
-            Power the active project list and the project archive.
+            Power the active project list and the project archive with
+            deterministic cursor pagination.
 
         Args:
             user_id: Owner identifier.
             include_archived: Whether archived projects are included.
+            limit: Maximum number of projects to return.
+            after_archived: Cursor archive state of the last project on the
+                previous page.
+            after_name: Cursor case-insensitive name key of the last project on
+                the previous page.
+            after_project_id: Cursor identifier of the last project on the
+                previous page.
 
         Returns:
-            Sequence[Project]: Non-deleted projects with active projects first,
-                then case-insensitive name and identifier.
+            Sequence[Project]: Non-deleted projects ordered by
+                ``(is_archived, lower(name), id)``.
 
         Notes:
+            - The cursor predicate is applied only when every cursor value is
+              provided.
             - Performs no writes and does not commit.
         """
+        archived_rank = case((Project.archived_at.is_(None), 0), else_=1)
+        name_key = func.lower(Project.name)
         statement = select(Project).where(
             Project.user_id == user_id,
             Project.deleted_at.is_(None),
         )
         if not include_archived:
             statement = statement.where(Project.archived_at.is_(None))
-        result = await self._session.execute(
-            statement.order_by(
-                Project.archived_at.asc().nulls_first(),
-                func.lower(Project.name),
-                Project.id,
+        if after_archived is not None and after_name is not None and after_project_id is not None:
+            after_rank = 0 if not after_archived else 1
+            statement = statement.where(
+                or_(
+                    archived_rank > after_rank,
+                    and_(
+                        archived_rank == after_rank,
+                        name_key > after_name,
+                    ),
+                    and_(
+                        archived_rank == after_rank,
+                        name_key == after_name,
+                        Project.id > after_project_id,
+                    ),
+                )
             )
+        result = await self._session.execute(
+            statement.order_by(archived_rank, name_key, Project.id).limit(limit)
         )
         return result.scalars().all()
 
@@ -359,6 +415,53 @@ class SqlAlchemyTaskManagementRepository:
         )
         total, completed = result.one()
         return int(total), int(completed)
+
+    async def project_progress_for_projects(
+        self,
+        user_id: int,
+        project_ids: Sequence[int],
+    ) -> dict[int, tuple[int, int]]:
+        """
+        Count all and completed tasks grouped by project.
+
+        Purpose:
+            Build a project page's progress summaries without one query per
+            project.
+
+        Args:
+            user_id: Owner identifier.
+            project_ids: Project identifiers to summarize.
+
+        Returns:
+            dict[int, tuple[int, int]]: Total non-deleted task count and the
+                subset with a completion timestamp, keyed by project
+                identifier; projects without tasks are absent.
+
+        Notes:
+            - Returns an empty mapping without a query for an empty input.
+            - Performs no writes and does not commit.
+        """
+        if not project_ids:
+            return {}
+        result = await self._session.execute(
+            select(
+                Task.project_id,
+                func.count(Task.id),
+                func.count(Task.id).filter(Task.completed_at.is_not(None)),
+            )
+            .where(
+                Task.user_id == user_id,
+                Task.deleted_at.is_(None),
+                Task.project_id.in_(project_ids),
+            )
+            .group_by(Task.project_id)
+        )
+        progress: dict[int, tuple[int, int]] = {}
+        for project_id, total, completed in result.all():
+            if project_id is None:
+                continue
+            progress[project_id] = (int(total), int(completed))
+        return progress
 
     async def today_progress(
         self,

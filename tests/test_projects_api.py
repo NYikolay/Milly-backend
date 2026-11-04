@@ -12,7 +12,12 @@ from backend.auth.tokens import AccessTokenClaims
 from backend.core.errors import ConflictError, NotFoundError
 from backend.models.color_palette import ColorPalette
 from backend.models.project import Project
-from backend.task_management.projects import ProjectProgress, ProjectSummary
+from backend.task_management.projects import (
+    ProjectListCursor,
+    ProjectPage,
+    ProjectProgress,
+    ProjectSummary,
+)
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
 
@@ -86,6 +91,7 @@ class FakeProjectService:
         self.updated: list[tuple[int, dict[str, object]]] = []
         self.deleted: list[int] = []
         self.list_calls: list[tuple[int, bool]] = []
+        self.summary_calls: list[tuple[int, int]] = []
         self.user_calls: list[tuple[str, int]] = []
         self.create_error: Exception | None = None
         self.get_error: Exception | None = None
@@ -97,16 +103,61 @@ class FakeProjectService:
         """Store a prepared project summary."""
         self.summaries[summary.project.id] = summary
 
-    async def list(self, user_id: int, include_archived: bool) -> list[ProjectSummary]:
-        """Return summaries filtered by owner and archive visibility."""
+    async def list(
+        self,
+        user_id: int,
+        include_archived: bool,
+        *,
+        limit: int,
+        after: ProjectListCursor | None = None,
+    ) -> ProjectPage:
+        """Return one prepared page filtered, sorted, and cursor-bounded like the service."""
         self.list_calls.append((user_id, include_archived))
         self.user_calls.append(("list", user_id))
-        return [
-            summary
-            for summary in self.summaries.values()
-            if summary.project.user_id == user_id
-            and (include_archived or summary.project.archived_at is None)
-        ]
+        summaries = sorted(
+            (
+                summary
+                for summary in self.summaries.values()
+                if summary.project.user_id == user_id
+                and (include_archived or summary.project.archived_at is None)
+            ),
+            key=lambda summary: (
+                summary.project.archived_at is not None,
+                summary.project.name.lower(),
+                summary.project.id,
+            ),
+        )
+        if after is not None:
+            summaries = [
+                summary
+                for summary in summaries
+                if (
+                    summary.project.archived_at is not None,
+                    summary.project.name.lower(),
+                    summary.project.id,
+                )
+                > (after.is_archived, after.name_key, after.project_id)
+            ]
+        page = summaries[:limit]
+        next_cursor = (
+            ProjectListCursor(
+                is_archived=page[-1].project.archived_at is not None,
+                name_key=page[-1].project.name.lower(),
+                project_id=page[-1].project.id,
+            )
+            if len(summaries) > limit and page
+            else None
+        )
+        return ProjectPage(items=page, next_cursor=next_cursor)
+
+    async def get_summary(self, user_id: int, project_id: int) -> ProjectSummary:
+        """Record the single-project lookup and return the prepared summary."""
+        self.summary_calls.append((user_id, project_id))
+        self.user_calls.append(("get_summary", user_id))
+        summary = self.summaries.get(project_id)
+        if summary is None or summary.project.user_id != user_id:
+            raise NotFoundError("Project not found")
+        return summary
 
     async def get(self, user_id: int, project_id: int) -> Project:
         """Return one prepared project or raise the configured error."""
@@ -259,6 +310,137 @@ async def test_list_projects_returns_progress_and_color(
     }
     assert item["archived_at"] is None
     assert fake_project_service.list_calls == [(1, False)]
+
+
+async def test_project_list_returns_default_page_size(
+    project_client: AsyncClient,
+    fake_project_service: FakeProjectService,
+) -> None:
+    """Return at most the default page size and a next-page cursor."""
+    for index in range(51):
+        fake_project_service.add_summary(
+            _summary(project_id=index + 1, name=f"Project {index:02d}")
+        )
+
+    response = await project_client.get("/api/v1/projects")
+
+    body = response.json()
+    assert response.status_code == 200
+    assert len(body["items"]) == 50
+    assert body["next_cursor"] is not None
+
+
+async def test_project_list_second_page_has_no_duplicates(
+    project_client: AsyncClient,
+    fake_project_service: FakeProjectService,
+) -> None:
+    """Continue after the last item of the first page without duplicates."""
+    for index in range(51):
+        fake_project_service.add_summary(
+            _summary(project_id=index + 1, name=f"Project {index:02d}")
+        )
+
+    first = (await project_client.get("/api/v1/projects")).json()
+    second = (
+        await project_client.get("/api/v1/projects", params={"cursor": first["next_cursor"]})
+    ).json()
+
+    first_ids = {item["id"] for item in first["items"]}
+    second_ids = {item["id"] for item in second["items"]}
+    assert first_ids.isdisjoint(second_ids)
+    assert first_ids | second_ids == set(range(1, 52))
+    assert second["next_cursor"] is None
+
+
+async def test_project_list_cursor_filter_mismatch_returns_400(
+    project_client: AsyncClient,
+    fake_project_service: FakeProjectService,
+) -> None:
+    """Reject a cursor issued for a different archive filter."""
+    fake_project_service.add_summary(_summary(project_id=1, name="Alpha"))
+    fake_project_service.add_summary(_summary(project_id=2, name="Beta"))
+
+    first = (await project_client.get("/api/v1/projects", params={"limit": 1})).json()
+    assert first["next_cursor"] is not None
+    response = await project_client.get(
+        "/api/v1/projects",
+        params={
+            "include_archived": True,
+            "limit": 1,
+            "cursor": first["next_cursor"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "bad_request"
+
+
+async def test_project_list_equal_names_uses_id_tiebreaker(
+    project_client: AsyncClient,
+    fake_project_service: FakeProjectService,
+) -> None:
+    """Order rows with equal case-insensitive names by identifier ascending."""
+    for project_id in (3, 1, 2):
+        fake_project_service.add_summary(_summary(project_id=project_id, name="Work"))
+
+    ids = [item["id"] for item in (await project_client.get("/api/v1/projects")).json()["items"]]
+
+    assert ids == [1, 2, 3]
+
+
+async def test_project_list_rejects_overlong_cursor(
+    project_client: AsyncClient,
+    fake_project_service: FakeProjectService,
+) -> None:
+    """Reject a cursor longer than the shared cursor limit as a bad request."""
+    fake_project_service.add_summary(_summary())
+
+    response = await project_client.get(
+        "/api/v1/projects",
+        params={"cursor": "x" * 513},
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "bad_request"
+    assert body["message"] == "Invalid pagination cursor"
+
+
+async def test_project_list_openapi_documents_individual_params(app: FastAPI) -> None:
+    """Document the archive filter and pagination parameters individually."""
+    parameters = app.openapi()["paths"]["/api/v1/projects"]["get"]["parameters"]
+
+    assert {parameter["name"] for parameter in parameters} == {
+        "include_archived",
+        "limit",
+        "cursor",
+    }
+
+
+async def test_project_read_uses_single_summary(
+    project_client: AsyncClient,
+    fake_project_service: FakeProjectService,
+) -> None:
+    """Load a project detail through one summary lookup without listing projects."""
+    fake_project_service.add_summary(_summary())
+
+    response = await project_client.get("/api/v1/projects/1")
+
+    assert response.status_code == 200
+    assert fake_project_service.summary_calls == [(1, 1)]
+    assert fake_project_service.list_calls == []
+
+
+async def test_project_create_uses_single_summary(
+    project_client: AsyncClient,
+    fake_project_service: FakeProjectService,
+) -> None:
+    """Load a created project's response through one summary lookup."""
+    response = await project_client.post("/api/v1/projects", json={"name": "Work"})
+
+    assert response.status_code == 201
+    assert fake_project_service.summary_calls == [(1, 2)]
+    assert fake_project_service.list_calls == []
 
 
 async def test_create_project_defaults_color(

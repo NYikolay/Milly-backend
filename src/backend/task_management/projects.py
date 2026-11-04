@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -14,7 +14,6 @@ from backend.task_management.ports import TaskManagementRepository
 _PROJECT_NOT_FOUND = "Project not found"
 _PROJECT_NAME_EXISTS = "Project name already exists"
 _PROJECT_NAME_REQUIRED = "Project name is required"
-_COLOR_NOT_FOUND = "Palette color not found"
 
 
 class _UnsetType:
@@ -40,6 +39,23 @@ class ProjectSummary:
     project: Project
     progress: ProjectProgress
     color: ColorPalette
+
+
+@dataclass(frozen=True)
+class ProjectListCursor:
+    """Ordering key of the last project on a page."""
+
+    is_archived: bool
+    name_key: str
+    project_id: int
+
+
+@dataclass(frozen=True)
+class ProjectPage:
+    """One page of project summaries with a cursor for the next page."""
+
+    items: Sequence[ProjectSummary]
+    next_cursor: ProjectListCursor | None
 
 
 class ProjectService:
@@ -71,37 +87,71 @@ class ProjectService:
         self._palette_service = palette_service
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
 
-    async def list(self, user_id: int, include_archived: bool) -> list[ProjectSummary]:
+    async def list(
+        self,
+        user_id: int,
+        include_archived: bool,
+        *,
+        limit: int,
+        after: ProjectListCursor | None = None,
+    ) -> ProjectPage:
         """
-        List project summaries for a user.
+        List one page of project summaries for a user.
 
         Purpose:
-            Provide active or complete project lists with progress and color
-            data for rendering.
+            Provide active or complete project pages with progress and color
+            data loaded through batch queries.
 
         Args:
             user_id: Owner identifier.
             include_archived: Whether archived projects are included.
+            limit: Maximum number of project summaries to return.
+            after: Optional ordering key of the last project on the previous
+                page.
 
         Returns:
-            list[ProjectSummary]: Project summaries in repository order.
+            ProjectPage: Project summaries in ``(is_archived, lower(name), id)``
+                order and the cursor for the next page, or ``None`` when this
+                is the last page.
 
         Raises:
             NotFoundError: If a project references a missing palette color.
 
         Notes:
+            - The repository is queried for ``limit + 1`` rows so the extra row
+              only signals another page.
+            - Progress and colors are loaded with one batch query each; an
+              empty page issues no batch queries.
             - Performs no writes and does not commit.
         """
         projects = await self._repository.list_projects(
             user_id,
             include_archived=include_archived,
+            limit=limit + 1,
+            after_archived=after.is_archived if after is not None else None,
+            after_name=after.name_key if after is not None else None,
+            after_project_id=after.project_id if after is not None else None,
         )
+        page_projects = tuple(projects[:limit])
+        next_cursor = (
+            ProjectListCursor(
+                is_archived=page_projects[-1].archived_at is not None,
+                name_key=page_projects[-1].name.lower(),
+                project_id=page_projects[-1].id,
+            )
+            if len(projects) > limit and page_projects
+            else None
+        )
+        project_ids = [project.id for project in page_projects]
+        color_ids = sorted({project.color_id for project in page_projects})
+        progress_by_project = await self._repository.project_progress_for_projects(
+            user_id,
+            project_ids,
+        )
+        colors = await self._palette_service.get_colors(color_ids)
         summaries: list[ProjectSummary] = []
-        for project in projects:
-            total, completed = await self._repository.project_progress(user_id, project.id)
-            color = await self._repository.get_palette_color(project.color_id)
-            if color is None:
-                raise NotFoundError(_COLOR_NOT_FOUND)
+        for project in page_projects:
+            total, completed = progress_by_project.get(project.id, (0, 0))
             summaries.append(
                 ProjectSummary(
                     project=project,
@@ -110,10 +160,47 @@ class ProjectService:
                         completed=completed,
                         remaining=total - completed,
                     ),
-                    color=color,
+                    color=colors[project.color_id],
                 )
             )
-        return summaries
+        return ProjectPage(items=summaries, next_cursor=next_cursor)
+
+    async def get_summary(self, user_id: int, project_id: int) -> ProjectSummary:
+        """
+        Load one project summary.
+
+        Purpose:
+            Resolve the progress and color representation of a project detail or
+            mutation response without listing every project.
+
+        Args:
+            user_id: Owner identifier.
+            project_id: Project identifier.
+
+        Returns:
+            ProjectSummary: The matching project with its progress and color.
+
+        Raises:
+            NotFoundError: If the project does not exist for this user or its
+                palette color is missing.
+
+        Notes:
+            - Uses one project lookup, one progress query, and one palette
+              color query.
+            - Performs no writes and does not commit.
+        """
+        project = await self._require_project(user_id, project_id)
+        total, completed = await self._repository.project_progress(user_id, project.id)
+        color = await self._palette_service.get_color(project.color_id)
+        return ProjectSummary(
+            project=project,
+            progress=ProjectProgress(
+                total=total,
+                completed=completed,
+                remaining=total - completed,
+            ),
+            color=color,
+        )
 
     async def get(self, user_id: int, project_id: int) -> Project:
         """

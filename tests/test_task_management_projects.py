@@ -6,12 +6,15 @@ from uuid import UUID
 
 import pytest
 
+from backend.api.pagination import DEFAULT_PAGE_SIZE
 from backend.core.errors import BadRequestError, ConflictError, ErrorCode, NotFoundError
 from backend.models.color_palette import ColorPalette
 from backend.models.project import Project
 from backend.task_management.palette import PaletteService
 from backend.task_management.ports import TaskManagementRepository
 from backend.task_management.projects import (
+    ProjectListCursor,
+    ProjectPage,
     ProjectProgress,
     ProjectService,
     ProjectSummary,
@@ -80,22 +83,95 @@ async def test_list_returns_progress_and_palette_color() -> None:
     project = make_project()
     color = make_color()
     repository.list_projects.return_value = [project]
-    repository.project_progress.return_value = (5, 2)
-    repository.get_palette_color.return_value = color
+    repository.project_progress_for_projects.return_value = {project.id: (5, 2)}
+    repository.get_palette_colors_by_ids.return_value = {color.id: color}
 
     service = make_service(repository)
 
-    result = await service.list(USER_ID, include_archived=False)
+    result = await service.list(
+        USER_ID,
+        include_archived=False,
+        limit=DEFAULT_PAGE_SIZE,
+    )
 
-    assert result == [
-        ProjectSummary(
-            project=project,
-            progress=ProjectProgress(total=5, completed=2, remaining=3),
-            color=color,
-        ),
+    assert result == ProjectPage(
+        items=[
+            ProjectSummary(
+                project=project,
+                progress=ProjectProgress(total=5, completed=2, remaining=3),
+                color=color,
+            ),
+        ],
+        next_cursor=None,
+    )
+    repository.list_projects.assert_awaited_once_with(
+        USER_ID,
+        include_archived=False,
+        limit=DEFAULT_PAGE_SIZE + 1,
+        after_archived=None,
+        after_name=None,
+        after_project_id=None,
+    )
+    repository.project_progress_for_projects.assert_awaited_once_with(USER_ID, [project.id])
+    repository.get_palette_colors_by_ids.assert_awaited_once_with([color.id])
+    repository.project_progress.assert_not_awaited()
+    repository.get_palette_color.assert_not_awaited()
+
+
+async def test_list_uses_grouped_progress_and_colors() -> None:
+    """A project page loads progress and colors with one batch query each."""
+    repository = make_repository()
+    first = make_project(project_id=1, name="Alpha")
+    second = make_project(project_id=2, name="Beta", color_id=2)
+    first_color = make_color(color_id=1)
+    second_color = make_color(color_id=2)
+    repository.list_projects.return_value = [first, second]
+    repository.project_progress_for_projects.return_value = {1: (5, 2), 2: (1, 1)}
+    repository.get_palette_colors_by_ids.return_value = {
+        1: first_color,
+        2: second_color,
+    }
+
+    service = make_service(repository)
+
+    page = await service.list(
+        USER_ID,
+        include_archived=False,
+        limit=DEFAULT_PAGE_SIZE,
+    )
+
+    assert [summary.project for summary in page.items] == [first, second]
+    assert page.items[0].progress == ProjectProgress(total=5, completed=2, remaining=3)
+    assert page.items[1].color is second_color
+    repository.project_progress_for_projects.assert_awaited_once_with(USER_ID, [1, 2])
+    repository.get_palette_colors_by_ids.assert_awaited_once_with([1, 2])
+    repository.project_progress.assert_not_awaited()
+    repository.get_palette_color.assert_not_awaited()
+
+
+async def test_list_returns_cursor_from_last_kept_project() -> None:
+    """An extra repository row signals another page and yields its cursor."""
+    repository = make_repository()
+    projects = [
+        make_project(project_id=1, name="Alpha"),
+        make_project(project_id=2, name="Beta", archived_at=NOW),
+        make_project(project_id=3, name="Gamma"),
     ]
-    repository.list_projects.assert_awaited_once_with(USER_ID, include_archived=False)
-    repository.project_progress.assert_awaited_once_with(USER_ID, project.id)
+    color = make_color()
+    repository.list_projects.return_value = projects
+    repository.project_progress_for_projects.return_value = {}
+    repository.get_palette_colors_by_ids.return_value = {color.id: color}
+
+    service = make_service(repository)
+
+    page = await service.list(USER_ID, include_archived=True, limit=2)
+
+    assert [summary.project.id for summary in page.items] == [1, 2]
+    assert page.next_cursor == ProjectListCursor(
+        is_archived=True,
+        name_key="beta",
+        project_id=2,
+    )
 
 
 async def test_list_hides_archived_projects_unless_requested() -> None:
@@ -105,22 +181,78 @@ async def test_list_hides_archived_projects_unless_requested() -> None:
     archived = make_project(project_id=2, name="Archived", archived_at=NOW)
     color = make_color()
 
-    async def list_projects(user_id: int, *, include_archived: bool) -> list[Project]:
-        """Mimic the repository archive filter."""
+    async def list_projects(
+        user_id: int,
+        *,
+        include_archived: bool,
+        limit: int,
+        after_archived: bool | None,
+        after_name: str | None,
+        after_project_id: int | None,
+    ) -> list[Project]:
+        """Mimic the repository archive filter and page bound."""
         assert user_id == USER_ID
-        return [active, archived] if include_archived else [active]
+        return ([active, archived] if include_archived else [active])[:limit]
 
     repository.list_projects.side_effect = list_projects
-    repository.project_progress.return_value = (0, 0)
+    repository.project_progress_for_projects.return_value = {1: (0, 0), 2: (0, 0)}
+    repository.get_palette_colors_by_ids.return_value = {color.id: color}
+
+    service = make_service(repository)
+
+    active_result = await service.list(
+        USER_ID,
+        include_archived=False,
+        limit=DEFAULT_PAGE_SIZE,
+    )
+    all_result = await service.list(
+        USER_ID,
+        include_archived=True,
+        limit=DEFAULT_PAGE_SIZE,
+    )
+
+    assert [summary.project for summary in active_result.items] == [active]
+    assert [summary.project for summary in all_result.items] == [active, archived]
+
+
+async def test_list_raises_not_found_for_missing_color() -> None:
+    """A page that references a missing palette color fails like a single lookup."""
+    repository = make_repository()
+    project = make_project()
+    repository.list_projects.return_value = [project]
+    repository.project_progress_for_projects.return_value = {project.id: (0, 0)}
+    repository.get_palette_colors_by_ids.return_value = {}
+
+    service = make_service(repository)
+
+    with pytest.raises(NotFoundError) as error:
+        await service.list(USER_ID, include_archived=False, limit=DEFAULT_PAGE_SIZE)
+
+    assert error.value.code is ErrorCode.NOT_FOUND
+
+
+async def test_get_summary_returns_progress_and_color() -> None:
+    """A single project summary uses one project, progress, and color lookup."""
+    repository = make_repository()
+    project = make_project()
+    color = make_color()
+    repository.get_project.return_value = project
+    repository.project_progress.return_value = (5, 2)
     repository.get_palette_color.return_value = color
 
     service = make_service(repository)
 
-    active_result = await service.list(USER_ID, include_archived=False)
-    all_result = await service.list(USER_ID, include_archived=True)
+    result = await service.get_summary(USER_ID, project.id)
 
-    assert [summary.project for summary in active_result] == [active]
-    assert [summary.project for summary in all_result] == [active, archived]
+    assert result == ProjectSummary(
+        project=project,
+        progress=ProjectProgress(total=5, completed=2, remaining=3),
+        color=color,
+    )
+    repository.get_project.assert_awaited_once_with(USER_ID, project.id, for_update=False)
+    repository.project_progress.assert_awaited_once_with(USER_ID, project.id)
+    repository.get_palette_color.assert_awaited_once_with(color.id)
+    repository.list_projects.assert_not_awaited()
 
 
 async def test_get_returns_project() -> None:

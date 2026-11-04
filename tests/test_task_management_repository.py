@@ -8,6 +8,7 @@ from uuid import UUID
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.models.color_palette import ColorPalette
 from backend.models.project import Project
 from backend.task_management.repository import SqlAlchemyTaskManagementRepository
 
@@ -216,26 +217,123 @@ async def test_list_projects_filters_and_orders_active_projects() -> None:
     session = RecordingSession()
     repository = make_repository(session)
 
-    await repository.list_projects(USER_ID, include_archived=False)
+    await repository.list_projects(
+        USER_ID,
+        include_archived=False,
+        limit=10,
+        after_archived=None,
+        after_name=None,
+        after_project_id=None,
+    )
     active_sql = compile_statement(session.statements[-1])
 
-    await repository.list_projects(USER_ID, include_archived=True)
+    await repository.list_projects(
+        USER_ID,
+        include_archived=True,
+        limit=10,
+        after_archived=None,
+        after_name=None,
+        after_project_id=None,
+    )
     all_sql = compile_statement(session.statements[-1])
 
+    ordering = (
+        "ORDER BY CASE WHEN (projects.archived_at IS NULL) THEN 0 ELSE 1 END, "
+        "lower(projects.name), projects.id"
+    )
     assert "projects.user_id = 7" in active_sql
     assert "projects.deleted_at IS NULL" in active_sql
     assert "projects.archived_at IS NULL" in active_sql
-    assert (
-        "ORDER BY projects.archived_at ASC NULLS FIRST, lower(projects.name), projects.id"
-        in active_sql
-    )
+    assert ordering in active_sql
+    assert "LIMIT 10" in active_sql
     assert "projects.user_id = 7" in all_sql
     assert "projects.deleted_at IS NULL" in all_sql
-    assert "projects.archived_at IS NULL" not in all_sql
-    assert (
-        "ORDER BY projects.archived_at ASC NULLS FIRST, lower(projects.name), projects.id"
-        in all_sql
+    assert ordering in all_sql
+    assert "LIMIT 10" in all_sql
+
+
+async def test_list_projects_applies_archived_name_id_cursor_and_limit() -> None:
+    """Project pagination applies the archive rank, name key, id tiebreaker, and limit."""
+    session = RecordingSession()
+    repository = make_repository(session)
+
+    await repository.list_projects(
+        USER_ID,
+        include_archived=True,
+        limit=6,
+        after_archived=True,
+        after_name="work",
+        after_project_id=10,
     )
+    sql = compile_statement(session.statements[-1])
+
+    assert "CASE WHEN (projects.archived_at IS NULL) THEN 0 ELSE 1 END > 1" in sql
+    assert "lower(projects.name) > 'work'" in sql
+    assert "lower(projects.name) = 'work'" in sql
+    assert "projects.id > 10" in sql
+    assert (
+        "ORDER BY CASE WHEN (projects.archived_at IS NULL) THEN 0 ELSE 1 END, "
+        "lower(projects.name), projects.id"
+    ) in sql
+    assert "LIMIT 6" in sql
+
+
+async def test_project_progress_for_projects_groups_by_project_id() -> None:
+    """Batch progress counts non-deleted tasks grouped by project."""
+    session = RecordingSession(results=[RecordingResult(values=[(5, 4, 2), (6, 1, 0)])])
+    repository = make_repository(session)
+
+    result = await repository.project_progress_for_projects(USER_ID, (5, 6))
+    sql = compile_statement(session.statements[-1])
+
+    assert result == {5: (4, 2), 6: (1, 0)}
+    assert "count(tasks.id)" in sql
+    assert "FILTER (WHERE tasks.completed_at IS NOT NULL)" in sql
+    assert "tasks.user_id = 7" in sql
+    assert "tasks.deleted_at IS NULL" in sql
+    assert "tasks.project_id IN (5, 6)" in sql
+    assert "GROUP BY tasks.project_id" in sql
+
+
+async def test_get_palette_colors_by_ids_uses_in() -> None:
+    """Batch palette loading selects every requested identifier in one query."""
+    first = ColorPalette(
+        id=1,
+        slug="blue",
+        name="Blue",
+        hex="#0000FF",
+        sort_order=1,
+        is_active=True,
+    )
+    second = ColorPalette(
+        id=3,
+        slug="red",
+        name="Red",
+        hex="#FF0000",
+        sort_order=3,
+        is_active=False,
+    )
+    session = RecordingSession(results=[RecordingResult(values=[first, second])])
+    repository = make_repository(session)
+
+    result = await repository.get_palette_colors_by_ids((1, 3))
+    sql = compile_statement(session.statements[-1])
+
+    assert result == {1: first, 3: second}
+    assert "color_palette.id IN (1, 3)" in sql
+
+
+async def test_project_batch_methods_skip_empty_input() -> None:
+    """Project batch methods return empty mappings without issuing queries."""
+    session = RecordingSession()
+    repository = make_repository(session)
+
+    progress = await repository.project_progress_for_projects(USER_ID, ())
+    colors = await repository.get_palette_colors_by_ids(())
+
+    assert progress == {}
+    assert colors == {}
+    assert session.statements == []
 
 
 async def test_project_name_exists_is_case_insensitive_active_and_excludes_id() -> None:

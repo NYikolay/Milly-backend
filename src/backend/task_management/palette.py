@@ -12,7 +12,7 @@ _LAST_ACTIVE_COLOR = "At least one active color is required"
 
 
 class PaletteService:
-    """Resolve palette colors for selection and display and protect the last active color."""
+    """Resolve palette colors individually or in batches and protect the last active color."""
 
     def __init__(self, repository: TaskManagementRepository) -> None:
         """
@@ -75,6 +75,33 @@ class PaletteService:
         if color is None:
             raise NotFoundError(_COLOR_NOT_FOUND)
         return color
+
+    async def get_colors(self, color_ids: Sequence[int]) -> dict[int, ColorPalette]:
+        """
+        Load multiple palette colors for display.
+
+        Purpose:
+            Resolve the stored colors of a project page in one repository
+            query while preserving the not-found contract of single lookups.
+
+        Args:
+            color_ids: Palette color identifiers to load.
+
+        Returns:
+            dict[int, ColorPalette]: Matching colors keyed by identifier,
+                including colors that are no longer active.
+
+        Raises:
+            NotFoundError: If any requested color does not exist.
+
+        Notes:
+            - Returns an empty mapping without a query for an empty input.
+            - Performs no writes and does not commit.
+        """
+        colors = await self._repository.get_palette_colors_by_ids(color_ids)
+        if any(color_id not in colors for color_id in color_ids):
+            raise NotFoundError(_COLOR_NOT_FOUND)
+        return colors
 
     async def resolve_for_write(self, color_id: int | None) -> ColorPalette:
         """
