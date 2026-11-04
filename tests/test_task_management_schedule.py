@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, time
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from backend.task_management.enums import (
     DeliveryStatus,
     Priority,
@@ -78,8 +80,8 @@ def test_daily_due_times_stops_at_ends_on_inclusive() -> None:
     ]
 
 
-def test_daily_due_times_spring_forward_shifts_forward() -> None:
-    """Move a nonexistent spring-forward wall time to the first valid instant."""
+def test_daily_due_times_spring_forward_clamps_to_gap_end() -> None:
+    """Clamp a nonexistent spring-forward wall time to the end of the gap."""
     now = datetime(2026, 3, 28, 12, 0, tzinfo=UTC)
     result = daily_due_times(
         starts_on=date(2026, 3, 29),
@@ -88,7 +90,7 @@ def test_daily_due_times_spring_forward_shifts_forward() -> None:
         timezone=BERLIN,
         now=now,
     )
-    assert result == [datetime(2026, 3, 29, 1, 30, tzinfo=UTC)]
+    assert result == [datetime(2026, 3, 29, 1, 0, tzinfo=UTC)]
 
 
 def test_daily_due_times_fall_back_uses_first_occurrence() -> None:
@@ -122,6 +124,21 @@ def test_daily_due_times_resumes_after_generated_through() -> None:
     ]
 
 
+def test_daily_due_times_generated_through_beyond_horizon_returns_one_candidate() -> None:
+    """Return one candidate when generation already extends beyond the horizon."""
+    now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
+    generated_through = datetime(2027, 6, 1, 6, 0, tzinfo=UTC)
+    result = daily_due_times(
+        starts_on=date(2026, 11, 1),
+        ends_on=None,
+        time_of_day=time(9, 0),
+        timezone=MOSCOW,
+        now=now,
+        generated_through=generated_through,
+    )
+    assert result == [datetime(2027, 6, 2, 6, 0, tzinfo=UTC)]
+
+
 def test_daily_due_times_respects_custom_horizon() -> None:
     """Emit slots only through the configured horizon, inclusive."""
     now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
@@ -153,11 +170,30 @@ def test_daily_due_times_returns_empty_when_ends_before_start() -> None:
     assert result == []
 
 
-def test_localize_wall_time_spring_forward_moves_to_valid_instant() -> None:
-    """Resolve a nonexistent wall time forward across a DST gap."""
-    assert localize_wall_time(date(2026, 3, 29), time(2, 30), BERLIN) == datetime(
-        2026, 3, 29, 1, 30, tzinfo=UTC
+def test_daily_due_times_returns_empty_when_ends_on_already_passed() -> None:
+    """Return no slots when the series end precedes the current local date."""
+    now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
+    result = daily_due_times(
+        starts_on=date(2026, 10, 1),
+        ends_on=date(2026, 11, 3),
+        time_of_day=time(9, 0),
+        timezone=MOSCOW,
+        now=now,
     )
+    assert result == []
+
+
+def test_localize_wall_time_spring_forward_clamps_to_gap_end() -> None:
+    """Clamp a nonexistent wall time to the first valid instant after the gap."""
+    assert localize_wall_time(date(2026, 3, 29), time(2, 30), BERLIN) == datetime(
+        2026, 3, 29, 1, 0, tzinfo=UTC
+    )
+
+
+def test_localize_wall_time_rejects_aware_time_of_day() -> None:
+    """Reject a time_of_day that already carries timezone information."""
+    with pytest.raises(ValueError, match="timezone-naive"):
+        localize_wall_time(date(2026, 11, 4), time(9, 0, tzinfo=UTC), MOSCOW)
 
 
 def test_localize_wall_time_fall_back_uses_fold_zero() -> None:
@@ -214,7 +250,7 @@ def test_first_scheduled_time_keeps_slot_on_due_date_when_ahead() -> None:
 
 
 def test_first_scheduled_time_respects_interval() -> None:
-    """Keep the interval anchored to the due local date while skipping past slots."""
+    """Advance from the first slot after due by whole intervals until after now."""
     due_at = datetime(2026, 11, 4, 15, 0, tzinfo=UTC)
     now = datetime(2026, 11, 10, 10, 0, tzinfo=UTC)
     result = first_scheduled_time(
@@ -224,7 +260,20 @@ def test_first_scheduled_time_respects_interval() -> None:
         interval_days=3,
         now=now,
     )
-    assert result == datetime(2026, 11, 13, 6, 0, tzinfo=UTC)
+    assert result == datetime(2026, 11, 11, 6, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("interval_days", [0, -1])
+def test_first_scheduled_time_rejects_non_positive_interval(interval_days: int) -> None:
+    """Reject a zero or negative interval before searching for a slot."""
+    with pytest.raises(ValueError, match="at least 1"):
+        first_scheduled_time(
+            due_at=datetime(2026, 11, 4, 15, 0, tzinfo=UTC),
+            time_of_day=time(9, 0),
+            timezone=MOSCOW,
+            interval_days=interval_days,
+            now=datetime(2026, 11, 4, 10, 0, tzinfo=UTC),
+        )
 
 
 def test_next_scheduled_time_advances_by_interval() -> None:
@@ -236,6 +285,18 @@ def test_next_scheduled_time_advances_by_interval() -> None:
         timezone=MOSCOW,
         interval_days=2,
     ) == datetime(2026, 11, 7, 6, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("interval_days", [0, -1])
+def test_next_scheduled_time_rejects_non_positive_interval(interval_days: int) -> None:
+    """Reject a zero or negative interval before advancing a slot."""
+    with pytest.raises(ValueError, match="at least 1"):
+        next_scheduled_time(
+            current=datetime(2026, 11, 5, 6, 0, tzinfo=UTC),
+            time_of_day=time(9, 0),
+            timezone=MOSCOW,
+            interval_days=interval_days,
+        )
 
 
 def test_enum_values_match_database_contract() -> None:

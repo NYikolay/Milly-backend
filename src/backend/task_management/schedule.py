@@ -16,23 +16,41 @@ def localize_wall_time(local_date: date, time_of_day: time, timezone: ZoneInfo) 
 
     Args:
         local_date: Calendar date in the target timezone.
-        time_of_day: Local wall-clock time to resolve.
+        time_of_day: Naive local wall-clock time to resolve.
         timezone: IANA timezone used to interpret the wall-clock values.
 
     Returns:
         datetime: The resolved instant as an aware UTC datetime.
 
+    Raises:
+        ValueError: If ``time_of_day`` already carries timezone information.
+
     Notes:
         - Ambiguous fall-back times use ``fold=0`` and therefore the first occurrence.
-        - Nonexistent spring-forward times advance by whole hours until the wall clock
-          exists, returning the first existing instant after the gap.
+        - Nonexistent spring-forward times resolve to the first valid instant after
+          the gap, discarding any minutes that fall inside the gap.
     """
+    if time_of_day.tzinfo is not None:
+        raise ValueError("time_of_day must be timezone-naive")
+
     naive = datetime.combine(local_date, time_of_day)
     candidate = naive.replace(tzinfo=timezone, fold=0)
-    while candidate.astimezone(timezone).replace(tzinfo=None) != naive:
-        naive += timedelta(hours=1)
-        candidate = naive.replace(tzinfo=timezone, fold=0)
-    return candidate.astimezone(UTC)
+    localized = candidate.astimezone(UTC).astimezone(timezone)
+    if localized.replace(tzinfo=None) == naive:
+        return candidate.astimezone(UTC)
+
+    folded = naive.replace(tzinfo=timezone, fold=1)
+    target_offset = folded.utcoffset()
+    lower = int(folded.astimezone(UTC).timestamp())
+    upper = int(candidate.astimezone(UTC).timestamp())
+    while upper - lower > 1:
+        middle = (lower + upper) // 2
+        instant = datetime.fromtimestamp(middle, tz=UTC)
+        if instant.astimezone(timezone).utcoffset() == target_offset:
+            upper = middle
+        else:
+            lower = middle
+    return datetime.fromtimestamp(upper, tz=UTC)
 
 
 def daily_due_times(
@@ -70,6 +88,9 @@ def daily_due_times(
         - ``generated_through`` resumes on the next local day after the instant.
         - The returned list never contains an instant at or before ``now``.
     """
+    if ends_on is not None and (ends_on < starts_on or ends_on < now.astimezone(timezone).date()):
+        return []
+
     candidate_date = starts_on
     if generated_through is not None:
         generated_date = generated_through.astimezone(timezone).date()
@@ -160,15 +181,18 @@ def first_scheduled_time(
         ValueError: If ``interval_days`` is less than one.
 
     Notes:
-        - Slots are anchored to the local date of ``due_at`` and advance by whole
-          intervals, so an interval greater than one may skip the next local day.
+        - The first candidate is the first local ``time_of_day`` at or after
+          ``due_at``; subsequent candidates advance by whole intervals.
     """
     if interval_days < 1:
         raise ValueError("interval_days must be at least 1")
 
     candidate_date = due_at.astimezone(timezone).date()
     candidate = localize_wall_time(candidate_date, time_of_day, timezone)
-    while candidate < due_at or candidate <= now:
+    if candidate < due_at:
+        candidate_date += timedelta(days=1)
+        candidate = localize_wall_time(candidate_date, time_of_day, timezone)
+    while candidate <= now:
         candidate_date += timedelta(days=interval_days)
         candidate = localize_wall_time(candidate_date, time_of_day, timezone)
     return candidate
