@@ -267,11 +267,14 @@ class ProjectService:
         Notes:
             - Archiving an already archived project keeps its original
               timestamp.
+            - The first transition to archived clears reminder slots and
+              cancels active deliveries for the project's tasks and series.
             - Locks the project row and does not commit.
         """
         project = await self._require_project(user_id, project_id, for_update=True)
         if project.archived_at is None:
             project.archived_at = self._clock()
+            await self._repository.pause_project_reminders(user_id, project.id)
         return project
 
     async def unarchive(self, user_id: int, project_id: int) -> Project:
