@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from backend.api.deps import get_current_access, get_task_service
+from backend.api.pagination import MAX_DB_ID, encode_cursor, filter_fingerprint
 from backend.auth.tokens import AccessTokenClaims
 from backend.core.errors import NotFoundError
 from backend.models.label import Label
@@ -31,6 +32,22 @@ from tests.task_management_fakes import FakeTaskManagementRepository, fixed_now
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
 DUE_AT = datetime(2026, 11, 4, 15, 0, tzinfo=UTC)
 REMINDER_AT = datetime(2026, 11, 4, 14, 30, tzinfo=UTC)
+
+
+def _cursor(order_key: list[object]) -> str:
+    """Build a task-list cursor matching the default list filters."""
+    fingerprint = filter_fingerprint(
+        {
+            "date": None,
+            "include_archived_projects": False,
+            "priorities": [],
+            "project_ids": [],
+            "q": None,
+            "recurrence": "all",
+            "status": "all",
+        }
+    )
+    return encode_cursor(user_id=1, filter_fingerprint=fingerprint, order_key=order_key)
 
 
 def _claims(user_id: int = 1) -> AccessTokenClaims:
@@ -279,6 +296,7 @@ async def test_task_create_rejects_too_many_labels(task_client: AsyncClient) -> 
     )
 
     assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
 
 
 async def test_task_update_rejects_too_many_labels(task_client: AsyncClient) -> None:
@@ -289,6 +307,7 @@ async def test_task_update_rejects_too_many_labels(task_client: AsyncClient) -> 
     )
 
     assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
 
 
 async def test_task_create_rejects_too_long_description(task_client: AsyncClient) -> None:
@@ -426,6 +445,21 @@ async def test_task_list_rejects_overlong_cursor(
     response = await task_client.get(
         "/api/v1/tasks",
         params={"cursor": "x" * 513},
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "bad_request"
+    assert body["message"] == "Invalid pagination cursor"
+
+
+async def test_task_list_rejects_task_id_out_of_database_range(
+    task_client: AsyncClient,
+) -> None:
+    """Reject a crafted cursor whose task identifier exceeds the bigint range."""
+    response = await task_client.get(
+        "/api/v1/tasks",
+        params={"cursor": _cursor([DUE_AT.isoformat(), MAX_DB_ID + 1])},
     )
 
     assert response.status_code == 400

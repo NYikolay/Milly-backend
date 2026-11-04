@@ -9,6 +9,7 @@ from backend.api.deps import CurrentAccessDep, ProjectServiceDep
 from backend.api.errors.openapi import StandardizedAPIRouter, document_errors
 from backend.api.pagination import (
     DEFAULT_PAGE_SIZE,
+    MAX_DB_ID,
     MAX_PAGE_SIZE,
     decode_cursor,
     encode_cursor,
@@ -78,6 +79,25 @@ def _project_response(summary: ProjectSummary) -> ProjectResponse:
     )
 
 
+def _is_safe_project_name_key(name_key: str) -> bool:
+    """
+    Check whether a project cursor name key is safe for a database comparison.
+
+    Purpose:
+        Reject NUL and surrogate code points that PostgreSQL text values
+        cannot contain before the key is bound into a query.
+
+    Args:
+        name_key: Case-insensitive project name key decoded from a cursor.
+
+    Returns:
+        bool: ``True`` when the key contains no forbidden code points.
+    """
+    if "\x00" in name_key:
+        return False
+    return not any(0xD800 <= ord(character) <= 0xDFFF for character in name_key)
+
+
 def _project_list_cursor(order_key: list[object]) -> ProjectListCursor:
     """
     Convert a decoded cursor ordering key into a typed project cursor.
@@ -94,19 +114,21 @@ def _project_list_cursor(order_key: list[object]) -> ProjectListCursor:
             identifier of the last project on the previous page.
 
     Raises:
-        BadRequestError: If the key does not contain an archive flag of ``0``
-            or ``1``, a string name key, and a non-boolean integer project
-            identifier.
+        BadRequestError: If the key does not contain an integer archive flag
+            of ``0`` or ``1``, a database-safe string name key, and an integer
+            project identifier within the database range.
     """
     try:
         if len(order_key) != 3:
             raise ValueError
         archived_value, name_key, project_id = order_key
-        if archived_value not in (0, 1) or not isinstance(name_key, str):
+        if type(archived_value) is not int or archived_value not in (0, 1):
             raise ValueError
-        if not isinstance(project_id, int) or isinstance(project_id, bool):
+        if not isinstance(name_key, str) or not _is_safe_project_name_key(name_key):
             raise ValueError
-    except TypeError, ValueError:
+        if type(project_id) is not int or not 1 <= project_id <= MAX_DB_ID:
+            raise ValueError
+    except (TypeError, ValueError):  # fmt: skip
         raise BadRequestError("Invalid pagination cursor") from None
     return ProjectListCursor(
         is_archived=archived_value == 1,
@@ -298,8 +320,7 @@ async def read_project(
     Notes:
         - Another user's project is reported as not found.
     """
-    project = await service.get(claims.user_id, project_id)
-    summary = await _load_summary(service, claims.user_id, project.id)
+    summary = await _load_summary(service, claims.user_id, project_id)
     return _project_response(summary)
 
 

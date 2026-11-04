@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from typing import Final
 
@@ -9,8 +10,10 @@ from backend.core.errors import BadRequestError
 DEFAULT_PAGE_SIZE: Final = 50
 MAX_PAGE_SIZE: Final = 100
 MAX_CURSOR_LENGTH: Final = 512
+MAX_DB_ID: Final = 2**63 - 1
 
 _CURSOR_VERSION: Final = 1
+_CURSOR_PATTERN: Final = re.compile(r"[A-Za-z0-9_-]+")
 
 
 def filter_fingerprint(values: Mapping[str, object]) -> str:
@@ -86,25 +89,29 @@ def decode_cursor(cursor: str, *, user_id: int, filter_fingerprint: str) -> list
         list[object]: Ordering values stored in the cursor.
 
     Raises:
-        BadRequestError: If the cursor is empty, too long, not valid Base64,
-            not a JSON object, of an unsupported version, bound to another
-            user or filter set, or missing a list ordering key.
+        BadRequestError: If the cursor is empty, too long, not URL-safe
+            Base64, not a JSON object, of an unsupported version, bound to
+            another user or filter set, or missing a list ordering key.
 
     Notes:
         - No side effects; every decode failure maps to one generic error so
           malformed tokens do not leak implementation details.
     """
     try:
-        if not cursor or len(cursor) > MAX_CURSOR_LENGTH:
+        if (
+            not cursor
+            or len(cursor) > MAX_CURSOR_LENGTH
+            or _CURSOR_PATTERN.fullmatch(cursor) is None
+        ):
             raise ValueError
         padded = cursor + "=" * (-len(cursor) % 4)
-        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+        raw = base64.b64decode(padded.encode("ascii"), altchars=b"-_", validate=True)
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError
-        if data.get("v") != _CURSOR_VERSION:
+        if type(data.get("v")) is not int or data.get("v") != _CURSOR_VERSION:
             raise ValueError
-        if data.get("u") != user_id:
+        if type(data.get("u")) is not int or data.get("u") != user_id:
             raise ValueError
         if data.get("f") != filter_fingerprint:
             raise ValueError

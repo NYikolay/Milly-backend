@@ -259,6 +259,7 @@ async def test_list_projects_filters_and_orders_active_projects() -> None:
     assert "projects.user_id = 7" in active_sql
     assert "projects.deleted_at IS NULL" in active_sql
     assert "projects.archived_at IS NULL" in active_sql
+    assert "lower(projects.name) AS name_key" in active_sql
     assert ordering in active_sql
     assert "LIMIT 10" in active_sql
     assert "projects.user_id = 7" in all_sql
@@ -291,6 +292,24 @@ async def test_list_projects_applies_archived_name_id_cursor_and_limit() -> None
         "lower(projects.name), projects.id"
     ) in sql
     assert "LIMIT 6" in sql
+
+
+async def test_list_projects_returns_sql_lower_name_key() -> None:
+    """Project listing returns each project paired with the SQL lower-case key."""
+    project = Project(id=1, user_id=USER_ID, name="Ärger", color_id=1)
+    session = RecordingSession(results=[RecordingResult(values=[(project, "ärger")])])
+    repository = make_repository(session)
+
+    rows = await repository.list_projects(
+        USER_ID,
+        include_archived=False,
+        limit=10,
+        after_archived=None,
+        after_name=None,
+        after_project_id=None,
+    )
+
+    assert rows == [(project, "ärger")]
 
 
 async def test_project_progress_for_projects_groups_by_project_id() -> None:
@@ -860,7 +879,14 @@ async def test_resume_project_reminders_batches_series_and_task_reminders() -> N
     await repository.resume_project_reminders(USER_ID, PROJECT_ID, NOW)
 
     statements = "\n".join(str(statement) for statement in session.statements)
+    reminder_sql = [
+        compile_statement(statement)
+        for statement in session.statements
+        if "FROM task_reminders" in str(statement)
+    ]
     assert statements.count("FROM task_reminders") == 2
+    assert len(reminder_sql) == 2
+    assert all("task_reminders.user_id = 7" in sql for sql in reminder_sql)
     assert "IN (" in statements
     assert "task_reminders.series_id IN" in statements
     assert "task_reminders.task_id IN" in statements

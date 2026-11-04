@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from backend.api.deps import get_current_access, get_project_service
+from backend.api.pagination import MAX_DB_ID, encode_cursor, filter_fingerprint
 from backend.auth.tokens import AccessTokenClaims
 from backend.core.errors import ConflictError, NotFoundError
 from backend.models.color_palette import ColorPalette
@@ -20,6 +21,12 @@ from backend.task_management.projects import (
 )
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
+
+
+def _cursor(order_key: list[object]) -> str:
+    """Build a project-list cursor matching the default archive filter."""
+    fingerprint = filter_fingerprint({"include_archived": False})
+    return encode_cursor(user_id=1, filter_fingerprint=fingerprint, order_key=order_key)
 
 
 def _claims(user_id: int = 1) -> AccessTokenClaims:
@@ -406,6 +413,31 @@ async def test_project_list_rejects_overlong_cursor(
     assert body["message"] == "Invalid pagination cursor"
 
 
+@pytest.mark.parametrize(
+    "order_key",
+    [
+        [0, "alpha", MAX_DB_ID + 1],
+        [0, "alpha\x00beta", 1],
+        [0, "alpha\ud800", 1],
+        [True, "alpha", 1],
+    ],
+)
+async def test_project_list_rejects_unsafe_cursor_key(
+    project_client: AsyncClient,
+    order_key: list[object],
+) -> None:
+    """Reject out-of-range ids, unsafe name keys, and boolean archive flags."""
+    response = await project_client.get(
+        "/api/v1/projects",
+        params={"cursor": _cursor(order_key)},
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "bad_request"
+    assert body["message"] == "Invalid pagination cursor"
+
+
 async def test_project_list_openapi_documents_individual_params(app: FastAPI) -> None:
     """Document the archive filter and pagination parameters individually."""
     parameters = app.openapi()["paths"]["/api/v1/projects"]["get"]["parameters"]
@@ -428,6 +460,7 @@ async def test_project_read_uses_single_summary(
 
     assert response.status_code == 200
     assert fake_project_service.summary_calls == [(1, 1)]
+    assert ("get", 1) not in fake_project_service.user_calls
     assert fake_project_service.list_calls == []
 
 
@@ -742,6 +775,7 @@ async def test_project_routes_forward_the_claim_user_id(
     await project_client.delete("/api/v1/projects/1")
 
     assert ("list", 1) in fake_project_service.user_calls
-    assert ("get", 1) in fake_project_service.user_calls
+    assert ("get_summary", 1) in fake_project_service.user_calls
+    assert ("get", 1) not in fake_project_service.user_calls
     assert ("update", 1) in fake_project_service.user_calls
     assert ("delete", 1) in fake_project_service.user_calls

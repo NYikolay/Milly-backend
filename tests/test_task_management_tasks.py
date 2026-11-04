@@ -79,6 +79,7 @@ async def test_create_one_off_task_inserts_labels_and_before_due_reminder() -> N
     assert reminder.offset_minutes == 30
     assert reminder.next_run_at == due_at - timedelta(minutes=30)
     assert repository.tasks[detail.task.id] is detail.task
+    assert repository.task_label_calls == [(detail.task.id, USER_ID, (label.id,))]
 
 
 async def test_create_skips_before_due_reminder_in_the_past() -> None:

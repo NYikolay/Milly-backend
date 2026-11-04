@@ -109,7 +109,7 @@ async def test_tasks_rejects_wrong_secret_token(security_client: AsyncClient) ->
         2,
         3,
         settings=_settings(auth_jwt_secret=OTHER_SECRET),
-        now=NOW,
+        now=datetime.now(UTC),
     )
 
     response = await security_client.get(

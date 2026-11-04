@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 import re
 from collections.abc import AsyncIterator, Iterator, Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -126,6 +128,33 @@ def test_protected_matrix_is_not_empty() -> None:
     assert ("GET", "/api/v1/tasks") in _PROTECTED_OPERATIONS
     assert ("POST", "/api/v1/tasks") in _PROTECTED_OPERATIONS
     assert ("GET", "/api/v1/auth/me") in _PROTECTED_OPERATIONS
+
+
+def test_protected_matrix_matches_documented_operations() -> None:
+    """Keep the authorization matrix aligned with the generated OpenAPI paths."""
+    documented = {
+        (method.upper(), path)
+        for path, operations in _APP.openapi()["paths"].items()
+        for method in operations
+    }
+    expected = {
+        operation
+        for operation in documented
+        if operation[1] not in PUBLIC_PATHS and not operation[1].startswith("/admin")
+    }
+
+    assert set(_PROTECTED_OPERATIONS) == expected
+
+
+def test_route_modules_parse_with_declared_python_floor() -> None:
+    """Keep route modules compatible with the declared Python 3.11 floor."""
+    routes_directory = Path(__file__).resolve().parents[1] / "src/backend/api/routes"
+    for path in sorted(routes_directory.glob("*.py")):
+        ast.parse(
+            path.read_text(encoding="utf-8"),
+            filename=str(path),
+            feature_version=(3, 11),
+        )
 
 
 @pytest.mark.parametrize(("method", "path"), _PROTECTED_OPERATIONS)

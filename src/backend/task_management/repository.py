@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 from zoneinfo import ZoneInfoNotFoundError
 
@@ -205,7 +205,7 @@ class SqlAlchemyTaskManagementRepository:
         after_archived: bool | None,
         after_name: str | None,
         after_project_id: int | None,
-    ) -> Sequence[Project]:
+    ) -> Sequence[tuple[Project, str]]:
         """
         List non-deleted projects owned by a user, at most one page.
 
@@ -225,17 +225,20 @@ class SqlAlchemyTaskManagementRepository:
                 previous page.
 
         Returns:
-            Sequence[Project]: Non-deleted projects ordered by
-                ``(is_archived, lower(name), id)``.
+            Sequence[tuple[Project, str]]: Non-deleted projects ordered by
+                ``(is_archived, lower(name), id)`` paired with the
+                ``lower(name)`` key produced by SQL.
 
         Notes:
             - The cursor predicate is applied only when every cursor value is
               provided.
+            - The returned name key is the exact database value used for
+              ordering so cursors remain consistent for non-ASCII names.
             - Performs no writes and does not commit.
         """
         archived_rank = case((Project.archived_at.is_(None), 0), else_=1)
         name_key = func.lower(Project.name)
-        statement = select(Project).where(
+        statement = select(Project, name_key.label("name_key")).where(
             Project.user_id == user_id,
             Project.deleted_at.is_(None),
         )
@@ -260,7 +263,10 @@ class SqlAlchemyTaskManagementRepository:
         result = await self._session.execute(
             statement.order_by(archived_rank, name_key, Project.id).limit(limit)
         )
-        return result.scalars().all()
+        rows: list[tuple[Project, str]] = []
+        for project, lower_name in result.all():
+            rows.append((cast(Project, project), cast(str, lower_name)))
+        return rows
 
     async def get_project(
         self,

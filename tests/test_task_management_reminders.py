@@ -184,6 +184,8 @@ async def test_dispatch_due_finishes_in_flight_send() -> None:
             next_run_at=datetime(2026, 11, 4, 9, 30, tzinfo=UTC),
         )
     )
+    claims: list[int] = []
+    repository.on_claim = lambda: claims.append(1)
     sender = FakeSender()
     ticks = iter([0.0, 239.9, 250.0, 250.0])
     dispatcher = ReminderDispatcher(
@@ -196,6 +198,7 @@ async def test_dispatch_due_finishes_in_flight_send() -> None:
     sent = await dispatcher.dispatch_due()
 
     assert sent == 1
+    assert claims == [1]
     assert sender.calls == [(TELEGRAM_ID, "Напоминание: Task Title")]
     assert repository.deliveries[1].reminder_id == first_reminder.id
     assert 2 not in repository.deliveries

@@ -161,7 +161,7 @@ class TaskManagementRepository(Protocol):
         after_archived: bool | None,
         after_name: str | None,
         after_project_id: int | None,
-    ) -> Sequence[Project]:
+    ) -> Sequence[tuple[Project, str]]:
         """
         List non-deleted projects owned by a user, at most one page.
 
@@ -181,12 +181,15 @@ class TaskManagementRepository(Protocol):
                 previous page.
 
         Returns:
-            Sequence[Project]: Non-deleted projects ordered by
-                ``(is_archived, lower(name), id)``.
+            Sequence[tuple[Project, str]]: Non-deleted projects ordered by
+                ``(is_archived, lower(name), id)`` paired with the
+                ``lower(name)`` key produced by SQL.
 
         Notes:
             - The cursor predicate is applied only when every cursor value is
               provided.
+            - The returned name key is the exact database value used for
+              ordering so cursors remain consistent for non-ASCII names.
             - Performs no writes and does not commit.
         """
         ...

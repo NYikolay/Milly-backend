@@ -93,6 +93,7 @@ class FakeTaskManagementRepository:
         self.series_labels: set[tuple[int, int]] = set()
         self.batch_calls: list[tuple[str, tuple[int, ...]]] = []
         self.label_batch_calls: list[tuple[tuple[int, ...],]] = []
+        self.task_label_calls: list[tuple[int, int, tuple[int, ...]]] = []
         self.bulk_calls: list[str] = []
         self.due_reminder_limits: list[int] = []
         self.commits = 0
@@ -231,34 +232,34 @@ class FakeTaskManagementRepository:
         after_archived: bool | None,
         after_name: str | None,
         after_project_id: int | None,
-    ) -> Sequence[Project]:
-        """List one cursor-bounded page of non-deleted projects owned by a user."""
-        projects = sorted(
+    ) -> Sequence[tuple[Project, str]]:
+        """List one cursor-bounded page of projects with lower-case name keys."""
+        rows = sorted(
             (
-                project
+                (project, project.name.lower())
                 for project in self.projects.values()
                 if project.user_id == user_id
                 and project.deleted_at is None
                 and (include_archived or project.archived_at is None)
             ),
-            key=lambda project: (
-                project.archived_at is not None,
-                project.name.lower(),
-                project.id,
+            key=lambda row: (
+                row[0].archived_at is not None,
+                row[1],
+                row[0].id,
             ),
         )
         if after_archived is not None and after_name is not None and after_project_id is not None:
-            projects = [
-                project
-                for project in projects
+            rows = [
+                row
+                for row in rows
                 if (
-                    project.archived_at is not None,
-                    project.name.lower(),
-                    project.id,
+                    row[0].archived_at is not None,
+                    row[1],
+                    row[0].id,
                 )
                 > (after_archived, after_name, after_project_id)
             ]
-        return projects[:limit]
+        return rows[:limit]
 
     async def get_project(
         self,
@@ -564,7 +565,8 @@ class FakeTaskManagementRepository:
         user_id: int,
         label_ids: Sequence[int],
     ) -> None:
-        """Assign labels to a task."""
+        """Assign labels to a task and record the owner argument."""
+        self.task_label_calls.append((task_id, user_id, tuple(label_ids)))
         for label_id in label_ids:
             self.task_labels.add((task_id, label_id))
 

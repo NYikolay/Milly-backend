@@ -82,7 +82,7 @@ async def test_list_returns_progress_and_palette_color() -> None:
     repository = make_repository()
     project = make_project()
     color = make_color()
-    repository.list_projects.return_value = [project]
+    repository.list_projects.return_value = [(project, "work")]
     repository.project_progress_for_projects.return_value = {project.id: (5, 2)}
     repository.get_palette_colors_by_ids.return_value = {color.id: color}
 
@@ -125,7 +125,7 @@ async def test_list_uses_grouped_progress_and_colors() -> None:
     second = make_project(project_id=2, name="Beta", color_id=2)
     first_color = make_color(color_id=1)
     second_color = make_color(color_id=2)
-    repository.list_projects.return_value = [first, second]
+    repository.list_projects.return_value = [(first, "alpha"), (second, "beta")]
     repository.project_progress_for_projects.return_value = {1: (5, 2), 2: (1, 1)}
     repository.get_palette_colors_by_ids.return_value = {
         1: first_color,
@@ -158,7 +158,11 @@ async def test_list_returns_cursor_from_last_kept_project() -> None:
         make_project(project_id=3, name="Gamma"),
     ]
     color = make_color()
-    repository.list_projects.return_value = projects
+    repository.list_projects.return_value = [
+        (projects[0], "alpha"),
+        (projects[1], "beta-db"),
+        (projects[2], "gamma"),
+    ]
     repository.project_progress_for_projects.return_value = {}
     repository.get_palette_colors_by_ids.return_value = {color.id: color}
 
@@ -169,7 +173,7 @@ async def test_list_returns_cursor_from_last_kept_project() -> None:
     assert [summary.project.id for summary in page.items] == [1, 2]
     assert page.next_cursor == ProjectListCursor(
         is_archived=True,
-        name_key="beta",
+        name_key="beta-db",
         project_id=2,
     )
 
@@ -189,10 +193,18 @@ async def test_list_hides_archived_projects_unless_requested() -> None:
         after_archived: bool | None,
         after_name: str | None,
         after_project_id: int | None,
-    ) -> list[Project]:
-        """Mimic the repository archive filter and page bound."""
+    ) -> list[tuple[Project, str]]:
+        """Mimic the repository archive filter, name keys, and page bound."""
         assert user_id == USER_ID
-        return ([active, archived] if include_archived else [active])[:limit]
+        rows = (
+            [(active, "active")]
+            if not include_archived
+            else [
+                (active, "active"),
+                (archived, "archived"),
+            ]
+        )
+        return rows[:limit]
 
     repository.list_projects.side_effect = list_projects
     repository.project_progress_for_projects.return_value = {1: (0, 0), 2: (0, 0)}
@@ -219,7 +231,7 @@ async def test_list_raises_not_found_for_missing_color() -> None:
     """A page that references a missing palette color fails like a single lookup."""
     repository = make_repository()
     project = make_project()
-    repository.list_projects.return_value = [project]
+    repository.list_projects.return_value = [(project, "work")]
     repository.project_progress_for_projects.return_value = {project.id: (0, 0)}
     repository.get_palette_colors_by_ids.return_value = {}
 

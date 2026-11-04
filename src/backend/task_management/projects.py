@@ -112,7 +112,8 @@ class ProjectService:
         Returns:
             ProjectPage: Project summaries in ``(is_archived, lower(name), id)``
                 order and the cursor for the next page, or ``None`` when this
-                is the last page.
+                is the last page. The cursor name key is the database-produced
+                key returned by the repository.
 
         Raises:
             NotFoundError: If a project references a missing palette color.
@@ -124,7 +125,7 @@ class ProjectService:
               empty page issues no batch queries.
             - Performs no writes and does not commit.
         """
-        projects = await self._repository.list_projects(
+        rows = await self._repository.list_projects(
             user_id,
             include_archived=include_archived,
             limit=limit + 1,
@@ -132,25 +133,24 @@ class ProjectService:
             after_name=after.name_key if after is not None else None,
             after_project_id=after.project_id if after is not None else None,
         )
-        page_projects = tuple(projects[:limit])
-        next_cursor = (
-            ProjectListCursor(
-                is_archived=page_projects[-1].archived_at is not None,
-                name_key=page_projects[-1].name.lower(),
-                project_id=page_projects[-1].id,
+        page_rows = tuple(rows[:limit])
+        next_cursor: ProjectListCursor | None = None
+        if len(rows) > limit and page_rows:
+            last_project, last_name_key = page_rows[-1]
+            next_cursor = ProjectListCursor(
+                is_archived=last_project.archived_at is not None,
+                name_key=last_name_key,
+                project_id=last_project.id,
             )
-            if len(projects) > limit and page_projects
-            else None
-        )
-        project_ids = [project.id for project in page_projects]
-        color_ids = sorted({project.color_id for project in page_projects})
+        project_ids = [project.id for project, _ in page_rows]
+        color_ids = sorted({project.color_id for project, _ in page_rows})
         progress_by_project = await self._repository.project_progress_for_projects(
             user_id,
             project_ids,
         )
         colors = await self._palette_service.get_colors(color_ids)
         summaries: list[ProjectSummary] = []
-        for project in page_projects:
+        for project, _ in page_rows:
             total, completed = progress_by_project.get(project.id, (0, 0))
             summaries.append(
                 ProjectSummary(

@@ -7,7 +7,12 @@ from fastapi import Query, Response, status
 
 from backend.api.deps import CurrentAccessDep, TaskServiceDep
 from backend.api.errors.openapi import StandardizedAPIRouter, document_errors
-from backend.api.pagination import decode_cursor, encode_cursor, filter_fingerprint
+from backend.api.pagination import (
+    MAX_DB_ID,
+    decode_cursor,
+    encode_cursor,
+    filter_fingerprint,
+)
 from backend.api.task_schemas import (
     ReminderResponse,
     TaskCreate,
@@ -132,7 +137,7 @@ def _task_list_cursor(order_key: list[object]) -> TaskListCursor:
 
     Raises:
         BadRequestError: If the key does not contain exactly an aware ISO-8601
-            due time and a non-boolean integer task identifier.
+            due time and an integer task identifier within the database range.
     """
     try:
         if len(order_key) != 2:
@@ -140,14 +145,14 @@ def _task_list_cursor(order_key: list[object]) -> TaskListCursor:
         due_value, task_id = order_key
         if (
             not isinstance(due_value, str)
-            or not isinstance(task_id, int)
-            or isinstance(task_id, bool)
+            or type(task_id) is not int
+            or not 1 <= task_id <= MAX_DB_ID
         ):
             raise ValueError
         due_at = datetime.fromisoformat(due_value)
         if due_at.tzinfo is None or due_at.utcoffset() is None:
             raise ValueError
-    except TypeError, ValueError:
+    except (TypeError, ValueError):  # fmt: skip
         raise BadRequestError("Invalid pagination cursor") from None
     return TaskListCursor(due_at=due_at, task_id=task_id)
 

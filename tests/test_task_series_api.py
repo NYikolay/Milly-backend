@@ -219,6 +219,7 @@ async def test_series_create_rejects_too_many_labels(series_client: AsyncClient)
     )
 
     assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
 
 
 async def test_series_update_rejects_too_many_labels(series_client: AsyncClient) -> None:
@@ -229,6 +230,7 @@ async def test_series_update_rejects_too_many_labels(series_client: AsyncClient)
     )
 
     assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
 
 
 async def test_series_create_rejects_too_long_description(
