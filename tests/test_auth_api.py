@@ -22,7 +22,7 @@ COOKIE_NAME = "milly_refresh"
 
 def _login_result() -> LoginResult:
     """Build a login result backed by real ORM user and profile instances."""
-    user = User(id=1, created_at=NOW, updated_at=NOW)
+    user = User(id=1, timezone="UTC", created_at=NOW, updated_at=NOW)
     profile = TelegramProfile(
         id=10,
         user_id=1,
@@ -72,6 +72,7 @@ class FakeAuthService:
         self.refresh_calls = 0
         self.logout_tokens: list[str | None] = []
         self.get_user_calls: list[int] = []
+        self.timezone_calls: list[tuple[int, str]] = []
         self.login_error: Exception | None = None
         self.refresh_error: Exception | None = None
 
@@ -96,6 +97,14 @@ class FakeAuthService:
     async def get_user(self, user_id: int) -> User | None:
         """Record a user lookup and return the prepared user."""
         self.get_user_calls.append(user_id)
+        return self.user
+
+    async def update_timezone(self, user_id: int, timezone: str) -> User:
+        """Record a timezone update and return the updated user."""
+        self.timezone_calls.append((user_id, timezone))
+        if self.user is None:
+            raise UnauthorizedError("Authentication required")
+        self.user.timezone = timezone
         return self.user
 
 
@@ -145,6 +154,7 @@ async def test_login_returns_user_profile(auth_client: AsyncClient) -> None:
     assert body["token_type"] == "bearer"
     assert body["expires_in"] == 900
     assert body["user"]["id"] == 1
+    assert body["user"]["timezone"] == "UTC"
     assert body["user"]["telegram_profile"]["telegram_id"] == 123
 
 
@@ -301,7 +311,57 @@ async def test_me_returns_user(
     response = await auth_client.get("/api/v1/auth/me")
     assert response.status_code == 200
     assert response.json()["id"] == 1
+    assert response.json()["timezone"] == "UTC"
     assert response.json()["telegram_profile"]["telegram_id"] == 123
+
+
+async def test_update_timezone_returns_updated_user(
+    auth_app: FastAPI,
+    auth_client: AsyncClient,
+    fake_service: FakeAuthService,
+) -> None:
+    """Validate the IANA zone, call the service, and return the updated user."""
+    auth_app.dependency_overrides[get_current_access] = lambda: _claims()
+
+    response = await auth_client.patch(
+        "/api/v1/auth/me/timezone",
+        json={"timezone": "Europe/Moscow"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["timezone"] == "Europe/Moscow"
+    assert fake_service.timezone_calls == [(1, "Europe/Moscow")]
+
+
+async def test_update_timezone_rejects_invalid_zone(
+    auth_app: FastAPI,
+    auth_client: AsyncClient,
+    fake_service: FakeAuthService,
+) -> None:
+    """Reject an unknown IANA zone with a 422 envelope before the service call."""
+    auth_app.dependency_overrides[get_current_access] = lambda: _claims()
+
+    response = await auth_client.patch(
+        "/api/v1/auth/me/timezone",
+        json={"timezone": "Mars/Olympus"},
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "validation_error"
+    assert any(item["field"] == "body.timezone" for item in body["details"]["fields"])
+    assert fake_service.timezone_calls == []
+
+
+async def test_update_timezone_requires_bearer_token(auth_client: AsyncClient) -> None:
+    """Reject timezone updates without an Authorization header."""
+    response = await auth_client.patch(
+        "/api/v1/auth/me/timezone",
+        json={"timezone": "Europe/Moscow"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "unauthorized"
 
 
 class ExplodingDatabase:

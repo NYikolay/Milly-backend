@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
 
@@ -16,7 +17,7 @@ from backend.auth.tokens import (
     hash_refresh_token,
 )
 from backend.core.config import Settings
-from backend.core.errors import UnauthorizedError
+from backend.core.errors import BadRequestError, UnauthorizedError
 from backend.models.telegram_profile import TelegramProfile
 from backend.models.user import User
 
@@ -358,3 +359,35 @@ class AuthService:
                 when the user no longer exists.
         """
         return await self._repository.get_user_with_profile(user_id)
+
+    async def update_timezone(self, user_id: int, timezone: str) -> User:
+        """
+        Update the IANA timezone of the authenticated user.
+
+        Purpose:
+            Validate and persist a profile timezone change used for local task
+            days and scheduled reminders.
+
+        Args:
+            user_id: Internal user identifier.
+            timezone: IANA timezone name.
+
+        Returns:
+            User: The updated user with ``telegram_profile`` loaded.
+
+        Raises:
+            BadRequestError: If the timezone name is invalid.
+            UnauthorizedError: If the user no longer exists.
+
+        Notes:
+            - Does not commit; the request unit of work owns the transaction
+              boundary.
+        """
+        try:
+            ZoneInfo(timezone)
+        except (ZoneInfoNotFoundError, ValueError) as error:
+            raise BadRequestError("Invalid timezone") from error
+        user = await self._repository.update_user_timezone(user_id, timezone)
+        if user is None:
+            raise UnauthorizedError("Authentication required")
+        return user

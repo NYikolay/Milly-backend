@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class TelegramAuthRequest(BaseModel):
@@ -35,8 +36,39 @@ class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    timezone: str
     created_at: datetime
     telegram_profile: TelegramProfileResponse
+
+
+class TimezoneUpdate(BaseModel):
+    """Validated profile timezone update request."""
+
+    timezone: str = Field(min_length=1, max_length=64)
+
+    @field_validator("timezone")
+    @classmethod
+    def _validate_timezone(cls, value: str) -> str:
+        """
+        Require a valid IANA timezone name.
+
+        Purpose:
+            Reject unknown zones before the service persists a profile update.
+
+        Args:
+            value: Candidate IANA timezone name.
+
+        Returns:
+            str: The unchanged valid name.
+
+        Raises:
+            ValueError: If the name cannot be resolved by ``ZoneInfo``.
+        """
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as error:
+            raise ValueError("Invalid timezone") from error
+        return value
 
 
 class TokenResponse(BaseModel):

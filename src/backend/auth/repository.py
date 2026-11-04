@@ -286,6 +286,27 @@ class AuthRepository(Protocol):
         """
         ...
 
+    async def update_user_timezone(self, user_id: int, timezone: str) -> User | None:
+        """
+        Update the IANA timezone of a user.
+
+        Purpose:
+            Persist a validated profile timezone change.
+
+        Args:
+            user_id: Internal user identifier.
+            timezone: Validated IANA timezone name.
+
+        Returns:
+            User | None: The updated user with ``telegram_profile`` loaded, or
+                ``None`` when the user no longer exists.
+
+        Notes:
+            - Flushes but does not commit; the caller owns the transaction
+              boundary.
+        """
+        ...
+
 
 class SqlAlchemyAuthRepository:
     """SQLAlchemy implementation of the authentication repository contract."""
@@ -649,3 +670,28 @@ class SqlAlchemyAuthRepository:
             select(User).where(User.id == user_id).options(selectinload(User.telegram_profile))
         )
         return result.scalar_one_or_none()
+
+    async def update_user_timezone(self, user_id: int, timezone: str) -> User | None:
+        """
+        Update the IANA timezone of a user.
+
+        Purpose:
+            Persist a validated profile timezone change and return the refreshed
+            user with its Telegram profile.
+
+        Args:
+            user_id: Internal user identifier.
+            timezone: Validated IANA timezone name.
+
+        Returns:
+            User | None: The updated user with ``telegram_profile`` loaded, or
+                ``None`` when the user no longer exists.
+
+        Notes:
+            - Flushes but does not commit; the caller owns the transaction
+              boundary.
+        """
+        await self._session.execute(
+            update(User).where(User.id == user_id).values(timezone=timezone)
+        )
+        return await self.get_user_with_profile(user_id)

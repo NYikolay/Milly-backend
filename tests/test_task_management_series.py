@@ -410,3 +410,50 @@ async def test_generate_skips_archived_projects() -> None:
 
     assert created == 0
     assert repository.tasks == {}
+
+
+async def test_get_detail_returns_labels_and_template_reminders() -> None:
+    """Resolve a series together with its labels and template reminders."""
+    repository = FakeTaskManagementRepository()
+    label = repository.insert_label(make_label())
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 4),
+        )
+    )
+    repository.series_labels.add((series.id, label.id))
+    reminder = repository.insert_reminder(
+        make_reminder(
+            series_id=series.id,
+            kind=ReminderKind.SCHEDULED,
+            offset_minutes=None,
+            interval_days=1,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.get_detail(USER_ID, series.id)
+
+    assert detail.series is series
+    assert [item.id for item in detail.labels] == [label.id]
+    assert [item.id for item in detail.reminders] == [reminder.id]
+
+
+async def test_list_details_returns_every_owned_series() -> None:
+    """Return details for all non-deleted series owned by the user."""
+    repository = FakeTaskManagementRepository()
+    first = repository.insert_series(
+        make_series(series_id=1, time_of_day=time(9, 0), starts_on=date(2026, 11, 4))
+    )
+    repository.insert_series(
+        make_series(series_id=2, time_of_day=time(10, 0), starts_on=date(2026, 11, 4))
+    )
+    service = make_service(repository)
+
+    details = await service.list_details(USER_ID)
+
+    assert [detail.series.id for detail in details] == [first.id, 2]

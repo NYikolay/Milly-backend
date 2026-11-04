@@ -13,6 +13,7 @@ from backend.auth.schemas import (
     AuthResponse,
     TelegramAuthRequest,
     TelegramProfileResponse,
+    TimezoneUpdate,
     TokenResponse,
     UserResponse,
 )
@@ -84,6 +85,7 @@ async def telegram_login(
         expires_in=settings.auth_access_ttl_seconds,
         user=UserResponse(
             id=result.user.id,
+            timezone=result.user.timezone,
             created_at=result.user.created_at,
             telegram_profile=TelegramProfileResponse.model_validate(result.profile),
         ),
@@ -226,3 +228,51 @@ async def read_current_user(user: CurrentUserDep) -> UserResponse:
             profile.
     """
     return UserResponse.model_validate(user)
+
+
+@router.patch(
+    "/me/timezone",
+    response_model=UserResponse,
+    responses=document_errors(
+        {
+            ErrorCode.AUTH_NOT_CONFIGURED: "The JWT secret is not configured.",
+            ErrorCode.BAD_REQUEST: "The stored or requested timezone is invalid.",
+            ErrorCode.UNAUTHORIZED: (
+                "The bearer token is missing or invalid, the user no longer "
+                "exists, or the user has no Telegram profile."
+            ),
+        }
+    ),
+)
+async def update_timezone(
+    payload: TimezoneUpdate,
+    user: CurrentUserDep,
+    service: AuthServiceDep,
+) -> UserResponse:
+    """
+    Update the authenticated user's IANA timezone.
+
+    Purpose:
+        Persist the timezone used for local task days and scheduled reminder
+        slots.
+
+    Args:
+        payload: Validated timezone update request.
+        user: Current user with ``telegram_profile`` loaded.
+        service: Authentication service performing the update.
+
+    Returns:
+        UserResponse: The updated public user fields and Telegram profile.
+
+    Raises:
+        AuthNotConfiguredError (HTTP 503): If no JWT secret is configured.
+        BadRequestError (HTTP 400): If the timezone is invalid at the service
+            boundary.
+        UnauthorizedError (HTTP 401): If the bearer token is missing or
+            invalid, or the user no longer exists.
+
+    Notes:
+        - The request-scoped session commits after the response is built.
+    """
+    updated = await service.update_timezone(user.id, payload.timezone)
+    return UserResponse.model_validate(updated)

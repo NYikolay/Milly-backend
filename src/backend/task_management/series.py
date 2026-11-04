@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -35,6 +36,15 @@ class UnsetType:
 
 
 UNSET = UnsetType()
+
+
+@dataclass(frozen=True)
+class SeriesDetail:
+    """A recurring series with its labels and template reminders."""
+
+    series: TaskSeries
+    labels: Sequence[Label]
+    reminders: Sequence[TaskReminder]
 
 
 class SeriesService:
@@ -109,6 +119,50 @@ class SeriesService:
             - Performs no writes and does not commit.
         """
         return await self._require_series(user_id, series_id)
+
+    async def list_details(self, user_id: int) -> Sequence[SeriesDetail]:
+        """
+        List owned series together with their template metadata.
+
+        Purpose:
+            Build the recurring-task list response with labels and template
+            reminders.
+
+        Args:
+            user_id: Owner identifier.
+
+        Returns:
+            Sequence[SeriesDetail]: Non-deleted series details in repository
+                order.
+
+        Notes:
+            - Performs no writes and does not commit.
+        """
+        series_list = await self._repository.list_series(user_id)
+        return [await self._detail(user_id, series) for series in series_list]
+
+    async def get_detail(self, user_id: int, series_id: int) -> SeriesDetail:
+        """
+        Load one owned series with its template metadata.
+
+        Purpose:
+            Build a recurring-task detail response with labels and template
+            reminders.
+
+        Args:
+            user_id: Owner identifier.
+            series_id: Series identifier.
+
+        Returns:
+            SeriesDetail: The matching non-deleted series detail.
+
+        Raises:
+            NotFoundError: If the series does not exist for this user.
+
+        Notes:
+            - Performs no writes and does not commit.
+        """
+        return await self._detail(user_id, await self._require_series(user_id, series_id))
 
     async def create(
         self,
@@ -691,6 +745,28 @@ class SeriesService:
         if series is None:
             raise NotFoundError(_SERIES_NOT_FOUND)
         return series
+
+    async def _detail(self, user_id: int, series: TaskSeries) -> SeriesDetail:
+        """
+        Load the labels and template reminders of a series.
+
+        Purpose:
+            Build the shared series-detail response shape.
+
+        Args:
+            user_id: Owner identifier.
+            series: Series to enrich.
+
+        Returns:
+            SeriesDetail: The series with its related data.
+
+        Notes:
+            - Missing or deleted labels are omitted by the repository.
+            - Performs no writes and does not commit.
+        """
+        labels = await self._repository.list_series_labels(user_id, series.id)
+        reminders = await self._repository.list_series_reminders(user_id, series.id)
+        return SeriesDetail(series=series, labels=labels, reminders=reminders)
 
     async def _validate_project(self, user_id: int, project_id: int | None) -> None:
         """

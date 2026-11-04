@@ -11,7 +11,7 @@ from backend.auth.init_data import TelegramUser
 from backend.auth.service import AuthService
 from backend.auth.tokens import decode_access_token, hash_refresh_token
 from backend.core.config import Settings
-from backend.core.errors import ErrorCode, UnauthorizedError
+from backend.core.errors import BadRequestError, ErrorCode, UnauthorizedError
 from backend.models.auth_session import AuthSession
 from backend.models.telegram_profile import TelegramProfile
 from backend.models.user import User
@@ -201,6 +201,14 @@ class FakeAuthRepository:
     async def get_user_with_profile(self, user_id: int) -> User | None:
         """Record a user lookup and return the prepared user."""
         self.events.append(("get_user_with_profile", user_id))
+        return self.user
+
+    async def update_user_timezone(self, user_id: int, timezone: str) -> User | None:
+        """Record a timezone update and return the prepared user."""
+        self.events.append(("update_user_timezone", (user_id, timezone)))
+        if self.user is None:
+            return None
+        self.user.timezone = timezone
         return self.user
 
 
@@ -587,3 +595,37 @@ async def test_refresh_does_not_expose_raw_old_token() -> None:
     assert ("get_session_for_update", hash_refresh_token("old-refresh-token")) in repository.events
     assert "old-refresh-token" not in str(repository.events)
     assert result.refresh_token not in str(repository.events)
+
+
+async def test_update_timezone_delegates_to_repository() -> None:
+    """Validate the zone, persist it, and return the updated user."""
+    user = User(id=7, timezone="UTC")
+    repository = FakeAuthRepository(user=user)
+    service = AuthService(repository, _settings(), clock=clock)
+
+    result = await service.update_timezone(7, "Europe/Moscow")
+
+    assert result is user
+    assert user.timezone == "Europe/Moscow"
+    assert repository.events == [("update_user_timezone", (7, "Europe/Moscow"))]
+
+
+async def test_update_timezone_rejects_invalid_zone() -> None:
+    """Reject an unknown IANA zone before touching the repository."""
+    repository = FakeAuthRepository(user=User(id=7))
+    service = AuthService(repository, _settings(), clock=clock)
+
+    with pytest.raises(BadRequestError) as exc_info:
+        await service.update_timezone(7, "Mars/Olympus")
+
+    assert exc_info.value.code is ErrorCode.BAD_REQUEST
+    assert repository.events == []
+
+
+async def test_update_timezone_rejects_missing_user() -> None:
+    """Reject a timezone update when the user no longer exists."""
+    repository = FakeAuthRepository()
+    service = AuthService(repository, _settings(), clock=clock)
+
+    with pytest.raises(UnauthorizedError):
+        await service.update_timezone(7, "Europe/Moscow")
