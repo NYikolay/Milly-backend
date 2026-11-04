@@ -5,7 +5,12 @@ from fastapi import FastAPI
 from sqladmin import Admin
 
 from backend.admin.auth import AdminAuth
-from backend.admin.views import AuthSessionAdmin, TelegramProfileAdmin, UserAdmin
+from backend.admin.views import (
+    AuthSessionAdmin,
+    ColorPaletteAdmin,
+    TelegramProfileAdmin,
+    UserAdmin,
+)
 from backend.core.config import Settings
 from backend.db.session import Database
 
@@ -22,7 +27,7 @@ def setup_admin(
 
     Purpose:
         Build the admin sub-application with password authentication and the
-        three project model views, or leave it unmounted when disabled.
+        four project model views, or leave it unmounted when disabled.
 
     Args:
         app: FastAPI application that receives the mounted admin.
@@ -69,6 +74,7 @@ def setup_admin(
         ),
         debug=settings.debug,
     )
+    admin.add_view(ColorPaletteAdmin)
     admin.add_view(UserAdmin)
     admin.add_view(TelegramProfileAdmin)
     admin.add_view(AuthSessionAdmin)
