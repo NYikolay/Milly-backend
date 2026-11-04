@@ -8,9 +8,3 @@ class HealthResponse(BaseModel):
 
     status: str
     database: str
-
-
-class TaskEnqueuedResponse(BaseModel):
-    """Response containing the enqueued task identifier."""
-
-    task_id: str

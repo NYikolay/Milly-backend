@@ -1,6 +1,5 @@
 from backend.api.errors.openapi import StandardizedAPIRouter
-from backend.api.routes import auth, tasks
+from backend.api.routes import auth
 
 api_router = StandardizedAPIRouter()
 api_router.include_router(auth.router)
-api_router.include_router(tasks.router)

@@ -6,7 +6,8 @@ from backend.core.config import get_settings
 from backend.core.logging import configure_logging
 from backend.db.session import Database
 from backend.tasks.broker import broker, scheduler  # noqa: F401
-from backend.tasks.example import heartbeat, ping  # noqa: F401
+from backend.tasks.delivery import dispatch_task_reminders  # noqa: F401
+from backend.tasks.generation import generate_task_series  # noqa: F401
 
 settings = get_settings()
 configure_logging(settings)

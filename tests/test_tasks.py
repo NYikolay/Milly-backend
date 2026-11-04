@@ -5,7 +5,6 @@ from taskiq_redis import RedisAsyncResultBackend
 
 from backend.core.config import Settings
 from backend.tasks.broker import broker, create_broker
-from backend.tasks.example import heartbeat, ping
 from backend.tasks.middleware import TaskLoggingMiddleware
 
 
@@ -48,16 +47,3 @@ def test_create_broker_uses_consumer_and_stream_settings() -> None:
     assert custom.consumer_config.max_deliver == 4
     assert custom.stream_config.name == "CUSTOM"
     assert custom.stream_config.subjects == ["custom.tasks"]
-
-
-def test_heartbeat_has_schedule_label() -> None:
-    """The heartbeat task carries its cron schedule label."""
-    schedule = heartbeat.labels["schedule"]
-    assert schedule[0]["cron"] == "*/5 * * * *"
-    assert schedule[0]["schedule_id"] == "heartbeat"
-
-
-def test_ping_and_heartbeat_are_registered() -> None:
-    """Example tasks are registered under their expected names."""
-    assert ping.task_name == "ping"
-    assert heartbeat.task_name == "heartbeat"

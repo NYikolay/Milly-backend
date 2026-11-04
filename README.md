@@ -15,14 +15,14 @@ backend/
 │   ├── api/                 # роутеры, зависимости и Pydantic-схемы
 │   │   ├── errors/          # схемы, нормализация валидации, маппинг,
 │   │   │                    # обработчики, middleware, OpenAPI-класс роутов
-│   │   └── routes/          # health.py, tasks.py, auth.py
+│   │   └── routes/          # health.py, auth.py
 │   ├── admin/               # SQLAdmin: вьюхи, вход, монтирование
 │   ├── auth/                # initData, JWT, refresh-сессии и cookie
 │   ├── core/                # настройки, логирование, middleware
 │   │   └── errors.py        # коды ошибок и исключения
 │   ├── db/                  # engine/session, declarative base, readiness
 │   ├── models/              # User, TelegramProfile, AuthSession
-│   └── tasks/               # broker, worker, scheduler, примеры задач
+│   └── tasks/               # broker, worker, scheduler, генерация и доставка
 ├── tests/                   # unit-тесты без инфраструктуры
 ├── compose.yml              # production-подобный стек
 ├── compose.override.yml     # dev-режим (подхватывается автоматически)
@@ -31,8 +31,8 @@ backend/
 ```
 
 Правило зависимостей: `main.py` собирает приложение и подключает роутеры;
-`api` и `auth` зависят от `core`, `db` и `models`; `tasks` — от `db` и
-`core`; `db` — от `core`. `auth` не импортирует `api`. `api.errors`
+`api` и `auth` зависят от `core`, `db` и `models`; `tasks` — от `db`,
+`core` и `task_management`; `db` — от `core`. `auth` не импортирует `api`. `api.errors`
 зависит от `core.errors` и FastAPI; `core.errors` не импортирует `api`.
 
 ## Быстрый старт
@@ -312,27 +312,33 @@ poetry run alembic upgrade head --sql
 
 ## Задачи
 
-- `POST /api/v1/tasks/ping` ставит задачу `ping` и возвращает
-  `202 {"task_id": "<id>"}`; worker пишет результат в Redis.
-- `heartbeat` запускается scheduler'ом по cron `*/5 * * * *` и пишет
-  `task.heartbeat` в лог.
-- Команды worker и scheduler (используются в `compose.yml`):
+Планировщик запускает две фоновые задачи:
+
+- `generate_task_series` — каждые 15 минут (`*/15 * * * *`, schedule_id
+  `task-series-generation`) догенерирует будущие экземпляры повторяющихся
+  серий; пишет в лог `task.series_generated` с количеством созданных задач.
+- `dispatch_task_reminders` — каждую минуту (`* * * * *`, schedule_id
+  `reminder-delivery`) отправляет наступившие напоминания в Telegram и
+  обновляет состояние доставки; пишет в лог `task.reminders_dispatched` с
+  количеством успешных отправок.
+
+Команды worker и scheduler (используются в `compose.yml`):
 
 ```bash
-taskiq worker backend.tasks.worker:broker backend.tasks.example \
+taskiq worker backend.tasks.worker:broker backend.tasks.generation backend.tasks.delivery \
   --workers 2 --max-async-tasks 20 --wait-tasks-timeout 300 \
   --no-configure-logging
 
-taskiq scheduler backend.tasks.worker:scheduler backend.tasks.example \
+taskiq scheduler backend.tasks.worker:scheduler backend.tasks.generation backend.tasks.delivery \
   --skip-first-run --no-configure-logging
 ```
 
 Доставка NATS JetStream — **at-least-once**: задача может выполниться
 повторно, поэтому задачи обязаны быть идемпотентными. Для долгих задач нужно
 задавать собственный `timeout` (декоратор `@broker.task(timeout=...)`) строго
-меньше `NATS_ACK_WAIT` (по умолчанию 300 с); примеры `ping` и `heartbeat`
-тривиальны и завершаются мгновенно, поэтому `timeout` у них не задан. Worker
-ждёт завершения задач 300 с
+меньше `NATS_ACK_WAIT` (по умолчанию 300 с); генерация серий и доставка
+напоминаний идемпотентны, не задают собственный `timeout` и завершаются в
+пределах окна worker'а. Worker ждёт завершения задач 300 с
 (`--wait-tasks-timeout`), а `stop_grace_period` контейнера — 330 с. DLQ нет:
 после `NATS_MAX_DELIVER` (5) сообщение остаётся в stream до истечения
 `NATS_STREAM_MAX_AGE` (7 дней).

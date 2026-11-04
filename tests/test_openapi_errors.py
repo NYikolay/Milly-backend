@@ -101,11 +101,6 @@ def test_document_errors_maps_registry_statuses() -> None:
             "get",
             {"503": "- database_unavailable:"},
         ),
-        (
-            "/api/v1/tasks/ping",
-            "post",
-            {"503": "- task_enqueue_failed:"},
-        ),
     ],
 )
 def test_operations_document_specific_error_codes(

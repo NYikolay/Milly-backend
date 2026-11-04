@@ -73,8 +73,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
           before startup; the database is created during application assembly,
           not by the lifespan.
         - The broker singleton is created when ``backend.tasks.broker`` is
-          imported; the API router imports example tasks at module import. The
-          lifespan only starts and shuts it down.
+          imported at the start of this lifespan. Scheduled task modules are
+          imported only by the worker and scheduler entrypoints.
         - Unit tests using the ASGI transport without a lifespan neither start
           the broker nor dispose the database.
         - The database is disposed even if broker shutdown fails.
@@ -122,9 +122,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         - The admin panel is mounted only when both ``ADMIN_PASSWORD`` and
           ``AUTH_JWT_SECRET`` are configured; otherwise ``app.state.admin`` is
           ``None`` and ``/admin`` keeps the public JSON 404.
-        - The broker singleton is created when ``backend.tasks.broker`` is
-          imported, which happens while this module loads the API router; the
-          lifespan only starts and shuts it down.
+        - The broker singleton is created lazily inside the lifespan; the
+          worker and scheduler entrypoints import the modules that register
+          scheduled tasks.
         - Middleware is added innermost first, so ``RequestContextMiddleware``
           remains the outermost layer with ``ErrorEnvelopeMiddleware`` directly
           inside it.
