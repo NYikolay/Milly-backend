@@ -639,3 +639,96 @@ async def test_disabling_reminders_persists_supplied_rules_before_clearing_slots
     assert len(reenabled.reminders) == 1
     assert reenabled.reminders[0].offset_minutes == 15
     assert reenabled.reminders[0].next_run_at == task.due_at - timedelta(minutes=15)
+
+
+async def test_create_task_rejects_archived_project() -> None:
+    """A one-off task cannot be created inside an archived project."""
+    repository = FakeTaskManagementRepository()
+    project = repository.insert_project(make_project(project_id=1, archived_at=fixed_now()))
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError):
+        await service.create(
+            USER_ID,
+            title="Task",
+            description=None,
+            priority=Priority.NEITHER,
+            due_at=fixed_now() + timedelta(hours=1),
+            project_id=project.id,
+            label_ids=(),
+            reminders_enabled=False,
+            reminders=(),
+        )
+
+    assert repository.tasks == {}
+
+
+async def test_update_task_rejects_archived_project() -> None:
+    """A task cannot be moved into an archived project."""
+    repository = FakeTaskManagementRepository()
+    task = repository.insert_task(make_task(task_id=1, due_at=fixed_now() + timedelta(hours=1)))
+    project = repository.insert_project(make_project(project_id=1, archived_at=fixed_now()))
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError):
+        await service.update(USER_ID, task.id, project_id=project.id)
+
+    assert task.project_id is None
+
+
+async def test_list_rejects_date_that_overflows_local_day_bounds() -> None:
+    """The last supported calendar date produces a bad request, not a 500."""
+    repository = FakeTaskManagementRepository()
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError):
+        await service.list(USER_ID, TaskFilters(date=date.max))
+
+
+async def test_create_task_rejects_aware_reminder_time() -> None:
+    """A direct service call rejects an aware reminder wall-clock time."""
+    repository = FakeTaskManagementRepository()
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError):
+        await service.create(
+            USER_ID,
+            title="Task",
+            description=None,
+            priority=Priority.NEITHER,
+            due_at=fixed_now() + timedelta(hours=1),
+            project_id=None,
+            label_ids=(),
+            reminders_enabled=True,
+            reminders=(
+                ReminderInput(
+                    kind=ReminderKind.SCHEDULED,
+                    interval_days=1,
+                    time_of_day=time(9, 0, tzinfo=UTC),
+                ),
+            ),
+        )
+
+
+async def test_create_task_rejects_before_due_overflow() -> None:
+    """A before-due offset that underflows the datetime range is a bad request."""
+    repository = FakeTaskManagementRepository()
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError):
+        await service.create(
+            USER_ID,
+            title="Task",
+            description=None,
+            priority=Priority.NEITHER,
+            due_at=datetime.min.replace(tzinfo=UTC),
+            project_id=None,
+            label_ids=(),
+            reminders_enabled=True,
+            reminders=(
+                ReminderInput(
+                    kind=ReminderKind.BEFORE_DUE,
+                    offset_minutes=1,
+                ),
+            ),
+        )

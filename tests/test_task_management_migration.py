@@ -40,3 +40,28 @@ def test_palette_admin_is_bound_to_model() -> None:
     """Bind the palette admin view to its ORM model and identity."""
     assert ColorPaletteAdmin.model is ColorPalette
     assert ColorPaletteAdmin.identity == "color-palette"
+
+
+def test_migration_seed_matches_spec_table_exactly() -> None:
+    """Seed exactly the fifteen palette tuples defined by the specification."""
+    migration = _load_migration()
+    actual = [
+        (row["sort_order"], row["slug"], row["name"], row["hex"]) for row in migration.SEED_COLORS
+    ]
+    assert actual == [
+        (1, "grape", "Виноградный", "#BB6BD9"),
+        (2, "blue", "Синий", "#2F80ED"),
+        (3, "sky", "Голубой", "#56CCF2"),
+        (4, "teal", "Бирюзовый", "#2D9CDB"),
+        (5, "green", "Зелёный", "#27AE60"),
+        (6, "mint", "Мятный", "#6FCF97"),
+        (7, "lime", "Лаймовый", "#B4D455"),
+        (8, "yellow", "Жёлтый", "#F2C94C"),
+        (9, "orange", "Оранжевый", "#F2994A"),
+        (10, "red", "Красный", "#EB5757"),
+        (11, "coral", "Коралловый", "#F26B5B"),
+        (12, "pink", "Розовый", "#F178B6"),
+        (13, "purple", "Фиолетовый", "#9B51E0"),
+        (14, "indigo", "Индиго", "#5B6CFF"),
+        (15, "gray", "Серый", "#828282"),
+    ]

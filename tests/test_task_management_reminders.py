@@ -17,6 +17,7 @@ from tests.task_management_fakes import (
 )
 
 USER_ID = 7
+TELEGRAM_ID = 7007
 
 
 def make_dispatcher(
@@ -27,10 +28,16 @@ def make_dispatcher(
     return ReminderDispatcher(repository, sender, clock=fixed_now)
 
 
+def seed_telegram(repository: FakeTaskManagementRepository) -> None:
+    """Link a distinct Telegram chat identifier to the test user."""
+    repository.telegram_ids[USER_ID] = TELEGRAM_ID
+
+
 def make_scheduled_reminder(
     repository: FakeTaskManagementRepository,
 ) -> tuple[Task, TaskReminder]:
     """Seed a due scheduled reminder and return its task and reminder."""
+    seed_telegram(repository)
     task = repository.insert_task(
         make_task(
             task_id=1,
@@ -64,7 +71,8 @@ async def test_dispatch_creates_keyed_delivery_sends_and_advances_slot() -> None
     sent = await dispatcher.dispatch_due()
 
     assert sent == 1
-    assert sender.calls == [(USER_ID, "Напоминание: Task Title")]
+    assert sender.calls == [(TELEGRAM_ID, "Напоминание: Task Title")]
+    assert USER_ID != TELEGRAM_ID
     delivery = repository.deliveries[1]
     assert (delivery.reminder_id, delivery.scheduled_for) == (
         reminder.id,
@@ -131,6 +139,7 @@ async def test_dispatch_reactivates_cancelled_delivery() -> None:
 async def test_before_due_success_clears_next_run() -> None:
     """A sent before-due reminder is final and clears its slot."""
     repository = FakeTaskManagementRepository()
+    seed_telegram(repository)
     task = repository.insert_task(
         make_task(
             task_id=1,
@@ -161,6 +170,7 @@ async def test_before_due_success_clears_next_run() -> None:
 async def test_sender_failure_marks_pending_with_backoff_and_clears_lock() -> None:
     """A retryable Telegram failure leaves a pending delivery with backoff."""
     repository = FakeTaskManagementRepository()
+    seed_telegram(repository)
     task = repository.insert_task(
         make_task(
             task_id=1,
@@ -197,6 +207,7 @@ async def test_sender_failure_marks_pending_with_backoff_and_clears_lock() -> No
 async def test_final_failure_marks_failed_and_clears_before_due_slot() -> None:
     """The fifth failed attempt is final and clears a before-due slot."""
     repository = FakeTaskManagementRepository()
+    seed_telegram(repository)
     task = repository.insert_task(
         make_task(
             task_id=1,
@@ -277,3 +288,148 @@ async def test_dispatch_ignores_disabled_master_toggle_and_archived_projects() -
     assert sent == 0
     assert sender.calls == []
     assert repository.deliveries == {}
+
+
+async def test_missing_telegram_profile_fails_delivery_without_sending() -> None:
+    """A user without a Telegram profile fails the slot without calling the sender."""
+    repository = FakeTaskManagementRepository()
+    _, reminder = make_scheduled_reminder(repository)
+    repository.telegram_ids.clear()
+    sender = FakeSender()
+    dispatcher = make_dispatcher(repository, sender)
+
+    sent = await dispatcher.dispatch_due()
+
+    assert sent == 0
+    assert sender.calls == []
+    delivery = repository.deliveries[1]
+    assert delivery.status == "failed"
+    assert delivery.locked_at is None
+    assert delivery.last_error == "Telegram profile is missing"
+    assert reminder.next_run_at == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
+
+
+async def test_unexpected_failure_keeps_earlier_delivery_and_continues() -> None:
+    """A later unexpected error rolls back only that reminder and keeps earlier sends."""
+    repository = FakeTaskManagementRepository()
+    first_task, first_reminder = make_scheduled_reminder(repository)
+    second_task = repository.insert_task(
+        make_task(
+            task_id=2,
+            title="Second",
+            due_at=fixed_now() + timedelta(days=1),
+            reminders_enabled=True,
+        )
+    )
+    repository.insert_reminder(
+        make_reminder(
+            reminder_id=2,
+            task_id=second_task.id,
+            kind=ReminderKind.SCHEDULED,
+            offset_minutes=None,
+            interval_days=1,
+            time_of_day=time(9, 30),
+            timezone="UTC",
+            next_run_at=datetime(2026, 11, 4, 9, 30, tzinfo=UTC),
+        )
+    )
+    repository.task_errors.add(second_task.id)
+    sender = FakeSender()
+    dispatcher = make_dispatcher(repository, sender)
+
+    sent = await dispatcher.dispatch_due()
+
+    assert sent == 1
+    assert sender.calls == [(TELEGRAM_ID, "Напоминание: Task Title")]
+    assert repository.deliveries[1].status == "sent"
+    assert first_reminder.next_run_at == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
+    assert repository.rollbacks == 1
+    assert 2 not in repository.deliveries
+
+
+async def test_archived_project_after_claim_cancels_delivery_without_sending() -> None:
+    """An archive that lands between listing and claiming cancels the delivery."""
+    repository = FakeTaskManagementRepository()
+    project = repository.insert_project(make_project(project_id=1))
+    seed_telegram(repository)
+    task = repository.insert_task(
+        make_task(
+            task_id=1,
+            project_id=project.id,
+            due_at=fixed_now() + timedelta(hours=1),
+            reminders_enabled=True,
+        )
+    )
+    reminder = repository.insert_reminder(
+        make_reminder(
+            reminder_id=1,
+            task_id=task.id,
+            kind=ReminderKind.BEFORE_DUE,
+            offset_minutes=30,
+            next_run_at=fixed_now() - timedelta(minutes=1),
+        )
+    )
+    repository.on_claim = lambda: setattr(project, "archived_at", fixed_now())
+    sender = FakeSender()
+    dispatcher = make_dispatcher(repository, sender)
+
+    sent = await dispatcher.dispatch_due()
+
+    assert sent == 0
+    assert sender.calls == []
+    delivery = repository.deliveries[1]
+    assert delivery.status == "cancelled"
+    assert delivery.locked_at is None
+    assert delivery.next_attempt_at is None
+    assert reminder.next_run_at is None
+
+
+async def test_expired_lease_is_reclaimed_and_sent() -> None:
+    """A sending delivery with an expired lease can be claimed by another worker."""
+    repository = FakeTaskManagementRepository()
+    _, reminder = make_scheduled_reminder(repository)
+    delivery = repository.insert_delivery(
+        make_delivery(
+            delivery_id=1,
+            reminder_id=reminder.id,
+            scheduled_for=datetime(2026, 11, 4, 9, 0, tzinfo=UTC),
+            status="sending",
+            attempts=1,
+            locked_at=fixed_now() - timedelta(minutes=6),
+        )
+    )
+    sender = FakeSender(message_id=77)
+    dispatcher = make_dispatcher(repository, sender)
+
+    sent = await dispatcher.dispatch_due()
+
+    assert sent == 1
+    assert delivery.status == "sent"
+    assert delivery.attempts == 2
+    assert delivery.telegram_message_id == 77
+
+
+async def test_pending_delivery_with_future_retry_is_skipped() -> None:
+    """A pending delivery waiting for its backoff is not sent early."""
+    repository = FakeTaskManagementRepository()
+    _, reminder = make_scheduled_reminder(repository)
+    delivery = repository.insert_delivery(
+        make_delivery(
+            delivery_id=1,
+            reminder_id=reminder.id,
+            scheduled_for=datetime(2026, 11, 4, 9, 0, tzinfo=UTC),
+            status="pending",
+            attempts=1,
+            next_attempt_at=fixed_now() + timedelta(minutes=5),
+        )
+    )
+    sender = FakeSender()
+    dispatcher = make_dispatcher(repository, sender)
+
+    sent = await dispatcher.dispatch_due()
+
+    assert sent == 0
+    assert sender.calls == []
+    assert delivery.status == "pending"
+    assert delivery.next_attempt_at == fixed_now() + timedelta(minutes=5)
+    assert reminder.next_run_at == datetime(2026, 11, 4, 9, 0, tzinfo=UTC)

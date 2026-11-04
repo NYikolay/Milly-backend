@@ -339,7 +339,8 @@ class ProjectService:
 
         Notes:
             - Marks the project and asks the repository to soft-delete its
-              non-deleted series and tasks and cancel pending deliveries.
+              non-deleted series and tasks and cancel pending, failed, and
+              sending deliveries.
             - Locks the project row and does not commit.
         """
         project = await self._require_project(user_id, project_id, for_update=True)

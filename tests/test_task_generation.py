@@ -48,6 +48,7 @@ async def test_generation_task_delegates_to_series_service(
         """Series service double recording the generation instant."""
 
         def __init__(self, *args: object, **kwargs: object) -> None:
+            """Store constructor arguments for optional inspection."""
             self.args = args
             self.kwargs = kwargs
 

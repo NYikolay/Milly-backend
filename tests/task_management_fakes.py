@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -42,7 +42,7 @@ class FakeSender:
         self.error = error
         self.calls: list[tuple[int, str]] = []
 
-    async def send(self, user_id: int, text: str) -> int | None:
+    async def send(self, chat_id: int, text: str) -> int | None:
         """
         Record a send and optionally raise a configured error.
 
@@ -50,7 +50,7 @@ class FakeSender:
             Mirror the Telegram sender contract used by the dispatcher.
 
         Args:
-            user_id: Recipient identifier.
+            chat_id: Telegram chat identifier.
             text: Message text.
 
         Returns:
@@ -59,7 +59,7 @@ class FakeSender:
         Raises:
             Exception: The configured error when ``error`` is set.
         """
-        self.calls.append((user_id, text))
+        self.calls.append((chat_id, text))
         if self.error is not None:
             raise self.error
         return self.message_id
@@ -71,6 +71,7 @@ class FakeTaskManagementRepository:
     def __init__(self) -> None:
         """Initialize empty collections, counters, and a default palette color."""
         self.user_timezones: dict[int, str] = {}
+        self.telegram_ids: dict[int, int] = {}
         self.colors: dict[int, ColorPalette] = {
             1: ColorPalette(
                 id=1,
@@ -90,8 +91,12 @@ class FakeTaskManagementRepository:
         self.task_labels: set[tuple[int, int]] = set()
         self.series_labels: set[tuple[int, int]] = set()
         self.commits = 0
+        self.rollbacks = 0
         self.claimed_series_ids: list[int] = []
         self.blocked_series_ids: set[int] = set()
+        self.series_errors: dict[int, Exception] = {}
+        self.task_errors: set[int] = set()
+        self.on_claim: Callable[[], None] | None = None
         self._next_ids: dict[str, int] = {}
 
     def _next_id(self, name: str, collection: dict[int, Any]) -> int:
@@ -196,7 +201,11 @@ class FakeTaskManagementRepository:
 
     async def get_user_timezone(self, user_id: int) -> str | None:
         """Return the stored timezone for a user."""
-        return self.user_timezones.get(user_id, "UTC")
+        return self.user_timezones.get(user_id)
+
+    async def get_telegram_id(self, user_id: int) -> int | None:
+        """Return the linked Telegram chat identifier for a user."""
+        return self.telegram_ids.get(user_id)
 
     async def list_projects(
         self,
@@ -442,6 +451,8 @@ class FakeTaskManagementRepository:
         for_update: bool = False,
     ) -> Task | None:
         """Return a non-deleted task owned by a user."""
+        if task_id in self.task_errors:
+            raise RuntimeError("task lookup failed")
         task = self.tasks.get(task_id)
         if task is None or task.user_id != user_id or task.deleted_at is not None:
             return None
@@ -731,6 +742,8 @@ class FakeTaskManagementRepository:
     ) -> TaskSeries | None:
         """Return a series for generation unless the fake marks it locked."""
         self.claimed_series_ids.append(series_id)
+        if series_id in self.series_errors:
+            raise self.series_errors[series_id]
         if series_id in self.blocked_series_ids:
             return None
         series = self.series.get(series_id)
@@ -833,6 +846,8 @@ class FakeTaskManagementRepository:
             or reminder.next_run_at > now
         ):
             return None
+        if self.on_claim is not None:
+            self.on_claim()
         return reminder
 
     async def update_reminder_next_run_at(
@@ -911,6 +926,12 @@ class FakeTaskManagementRepository:
         delivery.locked_at = None
         delivery.last_error = last_error
 
+    async def cancel_delivery(self, delivery: ReminderDelivery) -> None:
+        """Cancel a delivery without sending it."""
+        delivery.status = DeliveryStatus.CANCELLED.value
+        delivery.locked_at = None
+        delivery.next_attempt_at = None
+
     async def reactivate_delivery(self, delivery: ReminderDelivery) -> None:
         """Reset a cancelled delivery to pending."""
         delivery.status = DeliveryStatus.PENDING.value
@@ -922,8 +943,12 @@ class FakeTaskManagementRepository:
         delivery.last_error = None
 
     async def commit(self) -> None:
-        """Record an explicit dispatcher commit."""
+        """Record an explicit dispatcher or generation commit."""
         self.commits += 1
+
+    async def rollback(self) -> None:
+        """Record an explicit rollback."""
+        self.rollbacks += 1
 
     async def flush(self) -> None:
         """Flush pending changes in the in-memory implementation."""

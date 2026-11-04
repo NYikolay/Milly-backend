@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 
-from backend.core.errors import ErrorCode, NotFoundError
+from backend.core.errors import BadRequestError, ErrorCode, NotFoundError
 from backend.task_management.enums import Priority, ReminderKind
 from backend.task_management.labels import LabelService
 from backend.task_management.palette import PaletteService
@@ -13,6 +13,7 @@ from backend.task_management.series import SeriesService
 from tests.task_management_fakes import (
     FakeTaskManagementRepository,
     fixed_now,
+    make_delivery,
     make_label,
     make_project,
     make_reminder,
@@ -457,3 +458,141 @@ async def test_list_details_returns_every_owned_series() -> None:
     details = await service.list_details(USER_ID)
 
     assert [detail.series.id for detail in details] == [first.id, 2]
+
+
+async def test_resumed_generation_does_not_overshoot_or_rewind_marker() -> None:
+    """A run soon after creation creates nothing and keeps ``generated_through``."""
+    repository = FakeTaskManagementRepository()
+    service = make_service(repository)
+    series = await service.create(
+        USER_ID,
+        title="Daily",
+        description=None,
+        priority=Priority.NEITHER,
+        time_of_day=time(9, 0),
+        timezone="UTC",
+        starts_on=fixed_now().date(),
+        ends_on=None,
+        project_id=None,
+        label_ids=(),
+        reminders_enabled=False,
+        reminders=(),
+    )
+    generated_through = series.generated_through
+    task_count = len(repository.tasks)
+
+    created = await service.generate(fixed_now() + timedelta(minutes=15))
+
+    assert created == 0
+    assert series.generated_through == generated_through
+    assert len(repository.tasks) == task_count
+
+
+async def test_delete_series_cancels_overdue_instance_reminders_and_keeps_history() -> None:
+    """Deleting a series stops overdue reminders but preserves incomplete history."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    overdue = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=fixed_now() - timedelta(days=1),
+        )
+    )
+    reminder = repository.insert_reminder(
+        make_reminder(
+            reminder_id=1,
+            task_id=overdue.id,
+            kind=ReminderKind.SCHEDULED,
+            offset_minutes=None,
+            interval_days=1,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+            next_run_at=fixed_now() - timedelta(minutes=5),
+        )
+    )
+    delivery = repository.insert_delivery(
+        make_delivery(
+            delivery_id=1,
+            reminder_id=reminder.id,
+            scheduled_for=fixed_now() - timedelta(minutes=5),
+        )
+    )
+    service = make_service(repository)
+
+    await service.delete(USER_ID, series.id)
+
+    assert overdue.deleted_at is None
+    assert reminder.next_run_at is None
+    assert delivery.status == "cancelled"
+    assert delivery.locked_at is None
+
+
+async def test_generation_continues_after_one_series_fails_unexpectedly() -> None:
+    """A claim failure for one series rolls back only that series."""
+    repository = FakeTaskManagementRepository()
+    bad = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=fixed_now().date(),
+        )
+    )
+    good = repository.insert_series(
+        make_series(
+            series_id=2,
+            time_of_day=time(10, 0),
+            starts_on=fixed_now().date(),
+        )
+    )
+    repository.series_errors[bad.id] = RuntimeError("boom")
+    service = make_service(repository)
+
+    created = await service.generate(fixed_now())
+
+    assert created > 0
+    assert repository.rollbacks == 1
+    assert repository.commits >= 1
+    assert {task.series_id for task in repository.tasks.values()} == {good.id}
+
+
+async def test_create_series_rejects_aware_time_of_day_at_service_boundary() -> None:
+    """A direct service call rejects an aware wall-clock time."""
+    repository = FakeTaskManagementRepository()
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError):
+        await service.create(
+            USER_ID,
+            title="Daily",
+            description=None,
+            priority=Priority.NEITHER,
+            time_of_day=time(9, 0, tzinfo=UTC),
+            timezone="UTC",
+            starts_on=fixed_now().date(),
+            ends_on=None,
+            project_id=None,
+            label_ids=(),
+            reminders_enabled=False,
+            reminders=(),
+        )
+
+    assert repository.series == {}
+
+
+async def test_update_series_rejects_aware_time_of_day_at_service_boundary() -> None:
+    """A direct update rejects an aware wall-clock time."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(series_id=1, time_of_day=time(9, 0), starts_on=fixed_now().date())
+    )
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError):
+        await service.update(USER_ID, series.id, time_of_day=time(9, 0, tzinfo=UTC))

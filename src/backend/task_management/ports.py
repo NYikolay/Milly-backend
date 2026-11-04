@@ -175,7 +175,7 @@ class TaskManagementRepository(Protocol):
                 belongs to another user or is soft-deleted.
 
         Notes:
-            - Flushes but does not commit; the caller owns the transaction.
+            - Performs no writes and does not commit.
         """
         ...
 
@@ -364,7 +364,7 @@ class TaskManagementRepository(Protocol):
                 belongs to another user or is soft-deleted.
 
         Notes:
-            - Flushes but does not commit; the caller owns the transaction.
+            - Performs no writes and does not commit.
         """
         ...
 
@@ -494,6 +494,26 @@ class TaskManagementRepository(Protocol):
         Returns:
             str | None: The stored timezone name, or ``None`` when the user is
                 missing.
+
+        Notes:
+            - Performs no writes and does not commit.
+        """
+        ...
+
+    async def get_telegram_id(self, user_id: int) -> int | None:
+        """
+        Load the Telegram chat identifier of a user.
+
+        Purpose:
+            Address reminder deliveries to the external Telegram identity
+            instead of the internal application user identifier.
+
+        Args:
+            user_id: Internal user identifier.
+
+        Returns:
+            int | None: The linked ``telegram_profiles.telegram_id``, or
+                ``None`` when the user has no Telegram profile.
 
         Notes:
             - Performs no writes and does not commit.
@@ -870,10 +890,10 @@ class TaskManagementRepository(Protocol):
         Notes:
             - Template series reminders are retargeted to the series timezone
               and keep ``next_run_at=None``.
-            - Future incomplete task reminders are recomputed: before-due
-              slots come from ``due_at`` and become ``None`` when past;
-              scheduled slots advance to the first suitable slot after
-              ``now``.
+            - Incomplete task reminders, including overdue tasks, are
+              recomputed: before-due slots come from ``due_at`` and become
+              ``None`` when past; scheduled slots advance to the first suitable
+              slot after ``now``.
             - Cancelled deliveries are left for the dispatcher to reactivate
               when their recomputed slot becomes current.
             - Flushes but does not commit.
@@ -1389,6 +1409,26 @@ class TaskManagementRepository(Protocol):
         """
         ...
 
+    async def cancel_delivery(self, delivery: ReminderDelivery) -> None:
+        """
+        Cancel one delivery without sending it.
+
+        Purpose:
+            Stop a claimed slot when the owning task, series, toggle, or project
+            is no longer dispatchable.
+
+        Args:
+            delivery: Delivery to cancel.
+
+        Returns:
+            None: The change stays in the current unit of work.
+
+        Notes:
+            - Sets ``status='cancelled'`` and clears the lease and retry slot.
+            - Flushes but does not commit.
+        """
+        ...
+
     async def reactivate_delivery(self, delivery: ReminderDelivery) -> None:
         """
         Reset a cancelled delivery to pending.
@@ -1423,6 +1463,23 @@ class TaskManagementRepository(Protocol):
         Notes:
             - Only the dispatcher calls this explicitly; all other repository
               methods flush without committing.
+        """
+        ...
+
+    async def rollback(self) -> None:
+        """
+        Roll back the current transaction.
+
+        Purpose:
+            Discard a failed reminder or series attempt so later work in the
+            same job can continue from a clean unit of work.
+
+        Returns:
+            None: The transaction is rolled back.
+
+        Notes:
+            - Used by the dispatcher and generation job after unexpected
+              per-item failures.
         """
         ...
 

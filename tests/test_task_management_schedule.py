@@ -124,8 +124,8 @@ def test_daily_due_times_resumes_after_generated_through() -> None:
     ]
 
 
-def test_daily_due_times_generated_through_beyond_horizon_returns_one_candidate() -> None:
-    """Return one candidate when generation already extends beyond the horizon."""
+def test_daily_due_times_generated_through_beyond_horizon_returns_empty() -> None:
+    """Resuming past the horizon does not overshoot the generation window."""
     now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
     generated_through = datetime(2027, 6, 1, 6, 0, tzinfo=UTC)
     result = daily_due_times(
@@ -136,7 +136,7 @@ def test_daily_due_times_generated_through_beyond_horizon_returns_one_candidate(
         now=now,
         generated_through=generated_through,
     )
-    assert result == [datetime(2027, 6, 2, 6, 0, tzinfo=UTC)]
+    assert result == []
 
 
 def test_daily_due_times_respects_custom_horizon() -> None:

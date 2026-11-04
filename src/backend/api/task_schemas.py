@@ -36,7 +36,7 @@ class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str | None = None
     color_id: int | None = Field(default=None, gt=0)
-    icon: str | None = None
+    icon: str | None = Field(default=None, max_length=32)
 
     @field_validator("name")
     @classmethod
@@ -68,7 +68,7 @@ class ProjectUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = None
     color_id: int | None = Field(default=None, gt=0)
-    icon: str | None = None
+    icon: str | None = Field(default=None, max_length=32)
 
     @field_validator("name")
     @classmethod
@@ -224,6 +224,29 @@ def _require_aware(value: datetime | None) -> datetime | None:
     return value
 
 
+def _require_naive_time(value: time | None) -> time | None:
+    """
+    Require an optional wall-clock time to be timezone-naive.
+
+    Purpose:
+        Keep ``time_of_day`` a local series value so the service can resolve it
+        through the series timezone instead of receiving an ambiguous mixed
+        value.
+
+    Args:
+        value: Candidate wall-clock time, or ``None``.
+
+    Returns:
+        time | None: The unchanged naive time or ``None``.
+
+    Raises:
+        ValueError: If the value carries timezone information.
+    """
+    if value is not None and (value.tzinfo is not None or value.utcoffset() is not None):
+        raise ValueError("Time of day must not include a timezone")
+    return value
+
+
 def _require_iana_timezone(value: str | None) -> str | None:
     """
     Require an optional timezone name to resolve as an IANA zone.
@@ -282,9 +305,29 @@ class ReminderInputSchema(BaseModel):
 
     kind: Literal["before_due", "scheduled"]
     enabled: bool = True
-    offset_minutes: int | None = Field(default=None, ge=0)
-    interval_days: int | None = Field(default=None, ge=1)
+    offset_minutes: int | None = Field(default=None, ge=0, le=525_600)
+    interval_days: int | None = Field(default=None, ge=1, le=32_767)
     time_of_day: time | None = None
+
+    @field_validator("time_of_day")
+    @classmethod
+    def _validate_time_of_day(cls, value: time | None) -> time | None:
+        """
+        Reject a timezone-aware reminder wall-clock time.
+
+        Purpose:
+            Keep reminder slots resolvable through the stored timezone.
+
+        Args:
+            value: Candidate wall-clock time, or ``None``.
+
+        Returns:
+            time | None: The unchanged naive time or ``None``.
+
+        Raises:
+            ValueError: If the value carries timezone information.
+        """
+        return _require_naive_time(value)
 
     @model_validator(mode="after")
     def _validate_rule(self) -> Self:
@@ -571,6 +614,29 @@ class SeriesCreate(BaseModel):
     reminders_enabled: bool = False
     reminders: list[ReminderInputSchema] = Field(default_factory=list)
 
+    @field_validator("time_of_day")
+    @classmethod
+    def _validate_time_of_day(cls, value: time) -> time:
+        """
+        Reject a timezone-aware series wall-clock time.
+
+        Purpose:
+            Keep ``time_of_day`` local to the series timezone before generation.
+
+        Args:
+            value: Candidate wall-clock time.
+
+        Returns:
+            time: The unchanged naive time.
+
+        Raises:
+            ValueError: If the value carries timezone information.
+        """
+        validated = _require_naive_time(value)
+        if validated is None:
+            raise ValueError("Time of day is required")
+        return validated
+
     @field_validator("timezone")
     @classmethod
     def _validate_timezone(cls, value: str) -> str:
@@ -634,6 +700,26 @@ class SeriesUpdate(BaseModel):
     label_ids: list[int] | None = None
     reminders_enabled: bool | None = None
     reminders: list[ReminderInputSchema] | None = None
+
+    @field_validator("time_of_day")
+    @classmethod
+    def _validate_time_of_day(cls, value: time | None) -> time | None:
+        """
+        Reject a timezone-aware series wall-clock time while preserving omission.
+
+        Purpose:
+            Keep updated series times local to the configured timezone.
+
+        Args:
+            value: Candidate wall-clock time, or ``None``.
+
+        Returns:
+            time | None: The unchanged naive time or ``None``.
+
+        Raises:
+            ValueError: If the value carries timezone information.
+        """
+        return _require_naive_time(value)
 
     @field_validator("timezone")
     @classmethod

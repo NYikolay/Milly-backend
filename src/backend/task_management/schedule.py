@@ -83,8 +83,11 @@ def daily_due_times(
         list[datetime]: Aware UTC due instants in ascending order.
 
     Notes:
-        - A first candidate beyond the horizon is returned alone so a future series
-          still receives its first occurrence.
+        - A first candidate beyond the horizon is returned alone only when no
+          occurrences were generated yet, so a future series still receives its
+          first occurrence.
+        - When resuming from ``generated_through``, a candidate beyond the
+          horizon yields an empty list instead of overshooting the window.
         - ``generated_through`` resumes on the next local day after the instant.
         - The returned list never contains an instant at or before ``now``.
     """
@@ -106,7 +109,7 @@ def daily_due_times(
 
     horizon_end = now + timedelta(days=horizon_days)
     if candidate > horizon_end:
-        return [candidate]
+        return [candidate] if generated_through is None else []
 
     due_times: list[datetime] = []
     while candidate <= horizon_end and (ends_on is None or candidate_date <= ends_on):

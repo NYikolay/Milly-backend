@@ -21,10 +21,10 @@ NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
 GENERATED_THROUGH = datetime(2027, 1, 2, 9, 0, tzinfo=UTC)
 
 
-def _claims() -> AccessTokenClaims:
+def _claims(user_id: int = 1) -> AccessTokenClaims:
     """Build verified access claims for an authenticated user."""
     return AccessTokenClaims(
-        user_id=1,
+        user_id=user_id,
         session_id=77,
         telegram_id=123,
         jti="test-jti",
@@ -33,11 +33,16 @@ def _claims() -> AccessTokenClaims:
     )
 
 
-def _series_detail(*, series_id: int = 1, title: str = "Daily") -> SeriesDetail:
+def _series_detail(
+    *,
+    series_id: int = 1,
+    user_id: int = 1,
+    title: str = "Daily",
+) -> SeriesDetail:
     """Build a series detail with deterministic labels and template reminders."""
     series = TaskSeries(
         id=series_id,
-        user_id=1,
+        user_id=user_id,
         project_id=None,
         title=title,
         description="Every day",
@@ -78,6 +83,7 @@ class FakeSeriesService:
         self.created: list[dict[str, Any]] = []
         self.updated: list[tuple[int, dict[str, Any]]] = []
         self.deleted: list[int] = []
+        self.user_calls: list[tuple[str, int]] = []
         self.get_error: Exception | None = None
         self.create_error: Exception | None = None
         self.update_error: Exception | None = None
@@ -88,15 +94,17 @@ class FakeSeriesService:
         self.details[detail.series.id] = detail
 
     async def list_details(self, user_id: int) -> list[SeriesDetail]:
-        """Return prepared series details."""
-        return list(self.details.values())
+        """Return prepared series details owned by the user."""
+        self.user_calls.append(("list", user_id))
+        return [detail for detail in self.details.values() if detail.series.user_id == user_id]
 
     async def get_detail(self, user_id: int, series_id: int) -> SeriesDetail:
         """Return a prepared detail or raise the configured error."""
+        self.user_calls.append(("get", user_id))
         if self.get_error is not None:
             raise self.get_error
         detail = self.details.get(series_id)
-        if detail is None:
+        if detail is None or detail.series.user_id != user_id:
             raise NotFoundError("Series not found")
         return detail
 
@@ -111,22 +119,28 @@ class FakeSeriesService:
 
     async def update(self, user_id: int, series_id: int, **changes: Any) -> TaskSeries:
         """Record update arguments and apply simple field changes."""
+        self.user_calls.append(("update", user_id))
         self.updated.append((series_id, dict(changes)))
         if self.update_error is not None:
             raise self.update_error
         detail = self.details.get(series_id)
-        if detail is None:
+        if detail is None or detail.series.user_id != user_id:
             raise NotFoundError("Series not found")
-        for field in ("title", "description", "priority", "time_of_day", "timezone"):
-            value = changes.get(field)
-            if value is not None:
+        for field, value in changes.items():
+            if field in {"title", "description", "priority", "time_of_day", "timezone"}:
                 setattr(detail.series, field, getattr(value, "value", value))
+            elif field in {"ends_on", "project_id"}:
+                setattr(detail.series, field, value)
         return detail.series
 
     async def delete(self, user_id: int, series_id: int) -> None:
         """Record deletion or raise the configured error."""
+        self.user_calls.append(("delete", user_id))
         if self.delete_error is not None:
             raise self.delete_error
+        detail = self.details.get(series_id)
+        if detail is None or detail.series.user_id != user_id:
+            raise NotFoundError("Series not found")
         self.deleted.append(series_id)
         self.details.pop(series_id, None)
 
@@ -344,3 +358,135 @@ async def test_series_require_bearer_token(
     assert body["error"] is True
     assert body["code"] == "unauthorized"
     assert response.headers["www-authenticate"] == "Bearer"
+
+
+async def test_update_series_clears_nullable_fields_with_explicit_null(
+    series_client: AsyncClient,
+    fake_series_service: FakeSeriesService,
+) -> None:
+    """Explicit nulls clear description, end date, and project on a series."""
+    fake_series_service.add_detail(_series_detail())
+
+    description = await series_client.patch(
+        "/api/v1/task-series/1",
+        json={"description": None},
+    )
+    ends_on = await series_client.patch("/api/v1/task-series/1", json={"ends_on": None})
+    project = await series_client.patch("/api/v1/task-series/1", json={"project_id": None})
+
+    assert description.status_code == 200
+    assert description.json()["description"] is None
+    assert ends_on.status_code == 200
+    assert ends_on.json()["ends_on"] is None
+    assert project.status_code == 200
+    assert fake_series_service.updated == [
+        (1, {"description": None}),
+        (1, {"ends_on": None}),
+        (1, {"project_id": None}),
+    ]
+
+
+@pytest.mark.parametrize("method", ["post", "patch"])
+async def test_series_routes_reject_aware_time_of_day(
+    series_client: AsyncClient,
+    fake_series_service: FakeSeriesService,
+    method: str,
+) -> None:
+    """Reject a timezone-aware series wall-clock time with 422."""
+    if method == "post":
+        response = await series_client.post(
+            "/api/v1/task-series",
+            json={
+                "title": "Daily",
+                "time_of_day": "09:00:00+03:00",
+                "timezone": "UTC",
+                "starts_on": "2026-11-04",
+            },
+        )
+    else:
+        fake_series_service.add_detail(_series_detail())
+        response = await series_client.patch(
+            "/api/v1/task-series/1",
+            json={"time_of_day": "09:00:00+03:00"},
+        )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "validation_error"
+    assert body["request_id"] == response.headers["x-request-id"]
+    assert fake_series_service.created == []
+    assert fake_series_service.updated == []
+
+
+async def test_create_series_rejects_out_of_range_interval(
+    series_client: AsyncClient,
+    fake_series_service: FakeSeriesService,
+) -> None:
+    """Reject an interval above the SMALLINT database range."""
+    response = await series_client.post(
+        "/api/v1/task-series",
+        json={
+            "title": "Daily",
+            "time_of_day": "09:00:00",
+            "timezone": "UTC",
+            "starts_on": "2026-11-04",
+            "reminders": [
+                {
+                    "kind": "scheduled",
+                    "interval_days": 32_768,
+                    "time_of_day": "09:00:00",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+    assert fake_series_service.created == []
+
+
+async def test_update_another_users_series_returns_not_found(
+    series_client: AsyncClient,
+    fake_series_service: FakeSeriesService,
+) -> None:
+    """A cross-user series update is reported as not found."""
+    fake_series_service.add_detail(_series_detail(user_id=2))
+
+    response = await series_client.patch(
+        "/api/v1/task-series/1",
+        json={"title": "Changed"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "not_found"
+
+
+async def test_delete_another_users_series_returns_not_found(
+    series_client: AsyncClient,
+    fake_series_service: FakeSeriesService,
+) -> None:
+    """A cross-user series delete is reported as not found."""
+    fake_series_service.add_detail(_series_detail(user_id=2))
+
+    response = await series_client.delete("/api/v1/task-series/1")
+
+    assert response.status_code == 404
+    assert fake_series_service.deleted == []
+
+
+async def test_series_routes_forward_the_claim_user_id(
+    series_client: AsyncClient,
+    fake_series_service: FakeSeriesService,
+) -> None:
+    """List, get, update, and delete pass the authenticated user identifier."""
+    fake_series_service.add_detail(_series_detail())
+
+    await series_client.get("/api/v1/task-series")
+    await series_client.get("/api/v1/task-series/1")
+    await series_client.patch("/api/v1/task-series/1", json={"title": "Changed"})
+    await series_client.delete("/api/v1/task-series/1")
+
+    assert ("list", 1) in fake_series_service.user_calls
+    assert ("get", 1) in fake_series_service.user_calls
+    assert ("update", 1) in fake_series_service.user_calls
+    assert ("delete", 1) in fake_series_service.user_calls

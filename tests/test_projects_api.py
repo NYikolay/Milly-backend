@@ -17,10 +17,10 @@ from backend.task_management.projects import ProjectProgress, ProjectSummary
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
 
 
-def _claims() -> AccessTokenClaims:
+def _claims(user_id: int = 1) -> AccessTokenClaims:
     """Build verified access claims for an authenticated user."""
     return AccessTokenClaims(
-        user_id=1,
+        user_id=user_id,
         session_id=77,
         telegram_id=123,
         jti="test-jti",
@@ -44,6 +44,7 @@ def _color(color_id: int = 1) -> ColorPalette:
 def _summary(
     *,
     project_id: int = 1,
+    user_id: int = 1,
     name: str = "Work",
     color: ColorPalette | None = None,
     total: int = 0,
@@ -54,7 +55,7 @@ def _summary(
     resolved_color = color or _color()
     project = Project(
         id=project_id,
-        user_id=1,
+        user_id=user_id,
         name=name,
         description="Plan",
         color_id=resolved_color.id,
@@ -85,6 +86,7 @@ class FakeProjectService:
         self.updated: list[tuple[int, dict[str, object]]] = []
         self.deleted: list[int] = []
         self.list_calls: list[tuple[int, bool]] = []
+        self.user_calls: list[tuple[str, int]] = []
         self.create_error: Exception | None = None
         self.get_error: Exception | None = None
         self.update_error: Exception | None = None
@@ -96,20 +98,23 @@ class FakeProjectService:
         self.summaries[summary.project.id] = summary
 
     async def list(self, user_id: int, include_archived: bool) -> list[ProjectSummary]:
-        """Return summaries filtered by archive visibility."""
+        """Return summaries filtered by owner and archive visibility."""
         self.list_calls.append((user_id, include_archived))
+        self.user_calls.append(("list", user_id))
         return [
             summary
             for summary in self.summaries.values()
-            if include_archived or summary.project.archived_at is None
+            if summary.project.user_id == user_id
+            and (include_archived or summary.project.archived_at is None)
         ]
 
     async def get(self, user_id: int, project_id: int) -> Project:
         """Return one prepared project or raise the configured error."""
+        self.user_calls.append(("get", user_id))
         if self.get_error is not None:
             raise self.get_error
         summary = self.summaries.get(project_id)
-        if summary is None:
+        if summary is None or summary.project.user_id != user_id:
             raise NotFoundError("Project not found")
         return summary.project
 
@@ -161,11 +166,12 @@ class FakeProjectService:
         **changes: object,
     ) -> Project:
         """Record update arguments and apply the prepared changes."""
+        self.user_calls.append(("update", user_id))
         self.updated.append((project_id, dict(changes)))
         if self.update_error is not None:
             raise self.update_error
         summary = self.summaries.get(project_id)
-        if summary is None:
+        if summary is None or summary.project.user_id != user_id:
             raise NotFoundError("Project not found")
         project = summary.project
         name = changes.get("name")
@@ -184,24 +190,30 @@ class FakeProjectService:
 
     async def archive(self, user_id: int, project_id: int) -> Project:
         """Mark a prepared project as archived."""
+        self.user_calls.append(("archive", user_id))
         summary = self.summaries.get(project_id)
-        if summary is None:
+        if summary is None or summary.project.user_id != user_id:
             raise NotFoundError("Project not found")
         summary.project.archived_at = NOW
         return summary.project
 
     async def unarchive(self, user_id: int, project_id: int) -> Project:
         """Return a prepared project to the active list."""
+        self.user_calls.append(("unarchive", user_id))
         summary = self.summaries.get(project_id)
-        if summary is None:
+        if summary is None or summary.project.user_id != user_id:
             raise NotFoundError("Project not found")
         summary.project.archived_at = None
         return summary.project
 
     async def delete(self, user_id: int, project_id: int) -> None:
         """Record deletion or raise the configured error."""
+        self.user_calls.append(("delete", user_id))
         if self.delete_error is not None:
             raise self.delete_error
+        summary = self.summaries.get(project_id)
+        if summary is None or summary.project.user_id != user_id:
+            raise NotFoundError("Project not found")
         self.deleted.append(project_id)
         self.summaries.pop(project_id, None)
 
@@ -418,3 +430,104 @@ async def test_projects_require_bearer_token(
     assert body["code"] == "unauthorized"
     assert body["request_id"] == response.headers["x-request-id"]
     assert response.headers["www-authenticate"] == "Bearer"
+
+
+async def test_update_project_clears_description_and_icon_with_explicit_null(
+    project_client: AsyncClient,
+    fake_project_service: FakeProjectService,
+) -> None:
+    """Explicit nulls clear nullable project fields instead of being omitted."""
+    fake_project_service.add_summary(_summary())
+
+    description = await project_client.patch(
+        "/api/v1/projects/1",
+        json={"description": None},
+    )
+    icon = await project_client.patch("/api/v1/projects/1", json={"icon": None})
+
+    assert description.status_code == 200
+    assert description.json()["description"] is None
+    assert icon.status_code == 200
+    assert icon.json()["icon"] is None
+    assert fake_project_service.updated == [
+        (1, {"description": None}),
+        (1, {"icon": None}),
+    ]
+
+
+@pytest.mark.parametrize("payload", [{"name": "Work", "icon": "x" * 33}])
+async def test_create_project_rejects_long_icon(
+    project_client: AsyncClient,
+    fake_project_service: FakeProjectService,
+    payload: dict[str, object],
+) -> None:
+    """Reject an icon longer than the database column on create."""
+    response = await project_client.post("/api/v1/projects", json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+    assert fake_project_service.created == []
+
+
+async def test_update_project_rejects_long_icon(
+    project_client: AsyncClient,
+    fake_project_service: FakeProjectService,
+) -> None:
+    """Reject an icon longer than the database column on update."""
+    fake_project_service.add_summary(_summary())
+
+    response = await project_client.patch(
+        "/api/v1/projects/1",
+        json={"icon": "x" * 33},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+    assert fake_project_service.updated == []
+
+
+async def test_update_another_users_project_returns_not_found(
+    project_client: AsyncClient,
+    fake_project_service: FakeProjectService,
+) -> None:
+    """A cross-user project update is reported as not found."""
+    fake_project_service.add_summary(_summary(user_id=2))
+
+    response = await project_client.patch(
+        "/api/v1/projects/1",
+        json={"name": "Personal"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "not_found"
+
+
+async def test_delete_another_users_project_returns_not_found(
+    project_client: AsyncClient,
+    fake_project_service: FakeProjectService,
+) -> None:
+    """A cross-user project delete is reported as not found."""
+    fake_project_service.add_summary(_summary(user_id=2))
+
+    response = await project_client.delete("/api/v1/projects/1")
+
+    assert response.status_code == 404
+    assert fake_project_service.deleted == []
+
+
+async def test_project_routes_forward_the_claim_user_id(
+    project_client: AsyncClient,
+    fake_project_service: FakeProjectService,
+) -> None:
+    """List, get, update, and delete pass the authenticated user identifier."""
+    fake_project_service.add_summary(_summary())
+
+    await project_client.get("/api/v1/projects")
+    await project_client.get("/api/v1/projects/1")
+    await project_client.patch("/api/v1/projects/1", json={"name": "Personal"})
+    await project_client.delete("/api/v1/projects/1")
+
+    assert ("list", 1) in fake_project_service.user_calls
+    assert ("get", 1) in fake_project_service.user_calls
+    assert ("update", 1) in fake_project_service.user_calls
+    assert ("delete", 1) in fake_project_service.user_calls

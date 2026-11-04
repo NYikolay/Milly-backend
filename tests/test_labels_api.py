@@ -67,6 +67,7 @@ class FakeLabelService:
         self.created: list[dict[str, object]] = []
         self.updated: list[tuple[int, dict[str, object]]] = []
         self.deleted: list[int] = []
+        self.user_calls: list[tuple[str, int]] = []
         self.create_error: Exception | None = None
         self.update_error: Exception | None = None
         self.delete_error: Exception | None = None
@@ -77,8 +78,9 @@ class FakeLabelService:
         self.labels[label.id] = label
 
     async def list(self, user_id: int) -> list[Label]:
-        """Return every prepared label."""
-        return list(self.labels.values())
+        """Return every prepared label owned by the user."""
+        self.user_calls.append(("list", user_id))
+        return [label for label in self.labels.values() if label.user_id == user_id]
 
     async def create(
         self,
@@ -117,11 +119,12 @@ class FakeLabelService:
         **changes: object,
     ) -> Label:
         """Record update arguments and apply the prepared changes."""
+        self.user_calls.append(("update", user_id))
         self.updated.append((label_id, dict(changes)))
         if self.update_error is not None:
             raise self.update_error
         label = self.labels.get(label_id)
-        if label is None:
+        if label is None or label.user_id != user_id:
             raise NotFoundError("Label not found")
         name = changes.get("name")
         if isinstance(name, str):
@@ -133,8 +136,12 @@ class FakeLabelService:
 
     async def delete(self, user_id: int, label_id: int) -> None:
         """Record deletion or raise the configured error."""
+        self.user_calls.append(("delete", user_id))
         if self.delete_error is not None:
             raise self.delete_error
+        label = self.labels.get(label_id)
+        if label is None or label.user_id != user_id:
+            return
         self.deleted.append(label_id)
         self.labels.pop(label_id, None)
 
@@ -370,3 +377,36 @@ async def test_labels_require_bearer_token(
     assert body["code"] == "unauthorized"
     assert body["request_id"] == response.headers["x-request-id"]
     assert response.headers["www-authenticate"] == "Bearer"
+
+
+async def test_update_another_users_label_returns_not_found(
+    label_client: AsyncClient,
+    fake_label_service: FakeLabelService,
+) -> None:
+    """A cross-user label update is reported as not found."""
+    fake_label_service.add_label(
+        Label(id=1, user_id=2, name="Private", color_id=1, created_at=NOW, updated_at=NOW)
+    )
+
+    response = await label_client.patch("/api/v1/labels/1", json={"name": "Changed"})
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "not_found"
+
+
+async def test_label_routes_forward_the_claim_user_id(
+    label_client: AsyncClient,
+    fake_label_service: FakeLabelService,
+) -> None:
+    """List, update, and delete pass the authenticated user identifier."""
+    fake_label_service.add_label(
+        Label(id=1, user_id=1, name="Urgent", color_id=1, created_at=NOW, updated_at=NOW)
+    )
+
+    await label_client.get("/api/v1/labels")
+    await label_client.patch("/api/v1/labels/1", json={"name": "Later"})
+    await label_client.delete("/api/v1/labels/1")
+
+    assert ("list", 1) in fake_label_service.user_calls
+    assert ("update", 1) in fake_label_service.user_calls
+    assert ("delete", 1) in fake_label_service.user_calls

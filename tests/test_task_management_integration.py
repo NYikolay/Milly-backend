@@ -21,6 +21,7 @@ from tests.task_management_fakes import (
 )
 
 USER_ID = 7
+TELEGRAM_ID = 7007
 SECOND_REMINDER_AT = datetime(2026, 11, 6, 8, 30, tzinfo=UTC)
 THIRD_REMINDER_AT = datetime(2026, 11, 7, 8, 30, tzinfo=UTC)
 POST_HORIZON_NOW = fixed_now() + timedelta(days=HORIZON_DAYS + 1)
@@ -56,6 +57,7 @@ def make_services(
 async def test_daily_series_lifecycle_end_to_end() -> None:
     """Drive a daily series through generation, reminders, archive, and delete."""
     repository = FakeTaskManagementRepository()
+    repository.telegram_ids[USER_ID] = TELEGRAM_ID
     palette, projects, series_service, task_service = make_services(repository)
 
     color = repository.insert_color(
@@ -124,7 +126,7 @@ async def test_daily_series_lifecycle_end_to_end() -> None:
     )
 
     assert await success_dispatcher.dispatch_due() == 1
-    assert success_sender.calls == [(USER_ID, REMINDER_TEXT)]
+    assert success_sender.calls == [(TELEGRAM_ID, REMINDER_TEXT)]
     deliveries = list(repository.deliveries.values())
     assert len(deliveries) == 1
     sent_delivery = deliveries[0]
@@ -133,7 +135,7 @@ async def test_daily_series_lifecycle_end_to_end() -> None:
     assert sent_delivery.telegram_message_id == 321
 
     assert await success_dispatcher.dispatch_due() == 0
-    assert success_sender.calls == [(USER_ID, REMINDER_TEXT)]
+    assert success_sender.calls == [(TELEGRAM_ID, REMINDER_TEXT)]
     assert len(repository.deliveries) == 1
 
     archived = await projects.archive(USER_ID, project.id)
@@ -173,7 +175,7 @@ async def test_daily_series_lifecycle_end_to_end() -> None:
     )
 
     assert await failure_dispatcher.dispatch_due() == 0
-    assert failure_sender.calls == [(USER_ID, REMINDER_TEXT)]
+    assert failure_sender.calls == [(TELEGRAM_ID, REMINDER_TEXT)]
     pending = next(
         delivery
         for delivery in repository.deliveries.values()

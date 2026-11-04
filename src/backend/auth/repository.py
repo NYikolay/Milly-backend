@@ -302,8 +302,8 @@ class AuthRepository(Protocol):
                 ``None`` when the user no longer exists.
 
         Notes:
-            - Flushes but does not commit; the caller owns the transaction
-              boundary.
+            - Executes the update in the current unit of work and does not
+              commit; the caller owns the transaction boundary.
         """
         ...
 
@@ -688,8 +688,8 @@ class SqlAlchemyAuthRepository:
                 ``None`` when the user no longer exists.
 
         Notes:
-            - Flushes but does not commit; the caller owns the transaction
-              boundary.
+            - Executes the update in the current unit of work and does not
+              commit; the caller owns the transaction boundary.
         """
         await self._session.execute(
             update(User).where(User.id == user_id).values(timezone=timezone)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from http.client import HTTPException
 from typing import Any, Protocol
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -15,17 +16,17 @@ _SAFE_ERROR = "Telegram message delivery failed"
 
 
 class TelegramSender(Protocol):
-    """Contract for delivering a text message to a Telegram user."""
+    """Contract for delivering a text message to a Telegram chat."""
 
-    async def send(self, user_id: int, text: str) -> int | None:
+    async def send(self, chat_id: int, text: str) -> int | None:
         """
-        Send a message to a Telegram user.
+        Send a message to a Telegram chat.
 
         Purpose:
             Decouple reminder delivery from the concrete Telegram transport.
 
         Args:
-            user_id: Telegram chat identifier.
+            chat_id: Telegram chat identifier from the user's profile.
             text: Message text; implementations must never log it.
 
         Returns:
@@ -69,7 +70,7 @@ class TelegramBotSender:
             raise AuthNotConfiguredError()
         self._token = token
 
-    async def send(self, user_id: int, text: str) -> int | None:
+    async def send(self, chat_id: int, text: str) -> int | None:
         """
         Send a text message through the Telegram Bot API.
 
@@ -77,7 +78,7 @@ class TelegramBotSender:
             Deliver reminders without blocking the taskiq event loop.
 
         Args:
-            user_id: Telegram chat identifier.
+            chat_id: Telegram chat identifier from the user's profile.
             text: Message text; never logged by this sender.
 
         Returns:
@@ -92,7 +93,7 @@ class TelegramBotSender:
             - Error messages are generic so the token and message text cannot
               leak through logs.
         """
-        document = await asyncio.to_thread(_post_message, self._token, user_id, text)
+        document = await asyncio.to_thread(_post_message, self._token, chat_id, text)
         if document.get("ok") is not True:
             raise RuntimeError(_SAFE_ERROR)
         result = document.get("result")
@@ -102,7 +103,7 @@ class TelegramBotSender:
         return message_id
 
 
-def _post_message(token: str, user_id: int, text: str) -> dict[str, Any]:
+def _post_message(token: str, chat_id: int, text: str) -> dict[str, Any]:
     """
     Post one message to the Telegram Bot API.
 
@@ -111,7 +112,7 @@ def _post_message(token: str, user_id: int, text: str) -> dict[str, Any]:
 
     Args:
         token: Telegram bot token.
-        user_id: Telegram chat identifier.
+        chat_id: Telegram chat identifier from the user's profile.
         text: Message text.
 
     Returns:
@@ -123,7 +124,7 @@ def _post_message(token: str, user_id: int, text: str) -> dict[str, Any]:
     Notes:
         - The raised error intentionally omits the token, text, and HTTP details.
     """
-    payload = urlencode({"chat_id": str(user_id), "text": text}).encode("utf-8")
+    payload = urlencode({"chat_id": str(chat_id), "text": text}).encode("utf-8")
     request = Request(
         _API_URL.format(token=token),
         data=payload,
@@ -133,7 +134,7 @@ def _post_message(token: str, user_id: int, text: str) -> dict[str, Any]:
     try:
         with urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
             document = json.loads(response.read().decode("utf-8"))
-    except (OSError, ValueError):  # fmt: skip
+    except (OSError, HTTPException, ValueError):  # fmt: skip
         raise RuntimeError(_SAFE_ERROR) from None
     if not isinstance(document, dict):
         raise RuntimeError(_SAFE_ERROR)

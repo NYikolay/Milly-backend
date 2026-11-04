@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any, cast
+from urllib.error import URLError
 from urllib.parse import parse_qs
 from urllib.request import Request
 
@@ -65,6 +66,7 @@ async def test_delivery_task_delegates_to_dispatcher(
             sender: object,
             clock: Callable[[], datetime],
         ) -> None:
+            """Record the dispatcher dependencies for later assertions."""
             constructed["repository"] = repository
             constructed["sender"] = sender
             constructed["clock"] = clock
@@ -142,3 +144,26 @@ async def test_telegram_sender_failure_message_is_safe(
     assert "123:secret" not in message
     assert "Secret reminder text" not in message
     assert isinstance(excinfo.value.__cause__, type(None))
+
+
+async def test_telegram_sender_network_failure_message_is_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A URL error raises a generic RuntimeError without token or text."""
+    settings = Settings(_env_file=None, telegram_bot_token="123:secret")
+    sender = TelegramBotSender(settings)
+
+    def failing_urlopen(request: Request, timeout: float | None = None) -> FakeResponse:
+        """Raise a network-level URL error before any HTTP response exists."""
+        raise URLError("connection refused")
+
+    monkeypatch.setattr(telegram, "urlopen", failing_urlopen)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await sender.send(7, "Secret reminder text")
+
+    message = str(excinfo.value)
+    assert "123:secret" not in message
+    assert "Secret reminder text" not in message
+    assert isinstance(excinfo.value.__cause__, type(None))
+    assert excinfo.value.__suppress_context__ is True

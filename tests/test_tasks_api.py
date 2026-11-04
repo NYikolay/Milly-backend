@@ -15,17 +15,22 @@ from backend.models.label import Label
 from backend.models.task import Task
 from backend.models.task_reminder import TaskReminder
 from backend.task_management.enums import Priority, ReminderKind
-from backend.task_management.tasks import TaskDetail, TaskFilters
+from backend.task_management.labels import LabelService
+from backend.task_management.palette import PaletteService
+from backend.task_management.projects import ProjectService
+from backend.task_management.series import SeriesService
+from backend.task_management.tasks import TaskDetail, TaskFilters, TaskService
+from tests.task_management_fakes import FakeTaskManagementRepository, fixed_now
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
 DUE_AT = datetime(2026, 11, 4, 15, 0, tzinfo=UTC)
 REMINDER_AT = datetime(2026, 11, 4, 14, 30, tzinfo=UTC)
 
 
-def _claims() -> AccessTokenClaims:
+def _claims(user_id: int = 1) -> AccessTokenClaims:
     """Build verified access claims for an authenticated user."""
     return AccessTokenClaims(
-        user_id=1,
+        user_id=user_id,
         session_id=77,
         telegram_id=123,
         jti="test-jti",
@@ -37,6 +42,7 @@ def _claims() -> AccessTokenClaims:
 def _task_detail(
     *,
     task_id: int = 1,
+    user_id: int = 1,
     series_id: int | None = None,
     title: str = "Task",
     completed_at: datetime | None = None,
@@ -45,7 +51,7 @@ def _task_detail(
     """Build a task detail with deterministic labels and reminders."""
     task = Task(
         id=task_id,
-        user_id=1,
+        user_id=user_id,
         series_id=series_id,
         project_id=None,
         title=title,
@@ -86,6 +92,7 @@ class FakeTaskService:
         self.completed: list[int] = []
         self.uncompleted: list[int] = []
         self.deleted: list[int] = []
+        self.user_calls: list[tuple[str, int]] = []
         self.create_result: TaskDetail | None = None
         self.create_error: Exception | None = None
         self.get_error: Exception | None = None
@@ -99,14 +106,16 @@ class FakeTaskService:
     async def list(self, user_id: int, filters: TaskFilters) -> list[TaskDetail]:
         """Record list filters and return prepared details."""
         self.list_calls.append((user_id, filters))
+        self.user_calls.append(("list", user_id))
         return list(self.details.values())
 
     async def get(self, user_id: int, task_id: int) -> TaskDetail:
         """Return a prepared detail or raise the configured error."""
+        self.user_calls.append(("get", user_id))
         if self.get_error is not None:
             raise self.get_error
         detail = self.details.get(task_id)
-        if detail is None:
+        if detail is None or detail.task.user_id != user_id:
             raise NotFoundError("Task not found")
         return detail
 
@@ -120,40 +129,51 @@ class FakeTaskService:
         return detail
 
     async def update(self, user_id: int, task_id: int, **changes: Any) -> TaskDetail:
-        """Record update arguments and apply simple title changes."""
+        """Record update arguments and apply simple field changes."""
+        self.user_calls.append(("update", user_id))
         self.updated.append((task_id, dict(changes)))
         if self.update_error is not None:
             raise self.update_error
         detail = self.details.get(task_id)
-        if detail is None:
+        if detail is None or detail.task.user_id != user_id:
             raise NotFoundError("Task not found")
         title = changes.get("title")
         if isinstance(title, str):
             detail.task.title = title
+        if "description" in changes:
+            detail.task.description = changes["description"]
+        if "project_id" in changes:
+            detail.task.project_id = changes["project_id"]
         return detail
 
     async def complete(self, user_id: int, task_id: int) -> TaskDetail:
         """Mark a prepared task complete and return it."""
+        self.user_calls.append(("complete", user_id))
         self.completed.append(task_id)
         detail = self.details.get(task_id)
-        if detail is None:
+        if detail is None or detail.task.user_id != user_id:
             raise NotFoundError("Task not found")
         detail.task.completed_at = NOW
         return detail
 
     async def uncomplete(self, user_id: int, task_id: int) -> TaskDetail:
         """Reopen a prepared task and return it."""
+        self.user_calls.append(("uncomplete", user_id))
         self.uncompleted.append(task_id)
         detail = self.details.get(task_id)
-        if detail is None:
+        if detail is None or detail.task.user_id != user_id:
             raise NotFoundError("Task not found")
         detail.task.completed_at = None
         return detail
 
     async def delete(self, user_id: int, task_id: int) -> None:
         """Record deletion or raise the configured error."""
+        self.user_calls.append(("delete", user_id))
         if self.delete_error is not None:
             raise self.delete_error
+        detail = self.details.get(task_id)
+        if detail is None or detail.task.user_id != user_id:
+            raise NotFoundError("Task not found")
         self.deleted.append(task_id)
         self.details.pop(task_id, None)
 
@@ -444,3 +464,153 @@ async def test_scheduled_reminder_response_includes_timezone(
     assert reminder["kind"] == "scheduled"
     assert reminder["timezone"] == "Europe/Moscow"
     assert reminder["time_of_day"] == "09:00:00"
+
+
+async def test_update_task_clears_description_and_project_with_explicit_null(
+    task_client: AsyncClient,
+    fake_task_service: FakeTaskService,
+) -> None:
+    """Explicit nulls clear nullable task fields instead of being omitted."""
+    fake_task_service.add_detail(_task_detail())
+
+    description = await task_client.patch("/api/v1/tasks/1", json={"description": None})
+    project = await task_client.patch("/api/v1/tasks/1", json={"project_id": None})
+
+    assert description.status_code == 200
+    assert description.json()["description"] is None
+    assert project.status_code == 200
+    assert project.json()["project_id"] is None
+    assert fake_task_service.updated == [
+        (1, {"description": None}),
+        (1, {"project_id": None}),
+    ]
+
+
+@pytest.mark.parametrize("method", ["post", "patch"])
+async def test_task_routes_reject_aware_reminder_time(
+    task_client: AsyncClient,
+    fake_task_service: FakeTaskService,
+    method: str,
+) -> None:
+    """Reject a timezone-aware reminder wall-clock time with 422."""
+    reminder = {
+        "kind": "scheduled",
+        "interval_days": 1,
+        "time_of_day": "09:00:00+03:00",
+    }
+    if method == "post":
+        response = await task_client.post(
+            "/api/v1/tasks",
+            json={
+                "title": "Task",
+                "due_at": "2026-11-04T15:00:00+00:00",
+                "reminders": [reminder],
+            },
+        )
+    else:
+        fake_task_service.add_detail(_task_detail())
+        response = await task_client.patch(
+            "/api/v1/tasks/1",
+            json={"reminders": [reminder]},
+        )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "validation_error"
+    assert body["request_id"] == response.headers["x-request-id"]
+    assert fake_task_service.created == []
+    assert fake_task_service.updated == []
+
+
+@pytest.mark.parametrize(
+    "reminder",
+    [
+        {"kind": "before_due", "offset_minutes": 525_601},
+        {"kind": "scheduled", "interval_days": 32_768, "time_of_day": "09:00:00"},
+    ],
+)
+async def test_create_task_rejects_out_of_range_reminder_numbers(
+    task_client: AsyncClient,
+    fake_task_service: FakeTaskService,
+    reminder: dict[str, object],
+) -> None:
+    """Reject numeric reminder values outside the database-safe ranges."""
+    response = await task_client.post(
+        "/api/v1/tasks",
+        json={
+            "title": "Task",
+            "due_at": "2026-11-04T15:00:00+00:00",
+            "reminders": [reminder],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+    assert fake_task_service.created == []
+
+
+async def test_update_another_users_task_returns_not_found(
+    task_client: AsyncClient,
+    fake_task_service: FakeTaskService,
+) -> None:
+    """A cross-user task update is reported as not found."""
+    fake_task_service.add_detail(_task_detail(user_id=2))
+
+    response = await task_client.patch("/api/v1/tasks/1", json={"title": "Changed"})
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "not_found"
+
+
+async def test_delete_another_users_task_returns_not_found(
+    task_client: AsyncClient,
+    fake_task_service: FakeTaskService,
+) -> None:
+    """A cross-user task delete is reported as not found."""
+    fake_task_service.add_detail(_task_detail(user_id=2))
+
+    response = await task_client.delete("/api/v1/tasks/1")
+
+    assert response.status_code == 404
+    assert fake_task_service.deleted == []
+
+
+async def test_task_routes_forward_the_claim_user_id(
+    task_client: AsyncClient,
+    fake_task_service: FakeTaskService,
+) -> None:
+    """List, get, update, and delete pass the authenticated user identifier."""
+    fake_task_service.add_detail(_task_detail())
+
+    await task_client.get("/api/v1/tasks")
+    await task_client.get("/api/v1/tasks/1")
+    await task_client.patch("/api/v1/tasks/1", json={"title": "Changed"})
+    await task_client.delete("/api/v1/tasks/1")
+
+    assert ("list", 1) in fake_task_service.user_calls
+    assert ("get", 1) in fake_task_service.user_calls
+    assert ("update", 1) in fake_task_service.user_calls
+    assert ("delete", 1) in fake_task_service.user_calls
+
+
+async def test_task_list_rejects_max_date_with_bad_request_envelope(app: FastAPI) -> None:
+    """The last calendar date maps to a 400 instead of an internal error."""
+    repository = FakeTaskManagementRepository()
+    palette = PaletteService(repository)
+    series = SeriesService(
+        repository,
+        ProjectService(repository, palette, clock=fixed_now),
+        LabelService(repository, palette, clock=fixed_now),
+        clock=fixed_now,
+    )
+    service = TaskService(repository, series, clock=fixed_now)
+    app.dependency_overrides[get_task_service] = lambda: service
+    app.dependency_overrides[get_current_access] = lambda: _claims()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/v1/tasks", params={"date": "9999-12-31"})
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "bad_request"
+    assert body["request_id"] == response.headers["x-request-id"]

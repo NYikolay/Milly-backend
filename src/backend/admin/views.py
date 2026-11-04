@@ -10,6 +10,7 @@ from sqladmin.filters import (
     OperationColumnFilter,
 )
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from starlette.requests import Request
 
 from backend.core.errors import ConflictError
@@ -114,6 +115,30 @@ class ColorPaletteAdmin(ModelView, model=ColorPalette):
             )
             if result.scalar_one() == 0:
                 raise ConflictError("Cannot delete the last active palette color")
+
+    async def delete_model(self, request: Request, pk: Any) -> None:
+        """
+        Delete a palette color and translate foreign-key conflicts.
+
+        Purpose:
+            Show a clear admin error when a project or label still references
+            the color instead of leaking an ``IntegrityError``.
+
+        Args:
+            request: Admin request performing the deletion.
+            pk: Primary key of the color selected for deletion.
+
+        Returns:
+            None: The color is deleted.
+
+        Raises:
+            ConflictError: If the database rejects the delete because the
+                color is referenced by a project or label.
+        """
+        try:
+            await super().delete_model(request, pk)
+        except IntegrityError as error:
+            raise ConflictError("Cannot delete a palette color that is in use") from error
 
 
 class UserAdmin(ModelView, model=User):

@@ -11,6 +11,8 @@ from sqladmin.filters import (
     ForeignKeyFilter,
     OperationColumnFilter,
 )
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import IntegrityError
 from starlette.applications import Starlette
 
 from backend.admin.views import (
@@ -104,6 +106,16 @@ def _palette_view(count: int) -> tuple[ColorPaletteAdmin, _FakeSession]:
     return view, session_maker.session
 
 
+def _compile_statement(statement: Any) -> str:
+    """Compile a recorded statement with PostgreSQL literal binds."""
+    return str(
+        statement.compile(
+            dialect=cast(Any, postgresql.dialect)(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+
 def _palette(**overrides: Any) -> ColorPalette:
     """Build a palette color instance for hook tests."""
     values: dict[str, Any] = {
@@ -175,6 +187,9 @@ async def test_palette_change_rejects_deactivating_last_active() -> None:
             cast(Any, None),
         )
     assert len(session.statements) == 1
+    sql = _compile_statement(session.statements[0])
+    assert "color_palette.is_active IS true" in sql
+    assert "color_palette.id != 1" in sql
 
 
 async def test_palette_change_allows_deactivation_with_another_active() -> None:
@@ -194,6 +209,9 @@ async def test_palette_delete_rejects_last_active() -> None:
     with pytest.raises(ConflictError, match="Cannot delete the last active palette color"):
         await view.on_model_delete(_palette(), cast(Any, None))
     assert len(session.statements) == 1
+    sql = _compile_statement(session.statements[0])
+    assert "color_palette.is_active IS true" in sql
+    assert "color_palette.id != 1" in sql
 
 
 async def test_palette_delete_allows_color_with_another_active() -> None:
@@ -296,3 +314,22 @@ async def test_forms_include_foreign_keys_without_primary_keys() -> None:
     user_fields = user_form()._fields
     assert "id" not in user_fields
     assert "telegram_profile" not in user_fields
+
+
+async def test_palette_delete_translates_reference_integrity_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Translate a referenced-color foreign-key failure into a conflict."""
+    view = ColorPaletteAdmin()
+    original = ModelView.delete_model
+
+    async def failing_delete(self: ModelView, request: Any, pk: Any) -> None:
+        """Raise the database-style integrity failure under test."""
+        raise IntegrityError("delete", None, RuntimeError("referenced"))
+
+    monkeypatch.setattr(ModelView, "delete_model", failing_delete)
+    try:
+        with pytest.raises(ConflictError, match="Cannot delete a palette color that is in use"):
+            await view.delete_model(cast(Any, None), 1)
+    finally:
+        monkeypatch.setattr(ModelView, "delete_model", original)

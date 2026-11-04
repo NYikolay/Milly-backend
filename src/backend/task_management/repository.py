@@ -18,6 +18,7 @@ from backend.models.task import Task
 from backend.models.task_label import TaskLabel
 from backend.models.task_reminder import TaskReminder
 from backend.models.task_series import TaskSeries
+from backend.models.telegram_profile import TelegramProfile
 from backend.models.user import User
 from backend.task_management.enums import DeliveryStatus, ReminderKind
 from backend.task_management.reminders import rebuild_reminder_slot
@@ -734,6 +735,29 @@ class SqlAlchemyTaskManagementRepository:
             - Performs no writes and does not commit.
         """
         result = await self._session.execute(select(User.timezone).where(User.id == user_id))
+        return result.scalar_one_or_none()
+
+    async def get_telegram_id(self, user_id: int) -> int | None:
+        """
+        Load the Telegram chat identifier of a user.
+
+        Purpose:
+            Address reminder deliveries to the external Telegram identity
+            instead of the internal application user identifier.
+
+        Args:
+            user_id: Internal user identifier.
+
+        Returns:
+            int | None: The linked ``telegram_profiles.telegram_id``, or
+                ``None`` when the user has no Telegram profile.
+
+        Notes:
+            - Performs no writes and does not commit.
+        """
+        result = await self._session.execute(
+            select(TelegramProfile.telegram_id).where(TelegramProfile.user_id == user_id)
+        )
         return result.scalar_one_or_none()
 
     async def list_tasks(
@@ -2039,6 +2063,29 @@ class SqlAlchemyTaskManagementRepository:
         delivery.last_error = last_error
         await self._session.flush()
 
+    async def cancel_delivery(self, delivery: ReminderDelivery) -> None:
+        """
+        Cancel one delivery without sending it.
+
+        Purpose:
+            Stop a claimed slot when the owning task, series, toggle, or project
+            is no longer dispatchable.
+
+        Args:
+            delivery: Delivery to cancel.
+
+        Returns:
+            None: The change stays in the current unit of work.
+
+        Notes:
+            - Sets ``status='cancelled'`` and clears the lease and retry slot.
+            - Flushes but does not commit.
+        """
+        delivery.status = DeliveryStatus.CANCELLED.value
+        delivery.locked_at = None
+        delivery.next_attempt_at = None
+        await self._session.flush()
+
     async def reactivate_delivery(self, delivery: ReminderDelivery) -> None:
         """
         Reset a cancelled delivery to pending.
@@ -2081,6 +2128,23 @@ class SqlAlchemyTaskManagementRepository:
             - Only the dispatcher calls this explicitly.
         """
         await self._session.commit()
+
+    async def rollback(self) -> None:
+        """
+        Roll back the current transaction.
+
+        Purpose:
+            Discard a failed reminder or series attempt so later work in the
+            same job can continue from a clean unit of work.
+
+        Returns:
+            None: The transaction is rolled back.
+
+        Notes:
+            - Used by the dispatcher and generation job after unexpected
+              per-item failures.
+        """
+        await self._session.rollback()
 
     async def flush(self) -> None:
         """

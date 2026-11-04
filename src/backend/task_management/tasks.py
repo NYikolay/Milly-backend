@@ -30,6 +30,8 @@ _LABEL_NOT_FOUND = "Label not found"
 _TITLE_REQUIRED = "Task title is required"
 _INVALID_DUE_AT = "Task due time must include a timezone"
 _INVALID_TIMEZONE = "Invalid timezone"
+_INVALID_DATE_RANGE = "Date range is out of bounds"
+_PROJECT_ARCHIVED = "Project is archived"
 
 
 @dataclass(frozen=True)
@@ -102,7 +104,8 @@ class TaskService:
             list[TaskDetail]: Matching task details in repository order.
 
         Raises:
-            BadRequestError: If the stored user timezone is invalid.
+            BadRequestError: If the stored user timezone is invalid or the date
+                filter overflows the supported calendar range.
 
         Notes:
             - The date filter uses UTC bounds of the user's local day.
@@ -113,8 +116,12 @@ class TaskService:
         if filters.date is not None:
             zone = await self._user_timezone(user_id)
             date_start = localize_wall_time(filters.date, time(0, 0), zone)
+            try:
+                next_local_date = filters.date + timedelta(days=1)
+            except OverflowError as error:
+                raise BadRequestError(_INVALID_DATE_RANGE) from error
             date_end = localize_wall_time(
-                filters.date + timedelta(days=1),
+                next_local_date,
                 time(0, 0),
                 zone,
             )
@@ -190,7 +197,8 @@ class TaskService:
 
         Raises:
             BadRequestError: If the title is empty, the due time is naive, the
-                timezone is invalid, or a reminder rule is invalid.
+                timezone is invalid, the project is archived, or a reminder
+                rule is invalid.
             NotFoundError: If the project or a label does not exist for this
                 user.
 
@@ -276,8 +284,8 @@ class TaskService:
         Raises:
             NotFoundError: If the task, project, label, or series does not
                 exist for this user.
-            BadRequestError: If the title is empty, the due time is naive, or a
-                reminder rule is invalid.
+            BadRequestError: If the title is empty, the due time is naive, the
+                project is archived, or a reminder rule is invalid.
 
         Notes:
             - For a series instance only future incomplete instances change.
@@ -692,7 +700,8 @@ class TaskService:
         Validate an optional project reference.
 
         Purpose:
-            Reject missing, cross-user, or deleted projects before writing.
+            Reject missing, cross-user, deleted, or archived projects before
+            writing.
 
         Args:
             user_id: Owner identifier.
@@ -703,12 +712,15 @@ class TaskService:
 
         Raises:
             NotFoundError: If the project does not exist for this user.
+            BadRequestError: If the project is archived.
         """
         if project_id is None:
             return
         project = await self._repository.get_project(user_id, project_id)
         if project is None:
             raise NotFoundError("Project not found")
+        if project.archived_at is not None:
+            raise BadRequestError(_PROJECT_ARCHIVED)
 
     async def _validate_labels(
         self,

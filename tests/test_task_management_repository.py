@@ -458,3 +458,158 @@ async def test_claim_series_for_generation_uses_skip_locked() -> None:
     assert "task_series.user_id = 7" in sql
     assert "task_series.deleted_at IS NULL" in sql
     assert "FOR UPDATE SKIP LOCKED" in sql
+
+
+async def test_list_due_reminders_filters_enabled_owners_and_active_projects() -> None:
+    """Due reminder selection checks toggles, owner rows, and project state."""
+    session = RecordingSession()
+    repository = make_repository(session)
+
+    await repository.list_due_reminders(NOW)
+    sql = compile_statement(session.statements[-1])
+
+    assert "task_reminders.enabled IS true" in sql
+    assert "task_reminders.next_run_at IS NOT NULL" in sql
+    assert "task_reminders.next_run_at <=" in sql
+    assert "tasks.user_id = task_reminders.user_id" in sql
+    assert "tasks.deleted_at IS NULL" in sql
+    assert "tasks.completed_at IS NULL" in sql
+    assert "tasks.reminders_enabled IS true" in sql
+    assert "task_series.user_id = task_reminders.user_id" in sql
+    assert "task_series.deleted_at IS NULL" in sql
+    assert "task_series.reminders_enabled IS true" in sql
+    assert "projects.deleted_at IS NULL" in sql
+    assert "projects.archived_at IS NULL" in sql
+    assert "ORDER BY task_reminders.next_run_at, task_reminders.id" in sql
+
+
+async def test_claim_due_reminder_uses_due_checks_and_skip_locked() -> None:
+    """Claiming a reminder verifies the enabled due slot without blocking."""
+    session = RecordingSession(results=[RecordingResult(scalar=None)])
+    repository = make_repository(session)
+
+    result = await repository.claim_due_reminder(11, NOW)
+    sql = compile_statement(session.statements[-1])
+
+    assert result is None
+    assert "task_reminders.id = 11" in sql
+    assert "task_reminders.enabled IS true" in sql
+    assert "task_reminders.next_run_at IS NOT NULL" in sql
+    assert "task_reminders.next_run_at <=" in sql
+    assert "FOR UPDATE SKIP LOCKED" in sql
+
+
+async def test_list_series_for_generation_filters_horizon_and_active_projects() -> None:
+    """Generation selection is non-deleted, below the horizon, and project-active."""
+    session = RecordingSession()
+    repository = make_repository(session)
+
+    await repository.list_series_for_generation(NOW)
+    sql = compile_statement(session.statements[-1])
+
+    assert "task_series.deleted_at IS NULL" in sql
+    assert "task_series.generated_through IS NULL" in sql
+    assert "task_series.generated_through <" in sql
+    assert "task_series.project_id IS NULL" in sql
+    assert "task_series.project_id IN (SELECT projects.id" in sql
+    assert "projects.deleted_at IS NULL" in sql
+    assert "projects.archived_at IS NULL" in sql
+    assert "ORDER BY task_series.id" in sql
+
+
+async def test_pause_project_reminders_clears_slots_and_cancels_deliveries() -> None:
+    """Pausing a project clears task and series reminder slots atomically."""
+    session = RecordingSession()
+    repository = make_repository(session)
+
+    await repository.pause_project_reminders(USER_ID, PROJECT_ID)
+
+    reminder_sql, delivery_sql = (compile_statement(statement) for statement in session.statements)
+    assert len(session.statements) == 2
+    assert session.flush_count == 1
+    assert reminder_sql.startswith("UPDATE task_reminders SET next_run_at=NULL")
+    assert "task_reminders.user_id = 7" in reminder_sql
+    assert "task_reminders.task_id IN (SELECT tasks.id" in reminder_sql
+    assert "task_reminders.series_id IN (SELECT task_series.id" in reminder_sql
+    assert "tasks.project_id = 5" in reminder_sql
+    assert "task_series.project_id = 5" in reminder_sql
+    assert delivery_sql.startswith("UPDATE reminder_deliveries SET status='cancelled'")
+    assert "reminder_deliveries.user_id = 7" in delivery_sql
+    assert "reminder_deliveries.status IN ('pending', 'failed', 'sending')" in delivery_sql
+
+
+async def test_resume_project_reminders_rebuilds_incomplete_and_overdue_tasks() -> None:
+    """Resuming retargets templates and recomputes incomplete task slots."""
+    from datetime import date, time, timedelta
+
+    from backend.task_management.enums import ReminderKind
+    from tests.task_management_fakes import make_reminder, make_series, make_task
+
+    series = make_series(
+        series_id=3,
+        project_id=PROJECT_ID,
+        time_of_day=time(9, 0),
+        timezone="Asia/Tokyo",
+        starts_on=date(2026, 11, 1),
+    )
+    template = make_reminder(
+        reminder_id=1,
+        series_id=series.id,
+        kind=ReminderKind.SCHEDULED,
+        offset_minutes=None,
+        interval_days=1,
+        time_of_day=time(9, 0),
+        timezone="UTC",
+    )
+    task = make_task(
+        task_id=4,
+        project_id=PROJECT_ID,
+        due_at=NOW + timedelta(days=1),
+        reminders_enabled=True,
+    )
+    task_reminder = make_reminder(
+        reminder_id=2,
+        task_id=task.id,
+        kind=ReminderKind.BEFORE_DUE,
+        offset_minutes=30,
+    )
+    session = RecordingSession(
+        results=[
+            RecordingResult(values=[series]),
+            RecordingResult(values=[template]),
+            RecordingResult(values=[task]),
+            RecordingResult(values=[task_reminder]),
+        ]
+    )
+    repository = make_repository(session)
+
+    await repository.resume_project_reminders(USER_ID, PROJECT_ID, NOW)
+
+    series_sql, template_sql, task_sql, task_reminder_sql = (
+        compile_statement(statement) for statement in session.statements
+    )
+    assert "task_series.project_id = 5" in series_sql
+    assert "task_series.user_id = 7" in series_sql
+    assert "task_series.deleted_at IS NULL" in series_sql
+    assert "task_reminders.series_id = 3" in template_sql
+    assert "tasks.project_id = 5" in task_sql
+    assert "tasks.deleted_at IS NULL" in task_sql
+    assert "tasks.completed_at IS NULL" in task_sql
+    assert "tasks.due_at >" not in task_sql
+    assert "task_reminders.task_id = 4" in task_reminder_sql
+    assert template.next_run_at is None
+    assert template.timezone == "Asia/Tokyo"
+    assert task_reminder.next_run_at == task.due_at - timedelta(minutes=30)
+
+
+async def test_get_telegram_id_reads_the_linked_profile() -> None:
+    """Reminder targeting resolves the Telegram profile of the internal user."""
+    session = RecordingSession(results=[RecordingResult(scalar=99)])
+    repository = make_repository(session)
+
+    telegram_id = await repository.get_telegram_id(USER_ID)
+    sql = compile_statement(session.statements[-1])
+
+    assert telegram_id == 99
+    assert "telegram_profiles.telegram_id" in sql
+    assert "telegram_profiles.user_id = 7" in sql

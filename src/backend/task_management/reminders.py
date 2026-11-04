@@ -6,6 +6,8 @@ from datetime import UTC, datetime, time, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
+import structlog
+
 from backend.core.errors import BadRequestError
 from backend.models.reminder_delivery import ReminderDelivery
 from backend.models.task_reminder import TaskReminder
@@ -23,12 +25,15 @@ _MAX_ATTEMPTS = 5
 _LOCK_LEASE = timedelta(minutes=5)
 _BACKOFF_BASE = timedelta(seconds=60)
 _SENDER_TEXT = "Напоминание: {title}"
+_MISSING_TELEGRAM = "Telegram profile is missing"
+
+logger = structlog.get_logger(__name__)
 
 
 class ReminderSender(Protocol):
-    """Contract for delivering a reminder message to a user."""
+    """Contract for delivering a reminder message to a Telegram chat."""
 
-    async def send(self, user_id: int, text: str) -> int | None:
+    async def send(self, chat_id: int, text: str) -> int | None:
         """
         Send a reminder message.
 
@@ -36,7 +41,7 @@ class ReminderSender(Protocol):
             Keep the dispatcher independent of the Telegram transport.
 
         Args:
-            user_id: Recipient identifier.
+            chat_id: Telegram chat identifier from the user's profile.
             text: Message text.
 
         Returns:
@@ -76,13 +81,18 @@ def validate_reminder_inputs(
         tuple[ReminderInput, ...]: The validated rules in input order.
 
     Raises:
-        BadRequestError: If a rule is incomplete, inconsistent, or duplicated.
+        BadRequestError: If a rule is incomplete, inconsistent, duplicated, or
+            carries a timezone-aware ``time_of_day``.
     """
     seen: set[ReminderKind] = set()
     for reminder in reminders:
         if reminder.kind in seen:
             raise BadRequestError(_DUPLICATE_REMINDER)
         seen.add(reminder.kind)
+        if reminder.time_of_day is not None and (
+            reminder.time_of_day.tzinfo is not None or reminder.time_of_day.utcoffset() is not None
+        ):
+            raise BadRequestError(_INVALID_REMINDER)
         if reminder.kind is ReminderKind.BEFORE_DUE:
             if reminder.offset_minutes is None or reminder.offset_minutes < 0:
                 raise BadRequestError(_INVALID_REMINDER)
@@ -125,12 +135,18 @@ def build_task_reminder(
     Returns:
         TaskReminder | None: The reminder row, or ``None`` when the before-due
             moment has passed.
+
+    Raises:
+        BadRequestError: If the reminder schedule overflows the datetime range.
     """
     if reminder.kind is ReminderKind.BEFORE_DUE:
-        slot = before_due_time(
-            due_at=due_at,
-            offset_minutes=reminder.offset_minutes or 0,
-        )
+        try:
+            slot = before_due_time(
+                due_at=due_at,
+                offset_minutes=reminder.offset_minutes or 0,
+            )
+        except OverflowError as error:
+            raise BadRequestError(_INVALID_REMINDER) from error
         if slot <= now:
             return None
         return TaskReminder(
@@ -145,13 +161,16 @@ def build_task_reminder(
             next_run_at=slot,
         )
 
-    slot = first_scheduled_time(
-        due_at=due_at,
-        time_of_day=reminder.time_of_day or time(0, 0),
-        timezone=ZoneInfo(timezone_name),
-        interval_days=reminder.interval_days or 1,
-        now=now,
-    )
+    try:
+        slot = first_scheduled_time(
+            due_at=due_at,
+            time_of_day=reminder.time_of_day or time(0, 0),
+            timezone=ZoneInfo(timezone_name),
+            interval_days=reminder.interval_days or 1,
+            now=now,
+        )
+    except OverflowError as error:
+        raise BadRequestError(_INVALID_REMINDER) from error
     return TaskReminder(
         user_id=user_id,
         task_id=task_id,
@@ -242,23 +261,29 @@ def next_reminder_slot(
 
     Returns:
         datetime | None: The next future slot, or ``None`` for before-due rules.
+
+    Raises:
+        BadRequestError: If advancing the schedule overflows the datetime range.
     """
     if reminder.kind == ReminderKind.BEFORE_DUE.value:
         return None
     timezone = ZoneInfo(reminder.timezone or "UTC")
-    slot = next_scheduled_time(
-        current=current,
-        time_of_day=reminder.time_of_day or time(0, 0),
-        timezone=timezone,
-        interval_days=reminder.interval_days or 1,
-    )
-    while slot <= now:
+    try:
         slot = next_scheduled_time(
-            current=slot,
+            current=current,
             time_of_day=reminder.time_of_day or time(0, 0),
             timezone=timezone,
             interval_days=reminder.interval_days or 1,
         )
+        while slot <= now:
+            slot = next_scheduled_time(
+                current=slot,
+                time_of_day=reminder.time_of_day or time(0, 0),
+                timezone=timezone,
+                interval_days=reminder.interval_days or 1,
+            )
+    except OverflowError as error:
+        raise BadRequestError(_INVALID_REMINDER) from error
     return slot
 
 
@@ -282,20 +307,29 @@ def rebuild_reminder_slot(
     Returns:
         datetime | None: The next deliverable slot, or ``None`` when a
             before-due moment has passed.
+
+    Raises:
+        BadRequestError: If the reminder schedule overflows the datetime range.
     """
     if reminder.kind == ReminderKind.BEFORE_DUE.value:
-        slot = before_due_time(
-            due_at=due_at,
-            offset_minutes=reminder.offset_minutes or 0,
-        )
+        try:
+            slot = before_due_time(
+                due_at=due_at,
+                offset_minutes=reminder.offset_minutes or 0,
+            )
+        except OverflowError as error:
+            raise BadRequestError(_INVALID_REMINDER) from error
         return slot if slot > now else None
-    return first_scheduled_time(
-        due_at=due_at,
-        time_of_day=reminder.time_of_day or time(0, 0),
-        timezone=ZoneInfo(reminder.timezone or "UTC"),
-        interval_days=reminder.interval_days or 1,
-        now=now,
-    )
+    try:
+        return first_scheduled_time(
+            due_at=due_at,
+            time_of_day=reminder.time_of_day or time(0, 0),
+            timezone=ZoneInfo(reminder.timezone or "UTC"),
+            interval_days=reminder.interval_days or 1,
+            now=now,
+        )
+    except OverflowError as error:
+        raise BadRequestError(_INVALID_REMINDER) from error
 
 
 class ReminderDispatcher:
@@ -340,94 +374,169 @@ class ReminderDispatcher:
         Notes:
             - Already sent ``(reminder_id, scheduled_for)`` keys are skipped.
             - Cancelled deliveries for a current slot are reactivated.
+            - Each claimed reminder is rechecked for an active master toggle,
+              non-deleted owner, and active project before sending.
+            - A missing Telegram profile fails the delivery without sending.
             - Retryable failures stay pending with exponential backoff; the
               fifth failed attempt marks the delivery failed.
             - Before-due reminders clear ``next_run_at`` after a successful or
               final failed delivery.
-            - Sender exceptions are contained and recorded as safe type names.
+            - Every delivery outcome commits so earlier work survives a later
+              failure; unexpected errors roll back and continue with the next
+              reminder.
         """
         now = self._clock()
         sent = 0
         for candidate in await self._repository.list_due_reminders(now):
-            reminder = await self._repository.claim_due_reminder(candidate.id, now)
-            if reminder is None or reminder.next_run_at is None:
-                continue
-            if reminder.task_id is not None:
-                task = await self._repository.get_task(reminder.user_id, reminder.task_id)
-                if task is None or task.completed_at is not None:
-                    continue
-                title = task.title
-            elif reminder.series_id is not None:
-                series = await self._repository.get_series(
-                    reminder.user_id,
-                    reminder.series_id,
-                )
-                if series is None:
-                    continue
-                title = series.title
-            else:
-                continue
-
-            scheduled_for = reminder.next_run_at
-            delivery = await self._repository.get_delivery(reminder.id, scheduled_for)
-            if delivery is not None and delivery.status == DeliveryStatus.SENT.value:
-                await self._repository.update_reminder_next_run_at(
-                    reminder,
-                    next_reminder_slot(reminder, current=scheduled_for, now=now),
-                )
-                continue
-            if delivery is not None and delivery.status == DeliveryStatus.CANCELLED.value:
-                await self._repository.reactivate_delivery(delivery)
-            if delivery is None:
-                delivery = await self._repository.add_delivery(
-                    _new_delivery(
-                        reminder=reminder,
-                        scheduled_for=scheduled_for,
-                    )
-                )
-            if (
-                delivery.status == DeliveryStatus.SENDING.value
-                and delivery.locked_at is not None
-                and now - delivery.locked_at < _LOCK_LEASE
-            ):
-                continue
-            if (
-                delivery.status == DeliveryStatus.PENDING.value
-                and delivery.next_attempt_at is not None
-                and delivery.next_attempt_at > now
-            ):
-                continue
-            if delivery.status == DeliveryStatus.FAILED.value and delivery.next_attempt_at is None:
-                await self._repository.update_reminder_next_run_at(
-                    reminder,
-                    next_reminder_slot(reminder, current=scheduled_for, now=now),
-                )
-                continue
-
-            await self._repository.mark_delivery_sending(delivery, now)
-            await self._repository.commit()
             try:
-                message_id = await self._sender.send(
-                    reminder.user_id,
-                    _SENDER_TEXT.format(title=title),
-                )
-            except Exception as error:
-                await self._record_failure(
-                    reminder,
-                    delivery,
-                    scheduled_for=scheduled_for,
-                    error=error,
-                    now=now,
-                )
-                continue
+                reminder = await self._repository.claim_due_reminder(candidate.id, now)
+                if reminder is None or reminder.next_run_at is None:
+                    await self._repository.commit()
+                    continue
 
-            await self._repository.mark_delivery_sent(delivery, now, message_id)
-            await self._repository.update_reminder_next_run_at(
-                reminder,
-                next_reminder_slot(reminder, current=scheduled_for, now=now),
-            )
-            sent += 1
+                scheduled_for = reminder.next_run_at
+                delivery = await self._repository.get_delivery(reminder.id, scheduled_for)
+                if delivery is not None and delivery.status == DeliveryStatus.SENT.value:
+                    await self._repository.update_reminder_next_run_at(
+                        reminder,
+                        next_reminder_slot(reminder, current=scheduled_for, now=now),
+                    )
+                    await self._repository.commit()
+                    continue
+
+                title = await self._dispatchable_title(reminder)
+                if title is None:
+                    if delivery is None:
+                        delivery = await self._repository.add_delivery(
+                            _new_delivery(
+                                reminder=reminder,
+                                scheduled_for=scheduled_for,
+                            )
+                        )
+                    if delivery.status != DeliveryStatus.CANCELLED.value:
+                        await self._repository.cancel_delivery(delivery)
+                    await self._repository.update_reminder_next_run_at(reminder, None)
+                    await self._repository.commit()
+                    continue
+
+                if delivery is not None and delivery.status == DeliveryStatus.CANCELLED.value:
+                    await self._repository.reactivate_delivery(delivery)
+                if delivery is None:
+                    delivery = await self._repository.add_delivery(
+                        _new_delivery(
+                            reminder=reminder,
+                            scheduled_for=scheduled_for,
+                        )
+                    )
+                if (
+                    delivery.status == DeliveryStatus.SENDING.value
+                    and delivery.locked_at is not None
+                    and now - delivery.locked_at < _LOCK_LEASE
+                ):
+                    await self._repository.commit()
+                    continue
+                if (
+                    delivery.status == DeliveryStatus.PENDING.value
+                    and delivery.next_attempt_at is not None
+                    and delivery.next_attempt_at > now
+                ):
+                    await self._repository.commit()
+                    continue
+                if (
+                    delivery.status == DeliveryStatus.FAILED.value
+                    and delivery.next_attempt_at is None
+                ):
+                    await self._repository.update_reminder_next_run_at(
+                        reminder,
+                        next_reminder_slot(reminder, current=scheduled_for, now=now),
+                    )
+                    await self._repository.commit()
+                    continue
+
+                await self._repository.mark_delivery_sending(delivery, now)
+                await self._repository.commit()
+                chat_id = await self._repository.get_telegram_id(reminder.user_id)
+                if chat_id is None:
+                    await self._repository.mark_delivery_failed(
+                        delivery,
+                        None,
+                        _MISSING_TELEGRAM,
+                    )
+                    await self._repository.update_reminder_next_run_at(
+                        reminder,
+                        next_reminder_slot(reminder, current=scheduled_for, now=now),
+                    )
+                    await self._repository.commit()
+                    continue
+                try:
+                    message_id = await self._sender.send(
+                        chat_id,
+                        _SENDER_TEXT.format(title=title),
+                    )
+                except Exception as error:
+                    await self._record_failure(
+                        reminder,
+                        delivery,
+                        scheduled_for=scheduled_for,
+                        error=error,
+                        now=now,
+                    )
+                    await self._repository.commit()
+                    continue
+
+                await self._repository.mark_delivery_sent(delivery, now, message_id)
+                await self._repository.update_reminder_next_run_at(
+                    reminder,
+                    next_reminder_slot(reminder, current=scheduled_for, now=now),
+                )
+                await self._repository.commit()
+                sent += 1
+            except Exception as error:
+                await self._repository.rollback()
+                logger.warning(
+                    "task.reminder_dispatch_failed",
+                    reminder_id=candidate.id,
+                    error=type(error).__name__,
+                )
         return sent
+
+    async def _dispatchable_title(self, reminder: TaskReminder) -> str | None:
+        """
+        Resolve the owner title when a claimed reminder may still be delivered.
+
+        Purpose:
+            Recheck the task or series and its project after the row lock so a
+            concurrent completion, toggle, archive, or deletion cannot send a
+            stale reminder.
+
+        Args:
+            reminder: Reminder claimed for delivery.
+
+        Returns:
+            str | None: The owner title, or ``None`` when delivery must be
+                cancelled.
+        """
+        if reminder.task_id is not None:
+            task = await self._repository.get_task(reminder.user_id, reminder.task_id)
+            if task is None or task.completed_at is not None or not task.reminders_enabled:
+                return None
+            if task.project_id is not None and not await self._repository.project_is_active(
+                reminder.user_id,
+                task.project_id,
+            ):
+                return None
+            return task.title
+        if reminder.series_id is not None:
+            series = await self._repository.get_series(reminder.user_id, reminder.series_id)
+            if series is None or not series.reminders_enabled:
+                return None
+            if series.project_id is not None and not await self._repository.project_is_active(
+                reminder.user_id,
+                series.project_id,
+            ):
+                return None
+            return series.title
+        return None
 
     async def _record_failure(
         self,

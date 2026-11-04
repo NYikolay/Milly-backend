@@ -6,6 +6,8 @@ from datetime import UTC, date, datetime, time, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import structlog
+
 from backend.core.errors import BadRequestError, NotFoundError
 from backend.models.label import Label
 from backend.models.task import Task
@@ -29,6 +31,9 @@ _TITLE_REQUIRED = "Series title is required"
 _INVALID_TIMEZONE = "Invalid timezone"
 _INVALID_RANGE = "Series end date must not be before the start date"
 _PROJECT_ARCHIVED = "Project is archived"
+_TIME_OF_DAY_AWARE = "Time of day must be timezone-naive"
+
+logger = structlog.get_logger(__name__)
 
 
 class UnsetType:
@@ -207,7 +212,8 @@ class SeriesService:
 
         Raises:
             BadRequestError: If the title is empty, the timezone is invalid,
-                the date range is reversed, or a reminder rule is invalid.
+                ``time_of_day`` is timezone-aware, the date range is reversed,
+                or a reminder rule is invalid.
             NotFoundError: If the project or a label does not exist for this
                 user.
 
@@ -216,6 +222,7 @@ class SeriesService:
             - Callers should reject archived projects before creating series.
         """
         normalized_title = self._normalize_title(title)
+        self._validate_time_of_day(time_of_day)
         zone = self._timezone(timezone)
         self._validate_range(starts_on, ends_on)
         await self._validate_project(user_id, project_id)
@@ -300,7 +307,8 @@ class SeriesService:
             NotFoundError: If the series, project, or a label does not exist for
                 this user.
             BadRequestError: If the title is empty, the timezone is invalid,
-                the date range is reversed, or a reminder rule is invalid.
+                ``time_of_day`` is timezone-aware, the date range is reversed,
+                or a reminder rule is invalid.
 
         Notes:
             - A schedule change soft-deletes old future incomplete instances
@@ -313,6 +321,8 @@ class SeriesService:
             - Locks the series row and its task rows, and does not commit.
         """
         series = await self._require_series(user_id, series_id, for_update=True)
+        if time_of_day is not None:
+            self._validate_time_of_day(time_of_day)
         previous_reminders_enabled = series.reminders_enabled
         normalized_title = self._normalize_title(title) if title is not None else series.title
         zone = self._timezone(timezone) if timezone is not None else ZoneInfo(series.timezone)
@@ -430,8 +440,11 @@ class SeriesService:
             NotFoundError: If the series does not exist for this user.
 
         Notes:
-            - Cancels reminder deliveries for future instances and template
-              reminders, then marks the series and those instances deleted.
+            - Cancels reminder slots and deliveries for every task of the
+              series, including overdue incomplete instances, while keeping
+              their task rows as history.
+            - Soft-deletes only future incomplete instances and the series,
+              and clears template reminders.
             - Locks the series row and its task rows, and does not commit.
         """
         series = await self._require_series(user_id, series_id, for_update=True)
@@ -441,11 +454,11 @@ class SeriesService:
             series.id,
             user_id,
         )
-        future_tasks = [
-            task for task in locked_tasks if task.due_at > now and task.completed_at is None
-        ]
-        for task in future_tasks:
+        for task in locked_tasks:
             await self._repository.cancel_task_reminders(user_id, task.id)
+        for task in locked_tasks:
+            if task.due_at <= now or task.completed_at is not None:
+                continue
             await self._repository.soft_delete_task(task, now, batch_id)
         await self._repository.cancel_series_reminders(user_id, series.id)
         await self._repository.soft_delete_series(series, now, batch_id)
@@ -470,27 +483,44 @@ class SeriesService:
               is active.
             - Claims each series with ``FOR UPDATE SKIP LOCKED``; a series held
               by another worker is skipped until the next run.
+            - Commits after each series so a later failure does not roll back
+              earlier successful work and row locks are released promptly.
+            - Unexpected per-series errors roll back and continue with the next
+              series.
             - Idempotent for slots already present in the repository.
-            - Sets ``generated_through`` to the last generated due time, or to
-              ``now`` when the series produced no instances.
+            - Sets ``generated_through`` to the last generated due time; it only
+              falls back to ``now`` while the series has no generation marker
+              yet.
         """
         created = 0
         horizon = now + timedelta(days=HORIZON_DAYS)
         for candidate in await self._repository.list_series_for_generation(now):
-            series = await self._repository.claim_series_for_generation(
-                candidate.id,
-                candidate.user_id,
-            )
-            if series is None:
-                continue
-            if series.generated_through is not None and series.generated_through >= horizon:
-                continue
-            if series.project_id is not None and not await self._repository.project_is_active(
-                series.user_id,
-                series.project_id,
-            ):
-                continue
-            created += await self._generate_series(series, now)
+            try:
+                series = await self._repository.claim_series_for_generation(
+                    candidate.id,
+                    candidate.user_id,
+                )
+                if series is None:
+                    await self._repository.commit()
+                    continue
+                if series.generated_through is not None and series.generated_through >= horizon:
+                    await self._repository.commit()
+                    continue
+                if series.project_id is not None and not await self._repository.project_is_active(
+                    series.user_id,
+                    series.project_id,
+                ):
+                    await self._repository.commit()
+                    continue
+                created += await self._generate_series(series, now)
+                await self._repository.commit()
+            except Exception as error:
+                await self._repository.rollback()
+                logger.warning(
+                    "task.series_generation_failed",
+                    series_id=candidate.id,
+                    error=type(error).__name__,
+                )
         return created
 
     async def _generate_series(self, series: TaskSeries, now: datetime) -> int:
@@ -509,13 +539,16 @@ class SeriesService:
             int: Number of task instances created.
 
         Raises:
-            BadRequestError: If the stored timezone is no longer valid.
+            BadRequestError: If the stored timezone is no longer valid or the
+                schedule overflows the datetime range.
 
         Notes:
             - Refuses to materialize instances when the series project is
               archived or deleted.
             - Copies snapshot fields, the series label set, and template
               reminders into every new instance.
+            - Leaves an existing ``generated_through`` unchanged when no new
+              slot is produced, so resuming never rewinds the marker.
             - Flushes through the repository but does not commit.
         """
         if series.project_id is not None and not await self._repository.project_is_active(
@@ -524,16 +557,20 @@ class SeriesService:
         ):
             return 0
         zone = self._timezone(series.timezone)
-        due_times = daily_due_times(
-            starts_on=series.starts_on,
-            ends_on=series.ends_on,
-            time_of_day=series.time_of_day,
-            timezone=zone,
-            now=now,
-            generated_through=series.generated_through,
-        )
+        try:
+            due_times = daily_due_times(
+                starts_on=series.starts_on,
+                ends_on=series.ends_on,
+                time_of_day=series.time_of_day,
+                timezone=zone,
+                now=now,
+                generated_through=series.generated_through,
+            )
+        except OverflowError as error:
+            raise BadRequestError(_INVALID_RANGE) from error
         if not due_times:
-            series.generated_through = now
+            if series.generated_through is None:
+                series.generated_through = now
             await self._repository.flush()
             return 0
 
@@ -581,7 +618,10 @@ class SeriesService:
                 await self._repository.add_reminder(instance_reminder)
             created += 1
 
-        series.generated_through = last_due_at if created else now
+        if created:
+            series.generated_through = last_due_at
+        elif series.generated_through is None:
+            series.generated_through = now
         await self._repository.flush()
         return created
 
@@ -844,6 +884,26 @@ class SeriesService:
         if not normalized:
             raise BadRequestError(_TITLE_REQUIRED)
         return normalized
+
+    def _validate_time_of_day(self, time_of_day: time) -> None:
+        """
+        Require a timezone-naive series wall-clock time.
+
+        Purpose:
+            Keep ``time_of_day`` a local wall-clock value so generation can
+            resolve it through the series timezone.
+
+        Args:
+            time_of_day: Candidate local occurrence time.
+
+        Returns:
+            None: The value is timezone-naive.
+
+        Raises:
+            BadRequestError: If the value carries timezone information.
+        """
+        if time_of_day.tzinfo is not None or time_of_day.utcoffset() is not None:
+            raise BadRequestError(_TIME_OF_DAY_AWARE)
 
     def _timezone(self, name: str) -> ZoneInfo:
         """
