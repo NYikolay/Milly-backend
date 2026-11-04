@@ -590,9 +590,10 @@ async def test_list_due_reminders_filters_enabled_owners_and_active_projects() -
     session = RecordingSession()
     repository = make_repository(session)
 
-    await repository.list_due_reminders(NOW)
+    await repository.list_due_reminders(NOW, limit=100)
     sql = compile_statement(session.statements[-1])
 
+    assert "LIMIT 100" in sql
     assert "task_reminders.enabled IS true" in sql
     assert "task_reminders.next_run_at IS NOT NULL" in sql
     assert "task_reminders.next_run_at <=" in sql

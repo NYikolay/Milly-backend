@@ -2111,7 +2111,12 @@ class SqlAlchemyTaskManagementRepository:
         )
         return result.scalars().all()
 
-    async def list_due_reminders(self, now: datetime) -> Sequence[TaskReminder]:
+    async def list_due_reminders(
+        self,
+        now: datetime,
+        *,
+        limit: int,
+    ) -> Sequence[TaskReminder]:
         """
         List due, enabled reminders with active owners.
 
@@ -2120,6 +2125,7 @@ class SqlAlchemyTaskManagementRepository:
 
         Args:
             now: Current instant used to select due slots.
+            limit: Maximum number of reminders to return.
 
         Returns:
             Sequence[TaskReminder]: Due reminders ordered by slot and
@@ -2173,6 +2179,7 @@ class SqlAlchemyTaskManagementRepository:
                 or_(task_exists, series_exists),
             )
             .order_by(TaskReminder.next_run_at, TaskReminder.id)
+            .limit(limit)
         )
         return result.scalars().all()
 

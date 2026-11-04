@@ -93,6 +93,7 @@ class FakeTaskManagementRepository:
         self.series_labels: set[tuple[int, int]] = set()
         self.batch_calls: list[tuple[str, tuple[int, ...]]] = []
         self.bulk_calls: list[str] = []
+        self.due_reminder_limits: list[int] = []
         self.commits = 0
         self.rollbacks = 0
         self.claimed_series_ids: list[int] = []
@@ -920,8 +921,14 @@ class FakeTaskManagementRepository:
             and task.due_at >= now
         ]
 
-    async def list_due_reminders(self, now: datetime) -> Sequence[TaskReminder]:
-        """List due reminders whose owner is active and enabled."""
+    async def list_due_reminders(
+        self,
+        now: datetime,
+        *,
+        limit: int,
+    ) -> Sequence[TaskReminder]:
+        """List due reminders whose owner is active and enabled, up to the limit."""
+        self.due_reminder_limits.append(limit)
         due: list[TaskReminder] = []
         for reminder in self.reminders.values():
             if not reminder.enabled or reminder.next_run_at is None or reminder.next_run_at > now:
@@ -950,7 +957,7 @@ class FakeTaskManagementRepository:
             else:
                 continue
             due.append(reminder)
-        return sorted(due, key=lambda reminder: (reminder.next_run_at, reminder.id))
+        return sorted(due, key=lambda reminder: (reminder.next_run_at, reminder.id))[:limit]
 
     async def claim_due_reminder(
         self,

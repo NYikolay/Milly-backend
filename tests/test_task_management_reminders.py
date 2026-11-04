@@ -128,6 +128,79 @@ async def test_dispatch_creates_keyed_delivery_sends_and_advances_slot() -> None
     assert repository.commits >= 1
 
 
+async def test_dispatch_due_passes_batch_limit() -> None:
+    """Dispatch asks the repository for at most one bounded batch."""
+    repository = FakeTaskManagementRepository()
+    make_scheduled_reminder(repository)
+    sender = FakeSender()
+    dispatcher = make_dispatcher(repository, sender)
+
+    await dispatcher.dispatch_due()
+
+    assert repository.due_reminder_limits == [100]
+
+
+async def test_dispatch_due_stops_at_deadline() -> None:
+    """A run that reaches the soft deadline leaves every reminder for the next run."""
+    repository = FakeTaskManagementRepository()
+    make_scheduled_reminder(repository)
+    sender = FakeSender()
+    ticks = iter([0.0] + [240.0] * 10)
+    dispatcher = ReminderDispatcher(
+        repository,
+        sender,
+        clock=fixed_now,
+        monotonic=lambda: next(ticks),
+    )
+
+    sent = await dispatcher.dispatch_due()
+
+    assert sent == 0
+    assert sender.calls == []
+    assert repository.deliveries == {}
+
+
+async def test_dispatch_due_finishes_in_flight_send() -> None:
+    """Crossing the deadline stops the loop only after the current send completes."""
+    repository = FakeTaskManagementRepository()
+    _, first_reminder = make_scheduled_reminder(repository)
+    second_task = repository.insert_task(
+        make_task(
+            task_id=2,
+            title="Second",
+            due_at=fixed_now() + timedelta(days=1),
+            reminders_enabled=True,
+        )
+    )
+    repository.insert_reminder(
+        make_reminder(
+            reminder_id=2,
+            task_id=second_task.id,
+            kind=ReminderKind.SCHEDULED,
+            offset_minutes=None,
+            interval_days=1,
+            time_of_day=time(9, 30),
+            timezone="UTC",
+            next_run_at=datetime(2026, 11, 4, 9, 30, tzinfo=UTC),
+        )
+    )
+    sender = FakeSender()
+    ticks = iter([0.0, 239.9, 250.0, 250.0])
+    dispatcher = ReminderDispatcher(
+        repository,
+        sender,
+        clock=fixed_now,
+        monotonic=lambda: next(ticks),
+    )
+
+    sent = await dispatcher.dispatch_due()
+
+    assert sent == 1
+    assert sender.calls == [(TELEGRAM_ID, "Напоминание: Task Title")]
+    assert repository.deliveries[1].reminder_id == first_reminder.id
+    assert 2 not in repository.deliveries
+
+
 async def test_dispatch_skips_sent_key_and_only_advances_slot() -> None:
     """An already sent key is never sent twice."""
     repository = FakeTaskManagementRepository()

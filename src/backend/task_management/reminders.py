@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
+from time import monotonic as _monotonic_clock
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
@@ -26,6 +27,8 @@ _LOCK_LEASE = timedelta(minutes=5)
 _BACKOFF_BASE = timedelta(seconds=60)
 _SENDER_TEXT = "Напоминание: {title}"
 _MISSING_TELEGRAM = "Telegram profile is missing"
+_DISPATCH_BATCH_SIZE = 100
+_DISPATCH_TIMEOUT_SECONDS = 240.0
 
 logger = structlog.get_logger(__name__)
 
@@ -343,6 +346,7 @@ class ReminderDispatcher:
         repository: TaskManagementRepository,
         sender: ReminderSender,
         clock: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] = _monotonic_clock,
     ) -> None:
         """
         Initialize the dispatcher with persistence, transport, and time ports.
@@ -355,6 +359,8 @@ class ReminderDispatcher:
             repository: Persistence operations for reminders and deliveries.
             sender: Telegram-like message sender.
             clock: Current-time provider. Defaults to the current UTC time.
+            monotonic: Monotonic time provider used for the dispatch deadline.
+                Defaults to ``time.monotonic``.
 
         Notes:
             - The dispatcher commits only after claiming a delivery, then
@@ -363,18 +369,24 @@ class ReminderDispatcher:
         self._repository = repository
         self._sender = sender
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
+        self._monotonic = monotonic
 
     async def dispatch_due(self) -> int:
         """
-        Deliver every due reminder and return the successful send count.
+        Deliver one bounded batch of due reminders and return the send count.
 
         Purpose:
-            Run the periodic reminder-delivery job without duplicate sends.
+            Run the periodic reminder-delivery job without duplicate sends or
+            unbounded runtime.
 
         Returns:
             int: Number of deliveries successfully sent in this run.
 
         Notes:
+            - At most ``_DISPATCH_BATCH_SIZE`` due reminders are listed per run.
+            - The deadline is checked before each candidate; an in-flight send
+              always completes and remaining due reminders stay for the next
+              run once ``_DISPATCH_TIMEOUT_SECONDS`` has elapsed.
             - Already sent ``(reminder_id, scheduled_for)`` keys are skipped.
             - Cancelled deliveries for a current slot are reactivated.
             - Each claimed reminder is rechecked for an active master toggle,
@@ -392,12 +404,18 @@ class ReminderDispatcher:
               reminder without touching expired ORM objects.
         """
         now = self._clock()
+        started = self._monotonic()
         sent = 0
         candidates = [
             (reminder.id, reminder.user_id)
-            for reminder in await self._repository.list_due_reminders(now)
+            for reminder in await self._repository.list_due_reminders(
+                now,
+                limit=_DISPATCH_BATCH_SIZE,
+            )
         ]
         for reminder_id, _user_id in candidates:
+            if self._monotonic() - started >= _DISPATCH_TIMEOUT_SECONDS:
+                break
             try:
                 reminder = await self._repository.claim_due_reminder(reminder_id, now)
                 if reminder is None or reminder.next_run_at is None:

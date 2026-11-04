@@ -1416,7 +1416,12 @@ class TaskManagementRepository(Protocol):
         """
         ...
 
-    async def list_due_reminders(self, now: datetime) -> Sequence[TaskReminder]:
+    async def list_due_reminders(
+        self,
+        now: datetime,
+        *,
+        limit: int,
+    ) -> Sequence[TaskReminder]:
         """
         List due, enabled reminders with active owners.
 
@@ -1425,6 +1430,7 @@ class TaskManagementRepository(Protocol):
 
         Args:
             now: Current instant used to select due slots.
+            limit: Maximum number of reminders to return.
 
         Returns:
             Sequence[TaskReminder]: Due reminders ordered by slot and
