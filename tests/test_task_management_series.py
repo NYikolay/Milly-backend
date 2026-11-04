@@ -371,6 +371,213 @@ async def test_edit_driven_regeneration_refuses_archived_project() -> None:
     ]
 
 
+async def test_series_generation_selection_excludes_ended_series() -> None:
+    """Ended series are not candidates for periodic generation."""
+    repository = FakeTaskManagementRepository()
+    repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=fixed_now().date() - timedelta(days=10),
+            ends_on=fixed_now().date() - timedelta(days=2),
+        )
+    )
+
+    candidates = await repository.list_series_for_generation(fixed_now())
+
+    assert candidates == []
+
+
+async def test_series_generation_selection_excludes_caught_up_series() -> None:
+    """A marker at 89 days is excluded while 88 days remains eligible."""
+    repository = FakeTaskManagementRepository()
+    repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=fixed_now().date() - timedelta(days=10),
+            generated_through=fixed_now() + timedelta(days=89),
+        )
+    )
+    eligible = repository.insert_series(
+        make_series(
+            series_id=2,
+            time_of_day=time(9, 0),
+            starts_on=fixed_now().date() - timedelta(days=10),
+            generated_through=fixed_now() + timedelta(days=88),
+        )
+    )
+
+    candidates = await repository.list_series_for_generation(fixed_now())
+
+    assert [series.id for series in candidates] == [eligible.id]
+
+
+async def test_series_generation_selection_includes_future_series_within_horizon() -> None:
+    """A future start without a marker still receives its first occurrence."""
+    repository = FakeTaskManagementRepository()
+    future = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=fixed_now().date() + timedelta(days=10),
+        )
+    )
+
+    candidates = await repository.list_series_for_generation(fixed_now())
+
+    assert [series.id for series in candidates] == [future.id]
+
+
+async def test_series_generation_selection_skips_far_future_series_after_first_generation() -> None:
+    """A far-future marker from the first occurrence excludes the series."""
+    repository = FakeTaskManagementRepository()
+    starts_on = fixed_now().date() + timedelta(days=200)
+    repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=starts_on,
+            generated_through=datetime.combine(starts_on, time(9, 0), tzinfo=UTC),
+        )
+    )
+
+    candidates = await repository.list_series_for_generation(fixed_now())
+
+    assert candidates == []
+
+
+async def test_list_series_due_times_filters_future_slots() -> None:
+    """Due-time lookup ignores slots that have already passed."""
+    repository = FakeTaskManagementRepository()
+    past = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=3,
+            due_at=fixed_now() - timedelta(days=1),
+        )
+    )
+    future = repository.insert_task(
+        make_task(
+            task_id=2,
+            series_id=3,
+            due_at=fixed_now() + timedelta(days=1),
+        )
+    )
+
+    due_times = await repository.list_series_due_times(3, USER_ID, now=fixed_now())
+
+    assert past.due_at not in due_times
+    assert due_times == [future.due_at]
+
+
+async def test_generate_skips_caught_up_series_and_generates_future_series() -> None:
+    """The run ignores a caught-up marker and materializes a future start."""
+    repository = FakeTaskManagementRepository()
+    caught_up = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=fixed_now().date() - timedelta(days=10),
+            generated_through=fixed_now() + timedelta(days=89),
+        )
+    )
+    future = repository.insert_series(
+        make_series(
+            series_id=2,
+            time_of_day=time(9, 0),
+            starts_on=fixed_now().date() + timedelta(days=10),
+        )
+    )
+    service = make_service(repository)
+
+    created = await service.generate(fixed_now())
+
+    generated = [task for task in repository.tasks.values() if task.series_id == future.id]
+    assert created == len(generated) > 0
+    assert repository.claimed_series_ids == [future.id]
+    assert min(task.due_at for task in generated) == datetime.combine(
+        fixed_now().date() + timedelta(days=10),
+        time(9, 0),
+        tzinfo=UTC,
+    )
+    assert all(task.series_id != caught_up.id for task in repository.tasks.values())
+
+
+async def test_generate_series_uses_bulk_add_methods() -> None:
+    """One generation pass batches tasks, label rows, and reminders."""
+    repository = FakeTaskManagementRepository()
+    label = repository.insert_label(make_label())
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=fixed_now().date() - timedelta(days=1),
+        )
+    )
+    repository.series_labels.add((series.id, label.id))
+    repository.insert_reminder(
+        make_reminder(
+            series_id=series.id,
+            kind=ReminderKind.BEFORE_DUE,
+            offset_minutes=30,
+        )
+    )
+    service = make_service(repository)
+
+    created = await service.generate(fixed_now())
+
+    assert created > 1
+    assert repository.bulk_calls.count("add_tasks") == 1
+    assert repository.bulk_calls.count("add_task_label_rows") == 1
+    assert repository.bulk_calls.count("add_reminders") == 1
+    assert repository.task_labels == {
+        (task.id, label.id) for task in repository.tasks.values() if task.series_id == series.id
+    }
+
+
+async def test_generate_series_does_not_claim_ended_series() -> None:
+    """The selection query keeps ended series out of the generation claim loop."""
+    repository = FakeTaskManagementRepository()
+    repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=fixed_now().date() - timedelta(days=10),
+            ends_on=fixed_now().date() - timedelta(days=2),
+        )
+    )
+    service = make_service(repository)
+
+    created = await service.generate(fixed_now())
+
+    assert created == 0
+    assert repository.claimed_series_ids == []
+    assert "add_tasks" not in repository.bulk_calls
+    assert repository.tasks == {}
+
+
+async def test_generate_series_preserves_generated_through() -> None:
+    """A generation pass without new slots never rewinds the marker."""
+    repository = FakeTaskManagementRepository()
+    marker = fixed_now()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=fixed_now().date(),
+            ends_on=fixed_now().date(),
+            generated_through=marker,
+        )
+    )
+    service = make_service(repository)
+
+    created = await service.generate(fixed_now() + timedelta(minutes=15))
+
+    assert created == 0
+    assert series.generated_through == marker
+
+
 async def test_generate_skips_series_locked_by_another_worker() -> None:
     """A series locked by another worker is skipped until the next run."""
     repository = FakeTaskManagementRepository()

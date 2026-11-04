@@ -11,6 +11,7 @@ import structlog
 from backend.core.errors import BadRequestError, NotFoundError
 from backend.models.label import Label
 from backend.models.task import Task
+from backend.models.task_label import TaskLabel
 from backend.models.task_reminder import TaskReminder
 from backend.models.task_series import TaskSeries
 from backend.task_management.date_bounds import require_supported_date
@@ -554,9 +555,13 @@ class SeriesService:
               archived or deleted.
             - Copies snapshot fields, the series label set, and template
               reminders into every new instance.
+            - Writes tasks, label rows, and instance reminders as three bulk
+              batches with at most one flush each.
             - Leaves an existing ``generated_through`` unchanged when no new
               slot is produced, so resuming never rewinds the marker.
-            - Flushes through the repository but does not commit.
+            - The ``generated_through`` marker after bulk writes is persisted
+              by the caller's flush; this method flushes only no-task paths.
+            - Does not commit.
         """
         if series.project_id is not None and not await self._repository.project_is_active(
             series.user_id,
@@ -582,54 +587,67 @@ class SeriesService:
             return 0
 
         existing_due_times = set(
-            await self._repository.list_series_due_times(series.id, series.user_id)
+            await self._repository.list_series_due_times(series.id, series.user_id, now=now)
         )
         labels = await self._repository.list_series_labels(series.user_id, series.id)
         template_reminders = await self._repository.list_series_reminders(
             series.user_id,
             series.id,
         )
-        created = 0
+        tasks: list[Task] = []
         last_due_at: datetime | None = None
         for due_at in due_times:
             last_due_at = due_at
             if due_at in existing_due_times:
                 continue
-            task = Task(
-                user_id=series.user_id,
-                series_id=series.id,
-                project_id=series.project_id,
-                title=series.title,
-                description=series.description,
-                priority=series.priority,
-                due_at=due_at,
-                completed_at=None,
-                reminders_enabled=series.reminders_enabled,
-            )
-            await self._repository.add_task(task)
-            await self._repository.add_task_labels(
-                task.id,
-                series.user_id,
-                [label.id for label in labels],
-            )
-            for template in template_reminders:
-                instance_reminder = self._instance_reminder(
-                    template,
-                    task_id=task.id,
+            tasks.append(
+                Task(
+                    user_id=series.user_id,
+                    series_id=series.id,
+                    project_id=series.project_id,
+                    title=series.title,
+                    description=series.description,
+                    priority=series.priority,
                     due_at=due_at,
-                    fallback_timezone=series.timezone,
-                    now=now,
+                    completed_at=None,
+                    reminders_enabled=series.reminders_enabled,
                 )
-                if instance_reminder is None:
-                    continue
-                await self._repository.add_reminder(instance_reminder)
-            created += 1
+            )
+        created = len(tasks)
+        if tasks:
+            tasks = list(await self._repository.add_tasks(tasks))
+            await self._repository.add_task_label_rows(
+                [
+                    TaskLabel(
+                        task_id=task.id,
+                        label_id=label.id,
+                        user_id=series.user_id,
+                    )
+                    for task in tasks
+                    for label in labels
+                ]
+            )
+            instance_reminders: list[TaskReminder] = []
+            for task in tasks:
+                for template in template_reminders:
+                    instance_reminder = self._instance_reminder(
+                        template,
+                        task_id=task.id,
+                        due_at=task.due_at,
+                        fallback_timezone=series.timezone,
+                        now=now,
+                    )
+                    if instance_reminder is None:
+                        continue
+                    instance_reminders.append(instance_reminder)
+            await self._repository.add_reminders(instance_reminders)
 
         if created:
             series.generated_through = last_due_at
         elif series.generated_through is None:
             series.generated_through = now
-        await self._repository.flush()
+        if not tasks:
+            await self._repository.flush()
         return created
 
     def _instance_reminder(

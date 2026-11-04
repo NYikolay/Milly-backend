@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
@@ -10,7 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.color_palette import ColorPalette
 from backend.models.project import Project
+from backend.models.task_label import TaskLabel
+from backend.models.task_reminder import TaskReminder
 from backend.task_management.repository import SqlAlchemyTaskManagementRepository
+from tests.task_management_fakes import make_task
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
 USER_ID = 7
@@ -183,6 +186,18 @@ class RecordingSession:
             instance: ORM object passed to ``add``.
         """
         self.added.append(instance)
+
+    def add_all(self, instances: Sequence[Any]) -> None:
+        """
+        Record multiple objects added to the session.
+
+        Purpose:
+            Verify bulk insert methods add every entity before flushing.
+
+        Args:
+            instances: ORM objects passed to ``add_all``.
+        """
+        self.added.extend(instances)
 
     async def flush(self) -> None:
         """
@@ -625,6 +640,130 @@ async def test_list_series_for_generation_filters_horizon_and_active_projects() 
     assert "projects.deleted_at IS NULL" in sql
     assert "projects.archived_at IS NULL" in sql
     assert "ORDER BY task_series.id" in sql
+
+
+async def test_list_series_for_generation_excludes_ended_series() -> None:
+    """Ended series are filtered by the one-day end-date lower bound."""
+    session = RecordingSession()
+    repository = make_repository(session)
+
+    await repository.list_series_for_generation(NOW)
+    sql = compile_statement(session.statements[-1])
+
+    assert "task_series.ends_on IS NULL" in sql
+    assert "task_series.ends_on >= '2026-11-03'" in sql
+
+
+async def test_list_series_for_generation_excludes_caught_up_series() -> None:
+    """Caught-up series are filtered by the one-day horizon threshold."""
+    session = RecordingSession()
+    repository = make_repository(session)
+
+    await repository.list_series_for_generation(NOW)
+    sql = compile_statement(session.statements[-1])
+
+    assert "task_series.generated_through IS NULL" in sql
+    assert "task_series.generated_through < '2027-02-01 12:00:00+00:00'" in sql
+
+
+async def test_list_series_for_generation_includes_future_series_within_horizon() -> None:
+    """Future starts are not constrained so the first occurrence can be created."""
+    session = RecordingSession()
+    repository = make_repository(session)
+
+    await repository.list_series_for_generation(NOW)
+    sql = compile_statement(session.statements[-1])
+
+    assert "task_series.starts_on >" not in sql
+    assert "task_series.starts_on <" not in sql
+
+
+async def test_list_series_for_generation_skips_far_future_series_after_first_generation() -> None:
+    """A far-future generation marker exceeds the threshold exclusion bound."""
+    session = RecordingSession()
+    repository = make_repository(session)
+
+    await repository.list_series_for_generation(NOW)
+    sql = compile_statement(session.statements[-1])
+
+    threshold = NOW + timedelta(days=90) - timedelta(days=1)
+    assert f"task_series.generated_through < '{threshold.isoformat(sep=' ')}'" in sql
+
+
+async def test_list_series_due_times_filters_future_slots() -> None:
+    """Due-time lookup only loads slots at or after the current instant."""
+    session = RecordingSession()
+    repository = make_repository(session)
+
+    await repository.list_series_due_times(3, USER_ID, now=NOW)
+    sql = compile_statement(session.statements[-1])
+
+    assert "tasks.series_id = 3" in sql
+    assert "tasks.user_id = 7" in sql
+    assert "tasks.deleted_at IS NULL" in sql
+    assert "tasks.due_at >= '2026-11-04 12:00:00+00:00'" in sql
+
+
+async def test_add_tasks_bulk_adds_and_flushes_once() -> None:
+    """Bulk task insertion adds every task and flushes a single time."""
+    session = RecordingSession()
+    repository = make_repository(session)
+    tasks = [
+        make_task(due_at=NOW),
+        make_task(due_at=NOW + timedelta(days=1)),
+    ]
+
+    result = await repository.add_tasks(tasks)
+
+    assert list(result) == tasks
+    assert session.added == tasks
+    assert session.flush_count == 1
+
+
+async def test_bulk_label_and_reminder_rows_add_all_and_flush_once() -> None:
+    """Bulk label and reminder insertion adds every row and flushes once each."""
+    session = RecordingSession()
+    repository = make_repository(session)
+    rows = [
+        TaskLabel(task_id=1, label_id=2, user_id=USER_ID),
+        TaskLabel(task_id=1, label_id=3, user_id=USER_ID),
+    ]
+    reminders = [
+        TaskReminder(
+            user_id=USER_ID,
+            task_id=1,
+            kind="before_due",
+            enabled=True,
+            offset_minutes=30,
+        ),
+        TaskReminder(
+            user_id=USER_ID,
+            task_id=2,
+            kind="before_due",
+            enabled=True,
+            offset_minutes=30,
+        ),
+    ]
+
+    await repository.add_task_label_rows(rows)
+    await repository.add_reminders(reminders)
+
+    assert session.added == rows + reminders
+    assert session.flush_count == 2
+
+
+async def test_bulk_add_methods_skip_empty_input() -> None:
+    """Bulk insertion with no rows is a no-op without a flush."""
+    session = RecordingSession()
+    repository = make_repository(session)
+
+    tasks = await repository.add_tasks([])
+    await repository.add_task_label_rows([])
+    await repository.add_reminders([])
+
+    assert list(tasks) == []
+    assert session.added == []
+    assert session.flush_count == 0
 
 
 async def test_pause_project_reminders_clears_slots_and_cancels_deliveries() -> None:

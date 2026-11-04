@@ -5,6 +5,7 @@ from pathlib import Path
 from types import ModuleType
 
 from backend.admin.views import ColorPaletteAdmin
+from backend.db.base import Base
 from backend.models.color_palette import ColorPalette
 
 
@@ -17,6 +18,31 @@ def _load_migration() -> ModuleType:
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def _load_generation_index_migration() -> ModuleType:
+    """Load the series generation index migration module from disk."""
+    path = Path("alembic/versions/0004_task_series_generation_index.py")
+    spec = importlib.util.spec_from_file_location("migration_0004", path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_generation_index_migration_chain_and_model_index() -> None:
+    """Chain the index migration and mirror its predicate in the ORM metadata."""
+    migration = _load_generation_index_migration()
+    assert migration.revision == "0004_task_series_generation_index"
+    assert migration.down_revision == "0003_task_management"
+
+    table = Base.metadata.tables["task_series"]
+    index = next(
+        index for index in table.indexes if index.name == "ix_task_series_generated_through_active"
+    )
+    assert [column.name for column in index.columns] == ["generated_through"]
+    assert index.dialect_options["postgresql"]["where"] is not None
 
 
 def test_migration_revision_chain() -> None:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfoNotFoundError
@@ -1141,6 +1141,30 @@ class SqlAlchemyTaskManagementRepository:
         await self._session.flush()
         return task
 
+    async def add_tasks(self, tasks: Sequence[Task]) -> Sequence[Task]:
+        """
+        Persist multiple new tasks in one batch.
+
+        Purpose:
+            Materialize generated series instances without one flush per task.
+
+        Args:
+            tasks: Tasks to insert.
+
+        Returns:
+            Sequence[Task]: The same tasks after their identifiers are
+                generated.
+
+        Notes:
+            - Empty input is a no-op and does not flush.
+            - Flushes once but does not commit.
+        """
+        if not tasks:
+            return tasks
+        self._session.add_all(tasks)
+        await self._session.flush()
+        return tasks
+
     async def soft_delete_task(
         self,
         task: Task,
@@ -1194,6 +1218,28 @@ class SqlAlchemyTaskManagementRepository:
         self._session.add_all(
             TaskLabel(task_id=task_id, label_id=label_id, user_id=user_id) for label_id in label_ids
         )
+        await self._session.flush()
+
+    async def add_task_label_rows(self, rows: Sequence[TaskLabel]) -> None:
+        """
+        Persist multiple task-label assignments in one batch.
+
+        Purpose:
+            Copy the series label set onto every generated instance.
+
+        Args:
+            rows: Task-label assignment rows to insert.
+
+        Returns:
+            None: The changes stay in the current unit of work.
+
+        Notes:
+            - Empty input is a no-op and does not flush.
+            - Flushes once but does not commit.
+        """
+        if not rows:
+            return
+        self._session.add_all(rows)
         await self._session.flush()
 
     async def replace_task_labels(
@@ -1338,6 +1384,29 @@ class SqlAlchemyTaskManagementRepository:
         self._session.add(reminder)
         await self._session.flush()
         return reminder
+
+    async def add_reminders(self, reminders: Sequence[TaskReminder]) -> None:
+        """
+        Persist multiple reminders in one batch.
+
+        Purpose:
+            Copy template reminders onto generated series instances without
+            one flush per reminder.
+
+        Args:
+            reminders: Reminders to insert.
+
+        Returns:
+            None: The changes stay in the current unit of work.
+
+        Notes:
+            - Empty input is a no-op and does not flush.
+            - Flushes once but does not commit.
+        """
+        if not reminders:
+            return
+        self._session.add_all(reminders)
+        await self._session.flush()
 
     async def delete_task_reminders(self, user_id: int, task_id: int) -> None:
         """
@@ -1839,19 +1908,25 @@ class SqlAlchemyTaskManagementRepository:
         List series that may need new instances.
 
         Purpose:
-            Select non-deleted series below the generation horizon whose
-            project is active.
+            Select non-deleted series that are not caught up, have not ended,
+            and belong to an active project.
 
         Args:
-            now: Current instant used to evaluate the 90-day horizon.
+            now: Current instant used to evaluate the generation horizon.
 
         Returns:
             Sequence[TaskSeries]: Eligible series ordered by identifier.
 
         Notes:
+            - The generation marker must be missing or older than one day
+              before the 90-day horizon.
+            - Series ending before the previous UTC day are ignored.
+            - Future series without a marker are eligible so their first
+              occurrence can be materialized.
             - Performs no writes and does not commit.
         """
-        horizon = now + timedelta(days=HORIZON_DAYS)
+        threshold = now + timedelta(days=HORIZON_DAYS) - timedelta(days=1)
+        utc_today = now.astimezone(UTC).date()
         active_project_ids = select(Project.id).where(
             Project.deleted_at.is_(None),
             Project.archived_at.is_(None),
@@ -1862,7 +1937,11 @@ class SqlAlchemyTaskManagementRepository:
                 TaskSeries.deleted_at.is_(None),
                 or_(
                     TaskSeries.generated_through.is_(None),
-                    TaskSeries.generated_through < horizon,
+                    TaskSeries.generated_through < threshold,
+                ),
+                or_(
+                    TaskSeries.ends_on.is_(None),
+                    TaskSeries.ends_on >= utc_today - timedelta(days=1),
                 ),
                 or_(
                     TaskSeries.project_id.is_(None),
@@ -1983,19 +2062,24 @@ class SqlAlchemyTaskManagementRepository:
         self,
         series_id: int,
         user_id: int,
+        *,
+        now: datetime,
     ) -> Sequence[datetime]:
         """
         List due times already generated for a series.
 
         Purpose:
-            Make instance generation idempotent for existing slots.
+            Make instance generation idempotent for existing slots without
+            loading the past.
 
         Args:
             series_id: Series identifier.
             user_id: Owner identifier.
+            now: Current instant used as the lower bound.
 
         Returns:
-            Sequence[datetime]: Due instants of non-deleted series tasks.
+            Sequence[datetime]: Due instants of non-deleted series tasks at or
+                after ``now``.
 
         Notes:
             - Performs no writes and does not commit.
@@ -2005,6 +2089,7 @@ class SqlAlchemyTaskManagementRepository:
                 Task.series_id == series_id,
                 Task.user_id == user_id,
                 Task.deleted_at.is_(None),
+                Task.due_at >= now,
             )
         )
         return result.scalars().all()

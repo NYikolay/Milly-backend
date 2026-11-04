@@ -55,6 +55,11 @@ class TaskSeries(Base):
             "generated_through",
             postgresql_where=text("deleted_at IS NULL"),
         ),
+        Index(
+            "ix_task_series_generated_through_active",
+            "generated_through",
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)

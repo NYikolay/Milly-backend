@@ -10,6 +10,7 @@ from backend.models.label import Label
 from backend.models.project import Project
 from backend.models.reminder_delivery import ReminderDelivery
 from backend.models.task import Task
+from backend.models.task_label import TaskLabel
 from backend.models.task_reminder import TaskReminder
 from backend.models.task_series import TaskSeries
 from backend.task_management.enums import DeliveryStatus, ReminderKind
@@ -91,6 +92,7 @@ class FakeTaskManagementRepository:
         self.task_labels: set[tuple[int, int]] = set()
         self.series_labels: set[tuple[int, int]] = set()
         self.batch_calls: list[tuple[str, tuple[int, ...]]] = []
+        self.bulk_calls: list[str] = []
         self.commits = 0
         self.rollbacks = 0
         self.claimed_series_ids: list[int] = []
@@ -538,6 +540,11 @@ class FakeTaskManagementRepository:
         """Persist a task."""
         return self.insert_task(task)
 
+    async def add_tasks(self, tasks: Sequence[Task]) -> Sequence[Task]:
+        """Persist multiple tasks in one batch."""
+        self.bulk_calls.append("add_tasks")
+        return [self.insert_task(task) for task in tasks]
+
     async def soft_delete_task(
         self,
         task: Task,
@@ -557,6 +564,12 @@ class FakeTaskManagementRepository:
         """Assign labels to a task."""
         for label_id in label_ids:
             self.task_labels.add((task_id, label_id))
+
+    async def add_task_label_rows(self, rows: Sequence[TaskLabel]) -> None:
+        """Assign multiple task-label rows in one batch."""
+        self.bulk_calls.append("add_task_label_rows")
+        for row in rows:
+            self.task_labels.add((row.task_id, row.label_id))
 
     async def replace_task_labels(
         self,
@@ -630,6 +643,12 @@ class FakeTaskManagementRepository:
     async def add_reminder(self, reminder: TaskReminder) -> TaskReminder:
         """Persist a reminder."""
         return self.insert_reminder(reminder)
+
+    async def add_reminders(self, reminders: Sequence[TaskReminder]) -> None:
+        """Persist multiple reminders in one batch."""
+        self.bulk_calls.append("add_reminders")
+        for reminder in reminders:
+            self.insert_reminder(reminder)
 
     async def delete_task_reminders(self, user_id: int, task_id: int) -> None:
         """Delete task reminders and their deliveries."""
@@ -817,13 +836,15 @@ class FakeTaskManagementRepository:
 
     async def list_series_for_generation(self, now: datetime) -> Sequence[TaskSeries]:
         """List active series that may need new instances."""
-        horizon = now + timedelta(days=HORIZON_DAYS)
+        threshold = now + timedelta(days=HORIZON_DAYS) - timedelta(days=1)
+        utc_today = now.astimezone(UTC).date()
         return sorted(
             (
                 series
                 for series in self.series.values()
                 if series.deleted_at is None
-                and (series.generated_through is None or series.generated_through < horizon)
+                and (series.generated_through is None or series.generated_through < threshold)
+                and (series.ends_on is None or series.ends_on >= utc_today - timedelta(days=1))
                 and self._project_is_active(series.project_id)
             ),
             key=lambda series: series.id,
@@ -886,12 +907,17 @@ class FakeTaskManagementRepository:
         self,
         series_id: int,
         user_id: int,
+        *,
+        now: datetime,
     ) -> Sequence[datetime]:
-        """Return due times already generated for a series."""
+        """Return due times already generated for a series at or after now."""
         return [
             task.due_at
             for task in self.tasks.values()
-            if task.series_id == series_id and task.user_id == user_id and task.deleted_at is None
+            if task.series_id == series_id
+            and task.user_id == user_id
+            and task.deleted_at is None
+            and task.due_at >= now
         ]
 
     async def list_due_reminders(self, now: datetime) -> Sequence[TaskReminder]:

@@ -10,6 +10,7 @@ from backend.models.label import Label
 from backend.models.project import Project
 from backend.models.reminder_delivery import ReminderDelivery
 from backend.models.task import Task
+from backend.models.task_label import TaskLabel
 from backend.models.task_reminder import TaskReminder
 from backend.models.task_series import TaskSeries
 
@@ -756,6 +757,26 @@ class TaskManagementRepository(Protocol):
         """
         ...
 
+    async def add_tasks(self, tasks: Sequence[Task]) -> Sequence[Task]:
+        """
+        Persist multiple new tasks in one batch.
+
+        Purpose:
+            Materialize generated series instances without one flush per task.
+
+        Args:
+            tasks: Tasks to insert.
+
+        Returns:
+            Sequence[Task]: The same tasks after their identifiers are
+                generated.
+
+        Notes:
+            - Empty input is a no-op and does not flush.
+            - Flushes once but does not commit.
+        """
+        ...
+
     async def soft_delete_task(
         self,
         task: Task,
@@ -803,6 +824,25 @@ class TaskManagementRepository(Protocol):
 
         Notes:
             - Flushes but does not commit.
+        """
+        ...
+
+    async def add_task_label_rows(self, rows: Sequence[TaskLabel]) -> None:
+        """
+        Persist multiple task-label assignments in one batch.
+
+        Purpose:
+            Copy the series label set onto every generated instance.
+
+        Args:
+            rows: Task-label assignment rows to insert.
+
+        Returns:
+            None: The changes stay in the current unit of work.
+
+        Notes:
+            - Empty input is a no-op and does not flush.
+            - Flushes once but does not commit.
         """
         ...
 
@@ -911,6 +951,26 @@ class TaskManagementRepository(Protocol):
 
         Notes:
             - Flushes but does not commit.
+        """
+        ...
+
+    async def add_reminders(self, reminders: Sequence[TaskReminder]) -> None:
+        """
+        Persist multiple reminders in one batch.
+
+        Purpose:
+            Copy template reminders onto generated series instances without
+            one flush per reminder.
+
+        Args:
+            reminders: Reminders to insert.
+
+        Returns:
+            None: The changes stay in the current unit of work.
+
+        Notes:
+            - Empty input is a no-op and does not flush.
+            - Flushes once but does not commit.
         """
         ...
 
@@ -1233,16 +1293,21 @@ class TaskManagementRepository(Protocol):
         List series that may need new instances.
 
         Purpose:
-            Select non-deleted series below the generation horizon whose
-            project is active.
+            Select non-deleted series that are not caught up, have not ended,
+            and belong to an active project.
 
         Args:
-            now: Current instant used to evaluate the 90-day horizon.
+            now: Current instant used to evaluate the generation horizon.
 
         Returns:
             Sequence[TaskSeries]: Eligible series ordered by identifier.
 
         Notes:
+            - The generation marker must be missing or older than one day
+              before the 90-day horizon.
+            - Series ending before the previous UTC day are ignored.
+            - Future series without a marker are eligible so their first
+              occurrence can be materialized.
             - Performs no writes and does not commit.
         """
         ...
@@ -1327,19 +1392,24 @@ class TaskManagementRepository(Protocol):
         self,
         series_id: int,
         user_id: int,
+        *,
+        now: datetime,
     ) -> Sequence[datetime]:
         """
         List due times already generated for a series.
 
         Purpose:
-            Make instance generation idempotent for existing slots.
+            Make instance generation idempotent for existing slots without
+            loading the past.
 
         Args:
             series_id: Series identifier.
             user_id: Owner identifier.
+            now: Current instant used as the lower bound.
 
         Returns:
-            Sequence[datetime]: Due instants of non-deleted series tasks.
+            Sequence[datetime]: Due instants of non-deleted series tasks at or
+                after ``now``.
 
         Notes:
             - Performs no writes and does not commit.
