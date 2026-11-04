@@ -388,6 +388,24 @@ async def test_series_generation_selection_excludes_ended_series() -> None:
     assert candidates == []
 
 
+async def test_series_generation_selection_includes_series_ending_yesterday() -> None:
+    """The end-date lower bound includes the previous UTC day."""
+    repository = FakeTaskManagementRepository()
+    yesterday = fixed_now().date() - timedelta(days=1)
+    ending_yesterday = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=yesterday - timedelta(days=10),
+            ends_on=yesterday,
+        )
+    )
+
+    candidates = await repository.list_series_for_generation(fixed_now())
+
+    assert [series.id for series in candidates] == [ending_yesterday.id]
+
+
 async def test_series_generation_selection_excludes_caught_up_series() -> None:
     """A marker at 89 days is excluded while 88 days remains eligible."""
     repository = FakeTaskManagementRepository()

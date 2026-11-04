@@ -481,8 +481,10 @@ class SeriesService:
             int: Number of task instances created.
 
         Notes:
-            - Selects non-deleted series below the 90-day horizon whose project
-              is active.
+            - Selects non-deleted series whose project is active, whose
+              ``generated_through`` is missing or earlier than
+              ``now + 90 days - 1 day``, and whose ``ends_on`` is missing or
+              not earlier than the previous UTC day.
             - Claims each series with ``FOR UPDATE SKIP LOCKED``; a series held
               by another worker is skipped until the next run.
             - Commits after each series so a later failure does not roll back
