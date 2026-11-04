@@ -13,6 +13,7 @@ from backend.models.label import Label
 from backend.models.task import Task
 from backend.models.task_reminder import TaskReminder
 from backend.models.task_series import TaskSeries
+from backend.task_management.date_bounds import require_supported_date
 from backend.task_management.enums import Priority, ReminderKind, SeriesFrequency
 from backend.task_management.labels import LabelService
 from backend.task_management.ports import TaskManagementRepository
@@ -212,8 +213,8 @@ class SeriesService:
 
         Raises:
             BadRequestError: If the title is empty, the timezone is invalid,
-                ``time_of_day`` is timezone-aware, the date range is reversed,
-                or a reminder rule is invalid.
+                ``time_of_day`` is timezone-aware, the dates are outside the
+                supported range or reversed, or a reminder rule is invalid.
             NotFoundError: If the project or a label does not exist for this
                 user.
 
@@ -307,8 +308,8 @@ class SeriesService:
             NotFoundError: If the series, project, or a label does not exist for
                 this user.
             BadRequestError: If the title is empty, the timezone is invalid,
-                ``time_of_day`` is timezone-aware, the date range is reversed,
-                or a reminder rule is invalid.
+                ``time_of_day`` is timezone-aware, the dates are outside the
+                supported range or reversed, or a reminder rule is invalid.
 
         Notes:
             - A schedule change soft-deletes old future incomplete instances
@@ -937,7 +938,8 @@ class SeriesService:
         Validate the inclusive series date range.
 
         Purpose:
-            Reject an end date before the start date.
+            Reject dates outside the supported bounds and an end date before
+            the start date.
 
         Args:
             starts_on: First local date.
@@ -947,7 +949,14 @@ class SeriesService:
             None: The range is valid.
 
         Raises:
-            BadRequestError: If ``ends_on`` is before ``starts_on``.
+            BadRequestError: If either date is outside the inclusive supported
+                range or ``ends_on`` is before ``starts_on``.
         """
+        try:
+            require_supported_date(starts_on)
+            if ends_on is not None:
+                require_supported_date(ends_on)
+        except ValueError as error:
+            raise BadRequestError(_INVALID_RANGE) from error
         if ends_on is not None and ends_on < starts_on:
             raise BadRequestError(_INVALID_RANGE)

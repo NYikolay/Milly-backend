@@ -16,7 +16,7 @@ from backend.task_management.ports import TaskManagementRepository
 from backend.task_management.schedule import (
     before_due_time,
     first_scheduled_time,
-    next_scheduled_time,
+    localize_wall_time,
 )
 
 _INVALID_REMINDER = "Invalid reminder configuration"
@@ -264,24 +264,27 @@ def next_reminder_slot(
 
     Raises:
         BadRequestError: If advancing the schedule overflows the datetime range.
+
+    Notes:
+        - Stale slots are skipped in whole intervals using date arithmetic,
+          leaving at most a couple of iterations for DST correction.
+        - The returned slot is strictly after both ``current`` and ``now``.
     """
     if reminder.kind == ReminderKind.BEFORE_DUE.value:
         return None
     timezone = ZoneInfo(reminder.timezone or "UTC")
+    time_of_day = reminder.time_of_day or time(0, 0)
+    interval_days = reminder.interval_days or 1
     try:
-        slot = next_scheduled_time(
-            current=current,
-            time_of_day=reminder.time_of_day or time(0, 0),
-            timezone=timezone,
-            interval_days=reminder.interval_days or 1,
-        )
-        while slot <= now:
-            slot = next_scheduled_time(
-                current=slot,
-                time_of_day=reminder.time_of_day or time(0, 0),
-                timezone=timezone,
-                interval_days=reminder.interval_days or 1,
-            )
+        current_date = current.astimezone(timezone).date()
+        local_now = now.astimezone(timezone)
+        steps = max(0, (local_now.date() - current_date).days // interval_days)
+        current_date += timedelta(days=steps * interval_days)
+        slot = localize_wall_time(current_date, time_of_day, timezone)
+        anchor = max(current, now)
+        while slot <= anchor:
+            current_date += timedelta(days=interval_days)
+            slot = localize_wall_time(current_date, time_of_day, timezone)
     except OverflowError as error:
         raise BadRequestError(_INVALID_REMINDER) from error
     return slot

@@ -8,6 +8,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend.models.task_reminder import TaskReminder
+from backend.task_management.date_bounds import (
+    require_supported_date,
+    require_supported_datetime,
+)
 from backend.task_management.enums import Priority, ReminderKind
 from backend.task_management.reminders import ReminderInput
 from backend.task_management.tasks import TaskFilters
@@ -441,22 +445,24 @@ class TaskCreate(BaseModel):
     @classmethod
     def _validate_due_at(cls, value: datetime) -> datetime:
         """
-        Require an aware due instant.
+        Require an aware due instant inside the supported range.
 
         Purpose:
-            Reject naive due times before the service normalizes and stores
-            them.
+            Reject naive or out-of-range due times before the service
+            normalizes and stores them.
 
         Args:
             value: Candidate due instant.
 
         Returns:
-            datetime: The unchanged aware instant.
+            datetime: The unchanged supported instant.
 
         Raises:
-            ValueError: If the instant is naive.
+            ValueError: If the instant is naive or outside the inclusive UTC
+                bounds.
         """
         _require_aware(value)
+        require_supported_datetime(value)
         return value
 
     @field_validator("reminders")
@@ -500,21 +506,26 @@ class TaskUpdate(BaseModel):
     @classmethod
     def _validate_due_at(cls, value: datetime | None) -> datetime | None:
         """
-        Require an optional aware due instant.
+        Require an optional aware due instant inside the supported range.
 
         Purpose:
-            Reject naive due times while preserving omitted fields.
+            Reject naive or out-of-range due times while preserving omitted
+            fields.
 
         Args:
             value: Candidate due instant, or ``None``.
 
         Returns:
-            datetime | None: The unchanged aware instant or ``None``.
+            datetime | None: The unchanged supported instant or ``None``.
 
         Raises:
-            ValueError: If the instant is naive.
+            ValueError: If the instant is naive or outside the inclusive UTC
+                bounds.
         """
-        return _require_aware(value)
+        aware = _require_aware(value)
+        if aware is not None:
+            require_supported_datetime(aware)
+        return aware
 
     @field_validator("reminders")
     @classmethod
@@ -576,6 +587,29 @@ class TaskFiltersQuery(BaseModel):
     recurrence: Literal["all", "regular", "one_off"] = "all"
     q: str | None = None
     include_archived_projects: bool = False
+
+    @field_validator("date")
+    @classmethod
+    def _validate_supported_date(cls, value: Date | None) -> Date | None:
+        """
+        Require the optional date filter to fall inside the supported range.
+
+        Purpose:
+            Reject dates whose local-day bounds could overflow schedule
+            arithmetic before the service is called.
+
+        Args:
+            value: Candidate filter date, or ``None`` when unfiltered.
+
+        Returns:
+            Date | None: The unchanged supported date or ``None``.
+
+        Raises:
+            ValueError: If the date is outside the inclusive supported range.
+        """
+        if value is None:
+            return None
+        return require_supported_date(value)
 
     def to_filters(self) -> TaskFilters:
         """
@@ -661,6 +695,30 @@ class SeriesCreate(BaseModel):
             raise ValueError("Invalid timezone")
         return validated
 
+    @field_validator("starts_on", "ends_on")
+    @classmethod
+    def _validate_supported_date(cls, value: Date | None) -> Date | None:
+        """
+        Require series calendar dates to fall inside the supported range.
+
+        Purpose:
+            Reject starts and ends that would make generation arithmetic walk
+            over an unsupported span.
+
+        Args:
+            value: Candidate start or end date, or ``None`` for an open-ended
+                series.
+
+        Returns:
+            Date | None: The unchanged supported date or ``None``.
+
+        Raises:
+            ValueError: If the date is outside the inclusive supported range.
+        """
+        if value is None:
+            return None
+        return require_supported_date(value)
+
     @field_validator("reminders")
     @classmethod
     def _validate_reminders(
@@ -740,6 +798,30 @@ class SeriesUpdate(BaseModel):
             ValueError: If the name cannot be resolved by ``ZoneInfo``.
         """
         return _require_iana_timezone(value)
+
+    @field_validator("starts_on", "ends_on")
+    @classmethod
+    def _validate_supported_date(cls, value: Date | None) -> Date | None:
+        """
+        Require updated series dates to fall inside the supported range.
+
+        Purpose:
+            Reject schedule edits whose dates would be outside the shared
+            generation bounds.
+
+        Args:
+            value: Candidate start or end date, or ``None`` when omitted or
+                clearing the end date.
+
+        Returns:
+            Date | None: The unchanged supported date or ``None``.
+
+        Raises:
+            ValueError: If the date is outside the inclusive supported range.
+        """
+        if value is None:
+            return None
+        return require_supported_date(value)
 
     @field_validator("reminders")
     @classmethod

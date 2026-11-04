@@ -299,6 +299,46 @@ def test_next_scheduled_time_rejects_non_positive_interval(interval_days: int) -
         )
 
 
+def test_daily_due_times_jumps_over_a_century() -> None:
+    """Start from the current local date instead of walking from the series start."""
+    now = datetime(2099, 12, 1, tzinfo=UTC)
+    result = daily_due_times(
+        starts_on=date(2025, 1, 1),
+        ends_on=None,
+        time_of_day=time(9, 0),
+        timezone=ZoneInfo("UTC"),
+        now=now,
+        generated_through=None,
+        horizon_days=90,
+    )
+    assert result
+    assert all(item > now for item in result)
+
+
+def test_first_scheduled_time_jumps_over_many_intervals() -> None:
+    """Skip stale intervals arithmetically instead of advancing one by one."""
+    result = first_scheduled_time(
+        due_at=datetime(2025, 1, 1, tzinfo=UTC),
+        time_of_day=time(9, 0),
+        timezone=ZoneInfo("UTC"),
+        interval_days=7,
+        now=datetime(2100, 12, 1, tzinfo=UTC),
+    )
+    assert result > datetime(2100, 12, 1, tzinfo=UTC)
+
+
+def test_first_scheduled_time_keeps_future_due_anchor() -> None:
+    """Keep a future due instant as the first candidate after the jump."""
+    result = first_scheduled_time(
+        due_at=datetime(2099, 12, 1, 10, 0, tzinfo=UTC),
+        time_of_day=time(9, 0),
+        timezone=ZoneInfo("UTC"),
+        interval_days=7,
+        now=datetime(2025, 1, 1, tzinfo=UTC),
+    )
+    assert result == datetime(2099, 12, 2, 9, 0, tzinfo=UTC)
+
+
 def test_enum_values_match_database_contract() -> None:
     """Keep enum string values aligned with the database CHECK constraints."""
     assert {item.value for item in Priority} == {

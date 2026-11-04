@@ -445,6 +445,28 @@ async def test_create_series_rejects_out_of_range_interval(
     assert fake_series_service.created == []
 
 
+async def test_create_series_rejects_starts_on_outside_bounds(
+    series_client: AsyncClient,
+    fake_series_service: FakeSeriesService,
+) -> None:
+    """Reject a start date before the supported calendar-date lower bound."""
+    response = await series_client.post(
+        "/api/v1/task-series",
+        json={
+            "title": "Old",
+            "time_of_day": "09:00:00",
+            "timezone": "UTC",
+            "starts_on": "2024-12-31",
+        },
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "validation_error"
+    assert body["request_id"] == response.headers["x-request-id"]
+    assert fake_series_service.created == []
+
+
 async def test_update_another_users_series_returns_not_found(
     series_client: AsyncClient,
     fake_series_service: FakeSeriesService,

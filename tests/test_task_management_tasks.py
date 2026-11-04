@@ -676,6 +676,47 @@ async def test_update_task_rejects_archived_project() -> None:
     assert task.project_id is None
 
 
+@pytest.mark.parametrize(
+    "due_at",
+    [
+        datetime(2024, 12, 31, 23, 59, 59, tzinfo=UTC),
+        datetime(2101, 1, 1, tzinfo=UTC),
+    ],
+)
+async def test_create_task_rejects_due_at_outside_supported_range(due_at: datetime) -> None:
+    """A direct service create rejects due instants outside the shared UTC bounds."""
+    repository = FakeTaskManagementRepository()
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError):
+        await service.create(
+            USER_ID,
+            title="Task",
+            description=None,
+            priority=Priority.NEITHER,
+            due_at=due_at,
+            project_id=None,
+            label_ids=(),
+            reminders_enabled=False,
+            reminders=(),
+        )
+
+    assert repository.tasks == {}
+
+
+async def test_update_task_rejects_due_at_outside_supported_range() -> None:
+    """A direct service update rejects due instants outside the shared UTC bounds."""
+    repository = FakeTaskManagementRepository()
+    due_at = fixed_now() + timedelta(hours=1)
+    task = repository.insert_task(make_task(task_id=1, due_at=due_at))
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError):
+        await service.update(USER_ID, task.id, due_at=datetime(2101, 1, 1, tzinfo=UTC))
+
+    assert task.due_at == due_at
+
+
 async def test_list_rejects_date_that_overflows_local_day_bounds() -> None:
     """The last supported calendar date produces a bad request, not a 500."""
     repository = FakeTaskManagementRepository()

@@ -606,3 +606,67 @@ async def test_update_series_rejects_aware_time_of_day_at_service_boundary() -> 
 
     with pytest.raises(BadRequestError):
         await service.update(USER_ID, series.id, time_of_day=time(9, 0, tzinfo=UTC))
+
+
+@pytest.mark.parametrize(
+    ("starts_on", "ends_on"),
+    [
+        (date(2024, 12, 31), None),
+        (date(2101, 1, 1), None),
+        (date(2026, 11, 4), date(2101, 1, 1)),
+    ],
+)
+async def test_create_series_rejects_dates_outside_supported_range(
+    starts_on: date,
+    ends_on: date | None,
+) -> None:
+    """A direct service create rejects calendar dates outside the shared bounds."""
+    repository = FakeTaskManagementRepository()
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError):
+        await service.create(
+            USER_ID,
+            title="Daily",
+            description=None,
+            priority=Priority.NEITHER,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+            starts_on=starts_on,
+            ends_on=ends_on,
+            project_id=None,
+            label_ids=(),
+            reminders_enabled=False,
+            reminders=(),
+        )
+
+    assert repository.series == {}
+
+
+@pytest.mark.parametrize(
+    ("starts_on", "ends_on"),
+    [
+        (date(2024, 12, 31), None),
+        (None, date(2101, 1, 1)),
+    ],
+)
+async def test_update_series_rejects_dates_outside_supported_range(
+    starts_on: date | None,
+    ends_on: date | None,
+) -> None:
+    """A direct service update rejects calendar dates outside the shared bounds."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 4),
+        )
+    )
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError):
+        await service.update(USER_ID, series.id, starts_on=starts_on, ends_on=ends_on)
+
+    assert series.starts_on == date(2026, 11, 4)
+    assert series.ends_on is None

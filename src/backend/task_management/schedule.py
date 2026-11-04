@@ -89,9 +89,13 @@ def daily_due_times(
         - When resuming from ``generated_through``, a candidate beyond the
           horizon yields an empty list instead of overshooting the window.
         - ``generated_through`` resumes on the next local day after the instant.
+        - The search starts at the later of the series start and the current
+          local date; at most one extra day is applied when that slot has
+          already passed.
         - The returned list never contains an instant at or before ``now``.
     """
-    if ends_on is not None and (ends_on < starts_on or ends_on < now.astimezone(timezone).date()):
+    local_now = now.astimezone(timezone)
+    if ends_on is not None and (ends_on < starts_on or ends_on < local_now.date()):
         return []
 
     candidate_date = starts_on
@@ -99,8 +103,9 @@ def daily_due_times(
         generated_date = generated_through.astimezone(timezone).date()
         candidate_date = max(candidate_date, generated_date + timedelta(days=1))
 
+    candidate_date = max(candidate_date, local_now.date())
     candidate = localize_wall_time(candidate_date, time_of_day, timezone)
-    while candidate <= now:
+    if candidate <= now:
         candidate_date += timedelta(days=1)
         candidate = localize_wall_time(candidate_date, time_of_day, timezone)
 
@@ -185,7 +190,10 @@ def first_scheduled_time(
 
     Notes:
         - The first candidate is the first local ``time_of_day`` at or after
-          ``due_at``; subsequent candidates advance by whole intervals.
+          ``due_at``; a future ``due_at`` therefore remains the first
+          candidate.
+        - Stale candidates are skipped in whole intervals using date arithmetic,
+          leaving at most a couple of iterations for DST correction.
     """
     if interval_days < 1:
         raise ValueError("interval_days must be at least 1")
@@ -195,6 +203,10 @@ def first_scheduled_time(
     if candidate < due_at:
         candidate_date += timedelta(days=1)
         candidate = localize_wall_time(candidate_date, time_of_day, timezone)
+    local_now = now.astimezone(timezone)
+    steps = max(0, (local_now.date() - candidate_date).days // interval_days)
+    candidate_date += timedelta(days=steps * interval_days)
+    candidate = localize_wall_time(candidate_date, time_of_day, timezone)
     while candidate <= now:
         candidate_date += timedelta(days=interval_days)
         candidate = localize_wall_time(candidate_date, time_of_day, timezone)

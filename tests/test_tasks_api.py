@@ -549,6 +549,26 @@ async def test_create_task_rejects_out_of_range_reminder_numbers(
     assert fake_task_service.created == []
 
 
+async def test_create_task_rejects_due_at_before_minimum(
+    task_client: AsyncClient,
+    fake_task_service: FakeTaskService,
+) -> None:
+    """Reject a due instant before the supported UTC lower bound."""
+    response = await task_client.post(
+        "/api/v1/tasks",
+        json={
+            "title": "Old",
+            "due_at": "2024-12-31T23:59:59Z",
+        },
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "validation_error"
+    assert body["request_id"] == response.headers["x-request-id"]
+    assert fake_task_service.created == []
+
+
 async def test_update_another_users_task_returns_not_found(
     task_client: AsyncClient,
     fake_task_service: FakeTaskService,
@@ -593,8 +613,8 @@ async def test_task_routes_forward_the_claim_user_id(
     assert ("delete", 1) in fake_task_service.user_calls
 
 
-async def test_task_list_rejects_max_date_with_bad_request_envelope(app: FastAPI) -> None:
-    """The last calendar date maps to a 400 instead of an internal error."""
+async def test_task_list_rejects_max_date_with_validation_error(app: FastAPI) -> None:
+    """The last calendar date is rejected before it can overflow local bounds."""
     repository = FakeTaskManagementRepository()
     palette = PaletteService(repository)
     series = SeriesService(
@@ -610,14 +630,14 @@ async def test_task_list_rejects_max_date_with_bad_request_envelope(app: FastAPI
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get("/api/v1/tasks", params={"date": "9999-12-31"})
 
-    assert response.status_code == 400
+    assert response.status_code == 422
     body = response.json()
-    assert body["code"] == "bad_request"
+    assert body["code"] == "validation_error"
     assert body["request_id"] == response.headers["x-request-id"]
 
 
 async def test_task_list_rejects_min_date_in_positive_offset_zone(app: FastAPI) -> None:
-    """The first calendar date maps to a 400 instead of an internal error."""
+    """The first calendar date is rejected before it can overflow local bounds."""
     repository = FakeTaskManagementRepository()
     repository.user_timezones[1] = "Europe/Moscow"
     palette = PaletteService(repository)
@@ -634,7 +654,7 @@ async def test_task_list_rejects_min_date_in_positive_offset_zone(app: FastAPI) 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get("/api/v1/tasks", params={"date": "0001-01-01"})
 
-    assert response.status_code == 400
+    assert response.status_code == 422
     body = response.json()
-    assert body["code"] == "bad_request"
+    assert body["code"] == "validation_error"
     assert body["request_id"] == response.headers["x-request-id"]

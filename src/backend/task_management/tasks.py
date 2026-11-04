@@ -13,6 +13,7 @@ from backend.models.project import Project
 from backend.models.task import Task
 from backend.models.task_reminder import TaskReminder
 from backend.models.task_series import TaskSeries
+from backend.task_management.date_bounds import require_supported_datetime
 from backend.task_management.enums import Priority
 from backend.task_management.ports import TaskManagementRepository
 from backend.task_management.reminders import (
@@ -196,9 +197,9 @@ class TaskService:
             TaskDetail: The flushed task with labels, reminders, and project.
 
         Raises:
-            BadRequestError: If the title is empty, the due time is naive, the
-                timezone is invalid, the project is archived, or a reminder
-                rule is invalid.
+            BadRequestError: If the title is empty, the due time is naive or
+                outside the supported range, the timezone is invalid, the
+                project is archived, or a reminder rule is invalid.
             NotFoundError: If the project or a label does not exist for this
                 user.
 
@@ -284,8 +285,9 @@ class TaskService:
         Raises:
             NotFoundError: If the task, project, label, or series does not
                 exist for this user.
-            BadRequestError: If the title is empty, the due time is naive, the
-                project is archived, or a reminder rule is invalid.
+            BadRequestError: If the title is empty, the due time is naive or
+                outside the supported range, the project is archived, or a
+                reminder rule is invalid.
 
         Notes:
             - For a series instance only future incomplete instances change.
@@ -794,19 +796,23 @@ class TaskService:
 
     def _validate_due_at(self, due_at: datetime) -> None:
         """
-        Require a timezone-aware due instant.
+        Require a timezone-aware due instant inside the supported range.
 
         Purpose:
-            Keep stored due times as unambiguous absolute instants.
+            Keep stored due times as unambiguous absolute instants that
+            schedule arithmetic can process safely.
 
         Args:
             due_at: Candidate due instant.
 
         Returns:
-            None: The due instant is aware.
+            None: The due instant is aware and supported.
 
         Raises:
-            BadRequestError: If the due instant is naive.
+            BadRequestError: If the due instant is naive or outside the
+                inclusive UTC bounds.
         """
-        if due_at.tzinfo is None or due_at.utcoffset() is None:
-            raise BadRequestError(_INVALID_DUE_AT)
+        try:
+            require_supported_datetime(due_at)
+        except ValueError as error:
+            raise BadRequestError(_INVALID_DUE_AT) from error

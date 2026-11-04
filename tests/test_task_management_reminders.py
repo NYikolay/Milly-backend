@@ -7,7 +7,7 @@ import pytest
 from backend.models.task import Task
 from backend.models.task_reminder import TaskReminder
 from backend.task_management.enums import ReminderKind
-from backend.task_management.reminders import ReminderDispatcher
+from backend.task_management.reminders import ReminderDispatcher, next_reminder_slot
 from tests.task_management_fakes import (
     FakeSender,
     FakeTaskManagementRepository,
@@ -62,6 +62,45 @@ def make_scheduled_reminder(
         )
     )
     return task, reminder
+
+
+def test_next_reminder_slot_jumps_over_many_intervals() -> None:
+    """Advance a long-stale scheduled reminder without stepping interval by interval."""
+    reminder = make_reminder(
+        reminder_id=1,
+        task_id=1,
+        kind=ReminderKind.SCHEDULED,
+        offset_minutes=None,
+        interval_days=1,
+        time_of_day=time(9, 0),
+        timezone="UTC",
+    )
+    result = next_reminder_slot(
+        reminder,
+        current=datetime(2025, 1, 1, 9, 0, tzinfo=UTC),
+        now=datetime(2100, 12, 1, tzinfo=UTC),
+    )
+    assert result is not None
+    assert result > datetime(2100, 12, 1, tzinfo=UTC)
+
+
+def test_next_reminder_slot_returns_the_first_slot_after_current() -> None:
+    """Do not skip an interval that is still ahead of the current instant."""
+    reminder = make_reminder(
+        reminder_id=1,
+        task_id=1,
+        kind=ReminderKind.SCHEDULED,
+        offset_minutes=None,
+        interval_days=1,
+        time_of_day=time(9, 0),
+        timezone="UTC",
+    )
+    result = next_reminder_slot(
+        reminder,
+        current=datetime(2026, 11, 4, 9, 0, tzinfo=UTC),
+        now=datetime(2026, 11, 5, 8, 0, tzinfo=UTC),
+    )
+    assert result == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
 
 
 async def test_dispatch_creates_keyed_delivery_sends_and_advances_slot() -> None:
