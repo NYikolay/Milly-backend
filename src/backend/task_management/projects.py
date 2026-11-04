@@ -335,8 +335,6 @@ class ProjectService:
         project = await self._require_project(user_id, project_id, for_update=True)
         batch_id = uuid4()
         deleted_at = self._clock()
-        project.deleted_at = deleted_at
-        project.deletion_batch_id = batch_id
         await self._repository.soft_delete_project(project, batch_id, deleted_at)
 
     async def stats(self, user_id: int) -> dict[str, int]:

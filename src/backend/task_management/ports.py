@@ -36,7 +36,7 @@ class TaskManagementRepository(Protocol):
             Sequence[ColorPalette]: Colors ordered by ``(sort_order, id)``.
 
         Notes:
-            - Flushes but does not commit; performs no writes.
+            - Performs no writes and does not commit.
         """
         ...
 
@@ -52,7 +52,7 @@ class TaskManagementRepository(Protocol):
                 ``(sort_order, id)``.
 
         Notes:
-            - Flushes but does not commit; performs no writes.
+            - Performs no writes and does not commit.
         """
         ...
 
@@ -70,7 +70,7 @@ class TaskManagementRepository(Protocol):
             ColorPalette | None: The matching color, or ``None``.
 
         Notes:
-            - Flushes but does not commit; performs no writes.
+            - Performs no writes and does not commit.
         """
         ...
 
@@ -86,7 +86,7 @@ class TaskManagementRepository(Protocol):
                 ``(sort_order, id)``, or ``None`` when no color is active.
 
         Notes:
-            - Flushes but does not commit; performs no writes.
+            - Performs no writes and does not commit.
         """
         ...
 
@@ -101,7 +101,7 @@ class TaskManagementRepository(Protocol):
             int: Number of colors whose ``is_active`` flag is set.
 
         Notes:
-            - Flushes but does not commit; performs no writes.
+            - Performs no writes and does not commit.
         """
         ...
 
@@ -120,7 +120,7 @@ class TaskManagementRepository(Protocol):
                 rows, references the color.
 
         Notes:
-            - Flushes but does not commit; performs no writes.
+            - Performs no writes and does not commit.
         """
         ...
 
@@ -144,7 +144,7 @@ class TaskManagementRepository(Protocol):
             Sequence[Project]: Non-deleted projects in display order.
 
         Notes:
-            - Flushes but does not commit; performs no writes.
+            - Performs no writes and does not commit.
         """
         ...
 
@@ -199,7 +199,7 @@ class TaskManagementRepository(Protocol):
                 case-insensitive name.
 
         Notes:
-            - Flushes but does not commit; performs no writes.
+            - Performs no writes and does not commit.
         """
         ...
 
@@ -236,7 +236,7 @@ class TaskManagementRepository(Protocol):
             int: Number of matching non-deleted projects.
 
         Notes:
-            - Flushes but does not commit; performs no writes.
+            - Performs no writes and does not commit.
         """
         ...
 
@@ -256,7 +256,34 @@ class TaskManagementRepository(Protocol):
                 completion timestamp.
 
         Notes:
-            - Flushes but does not commit; performs no writes.
+            - Performs no writes and does not commit.
+        """
+        ...
+
+    async def today_progress(
+        self,
+        user_id: int,
+        start: datetime,
+        end: datetime,
+    ) -> tuple[int, int]:
+        """
+        Count all and completed tasks due within a time window.
+
+        Purpose:
+            Build the "today" progress summary from UTC bounds of the user's
+            local day.
+
+        Args:
+            user_id: Owner identifier.
+            start: Inclusive lower bound for ``tasks.due_at``.
+            end: Exclusive upper bound for ``tasks.due_at``.
+
+        Returns:
+            tuple[int, int]: Total non-deleted task count and the subset with a
+                completion timestamp.
+
+        Notes:
+            - Performs no writes and does not commit.
         """
         ...
 
@@ -306,7 +333,7 @@ class TaskManagementRepository(Protocol):
             Sequence[Label]: Non-deleted labels in display order.
 
         Notes:
-            - Flushes but does not commit; performs no writes.
+            - Performs no writes and does not commit.
         """
         ...
 
@@ -357,7 +384,7 @@ class TaskManagementRepository(Protocol):
                 identifiers are omitted.
 
         Notes:
-            - Flushes but does not commit; performs no writes.
+            - Performs no writes and does not commit.
         """
         ...
 
@@ -385,7 +412,7 @@ class TaskManagementRepository(Protocol):
                 case-insensitive name.
 
         Notes:
-            - Flushes but does not commit; performs no writes.
+            - Performs no writes and does not commit.
         """
         ...
 
@@ -445,6 +472,6 @@ class TaskManagementRepository(Protocol):
                 without a project.
 
         Notes:
-            - Flushes but does not commit; performs no writes.
+            - Performs no writes and does not commit.
         """
         ...

@@ -351,6 +351,45 @@ class SqlAlchemyTaskManagementRepository:
         total, completed = result.one()
         return int(total), int(completed)
 
+    async def today_progress(
+        self,
+        user_id: int,
+        start: datetime,
+        end: datetime,
+    ) -> tuple[int, int]:
+        """
+        Count all and completed tasks due within a time window.
+
+        Purpose:
+            Build the "today" progress summary from UTC bounds of the user's
+            local day.
+
+        Args:
+            user_id: Owner identifier.
+            start: Inclusive lower bound for ``tasks.due_at``.
+            end: Exclusive upper bound for ``tasks.due_at``.
+
+        Returns:
+            tuple[int, int]: Total non-deleted task count and the subset with a
+                completion timestamp.
+
+        Notes:
+            - Performs no writes and does not commit.
+        """
+        result = await self._session.execute(
+            select(
+                func.count(Task.id),
+                func.count(Task.id).filter(Task.completed_at.is_not(None)),
+            ).where(
+                Task.user_id == user_id,
+                Task.due_at >= start,
+                Task.due_at < end,
+                Task.deleted_at.is_(None),
+            )
+        )
+        total, completed = result.one()
+        return int(total), int(completed)
+
     async def soft_delete_project(
         self,
         project: Project,
@@ -381,8 +420,16 @@ class SqlAlchemyTaskManagementRepository:
               their locks and retry slots.
             - Does not commit; the request dependency owns the transaction.
         """
-        project.deleted_at = deleted_at
-        project.deletion_batch_id = batch_id
+        await self._session.execute(
+            update(Project)
+            .where(
+                Project.id == project.id,
+                Project.user_id == project.user_id,
+                Project.deleted_at.is_(None),
+            )
+            .values(deleted_at=deleted_at, deletion_batch_id=batch_id)
+            .execution_options(synchronize_session=False)
+        )
 
         task_ids = select(Task.id).where(
             Task.project_id == project.id,

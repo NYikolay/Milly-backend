@@ -323,15 +323,16 @@ async def test_archive_sets_archived_at() -> None:
 
 async def test_archive_keeps_existing_archive_timestamp() -> None:
     """Archiving an already archived project does not move its timestamp."""
+    older = datetime(2026, 10, 1, 8, 0, tzinfo=UTC)
     repository = make_repository()
-    project = make_project(archived_at=NOW)
+    project = make_project(archived_at=older)
     repository.get_project.return_value = project
 
     service = make_service(repository)
 
     await service.archive(USER_ID, project.id)
 
-    assert project.archived_at == NOW
+    assert project.archived_at == older
 
 
 async def test_unarchive_clears_archived_at() -> None:
@@ -386,8 +387,6 @@ async def test_delete_soft_deletes_project_with_batch_and_cancels_deliveries() -
     assert call.args[0] is project
     assert isinstance(call.args[1], UUID)
     assert call.args[2] == NOW
-    assert project.deletion_batch_id == call.args[1]
-    assert project.deleted_at == NOW
     repository.get_project.assert_awaited_once_with(USER_ID, project.id, for_update=True)
 
 
