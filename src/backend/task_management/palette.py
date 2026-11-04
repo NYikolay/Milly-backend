@@ -2,16 +2,17 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from backend.core.errors import BadRequestError, ConflictError
+from backend.core.errors import BadRequestError, ConflictError, NotFoundError
 from backend.models.color_palette import ColorPalette
 from backend.task_management.ports import TaskManagementRepository
 
 _COLOR_UNAVAILABLE = "Color is not available"
+_COLOR_NOT_FOUND = "Palette color not found"
 _LAST_ACTIVE_COLOR = "At least one active color is required"
 
 
 class PaletteService:
-    """Resolve selectable palette colors and protect the last active color."""
+    """Resolve palette colors for selection and display and protect the last active color."""
 
     def __init__(self, repository: TaskManagementRepository) -> None:
         """
@@ -49,6 +50,31 @@ class PaletteService:
             (color for color in colors if color.is_active),
             key=lambda color: (color.sort_order, color.id),
         )
+
+    async def get_color(self, color_id: int) -> ColorPalette:
+        """
+        Load a palette color for display.
+
+        Purpose:
+            Return the stored color of an existing project or label even when
+            the palette entry is no longer active.
+
+        Args:
+            color_id: Palette color identifier.
+
+        Returns:
+            ColorPalette: The matching color regardless of its active state.
+
+        Raises:
+            NotFoundError: If the color does not exist.
+
+        Notes:
+            - Performs no writes and does not commit.
+        """
+        color = await self._repository.get_palette_color(color_id)
+        if color is None:
+            raise NotFoundError(_COLOR_NOT_FOUND)
+        return color
 
     async def resolve_for_write(self, color_id: int | None) -> ColorPalette:
         """

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from backend.core.errors import BadRequestError, ConflictError, ErrorCode
+from backend.core.errors import BadRequestError, ConflictError, ErrorCode, NotFoundError
 from backend.models.color_palette import ColorPalette
 from backend.task_management.palette import PaletteService
 from backend.task_management.ports import TaskManagementRepository
@@ -133,6 +133,33 @@ async def test_ensure_active_rejects_inactive_color() -> None:
 
     with pytest.raises(BadRequestError):
         await service.ensure_active(4)
+
+
+async def test_get_color_returns_inactive_color_for_display() -> None:
+    """Display reads return a stored color even after it was deactivated."""
+    repository = make_repository()
+    color = make_color(color_id=5, sort_order=5, is_active=False)
+    repository.get_palette_color.return_value = color
+
+    service = PaletteService(repository)
+
+    result = await service.get_color(5)
+
+    assert result is color
+    repository.get_palette_color.assert_awaited_once_with(5)
+
+
+async def test_get_color_rejects_missing_color() -> None:
+    """A missing stored color is reported as a not-found error."""
+    repository = make_repository()
+    repository.get_palette_color.return_value = None
+
+    service = PaletteService(repository)
+
+    with pytest.raises(NotFoundError) as error:
+        await service.get_color(99)
+
+    assert error.value.code is ErrorCode.NOT_FOUND
 
 
 async def test_ensure_can_deactivate_rejects_last_active_color() -> None:
