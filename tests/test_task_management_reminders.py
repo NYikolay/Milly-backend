@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, time, timedelta
 
+import pytest
+
 from backend.models.task import Task
 from backend.models.task_reminder import TaskReminder
 from backend.task_management.enums import ReminderKind
@@ -13,6 +15,7 @@ from tests.task_management_fakes import (
     make_delivery,
     make_project,
     make_reminder,
+    make_series,
     make_task,
 )
 
@@ -433,3 +436,140 @@ async def test_pending_delivery_with_future_retry_is_skipped() -> None:
     assert delivery.status == "pending"
     assert delivery.next_attempt_at == fixed_now() + timedelta(minutes=5)
     assert reminder.next_run_at == datetime(2026, 11, 4, 9, 0, tzinfo=UTC)
+
+
+async def test_rollback_of_middle_candidate_still_processes_third() -> None:
+    """A rollback for one candidate does not abort the remaining loop."""
+    repository = FakeTaskManagementRepository()
+    seed_telegram(repository)
+    first = repository.insert_task(
+        make_task(
+            task_id=1,
+            title="First",
+            due_at=fixed_now() + timedelta(days=1),
+            reminders_enabled=True,
+        )
+    )
+    second = repository.insert_task(
+        make_task(
+            task_id=2,
+            title="Second",
+            due_at=fixed_now() + timedelta(days=1),
+            reminders_enabled=True,
+        )
+    )
+    third = repository.insert_task(
+        make_task(
+            task_id=3,
+            title="Third",
+            due_at=fixed_now() + timedelta(days=1),
+            reminders_enabled=True,
+        )
+    )
+    for index, task in enumerate((first, second, third), start=1):
+        repository.insert_reminder(
+            make_reminder(
+                reminder_id=index,
+                task_id=task.id,
+                kind=ReminderKind.SCHEDULED,
+                offset_minutes=None,
+                interval_days=1,
+                time_of_day=time(9 + index, 0),
+                timezone="UTC",
+                next_run_at=datetime(2026, 11, 4, 9 + index, 0, tzinfo=UTC),
+            )
+        )
+    repository.task_errors.add(second.id)
+    sender = FakeSender()
+    dispatcher = make_dispatcher(repository, sender)
+
+    sent = await dispatcher.dispatch_due()
+
+    assert sent == 2
+    assert sender.calls == [
+        (TELEGRAM_ID, "Напоминание: First"),
+        (TELEGRAM_ID, "Напоминание: Third"),
+    ]
+    assert repository.rollbacks == 1
+    assert sorted(delivery.reminder_id for delivery in repository.deliveries.values()) == [1, 3]
+
+
+async def test_disabled_series_toggle_cancels_instance_delivery() -> None:
+    """An overdue instance reminder stops when its parent series toggle is off."""
+    repository = FakeTaskManagementRepository()
+    seed_telegram(repository)
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=fixed_now().date(),
+            reminders_enabled=False,
+        )
+    )
+    task = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=fixed_now() - timedelta(days=1),
+            reminders_enabled=True,
+        )
+    )
+    reminder = repository.insert_reminder(
+        make_reminder(
+            reminder_id=1,
+            task_id=task.id,
+            kind=ReminderKind.SCHEDULED,
+            offset_minutes=None,
+            interval_days=1,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+            next_run_at=fixed_now() - timedelta(minutes=5),
+        )
+    )
+    sender = FakeSender()
+    dispatcher = make_dispatcher(repository, sender)
+
+    sent = await dispatcher.dispatch_due()
+
+    assert sent == 0
+    assert sender.calls == []
+    assert repository.deliveries[1].status == "cancelled"
+    assert reminder.next_run_at is None
+
+
+async def test_sent_mark_is_committed_before_slot_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slot update failure after sending does not cause a duplicate message."""
+    repository = FakeTaskManagementRepository()
+    _, reminder = make_scheduled_reminder(repository)
+    original_update = repository.update_reminder_next_run_at
+    calls = 0
+
+    async def flaky_update(
+        target: TaskReminder,
+        next_run_at: datetime | None,
+    ) -> None:
+        """Fail the first slot update and accept later attempts."""
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("slot update failed")
+        await original_update(target, next_run_at)
+
+    monkeypatch.setattr(repository, "update_reminder_next_run_at", flaky_update)
+    sender = FakeSender()
+    dispatcher = make_dispatcher(repository, sender)
+
+    sent = await dispatcher.dispatch_due()
+
+    assert sent == 0
+    assert sender.calls == [(TELEGRAM_ID, "Напоминание: Task Title")]
+    assert repository.deliveries[1].status == "sent"
+    assert repository.rollbacks == 1
+
+    resumed = await dispatcher.dispatch_due()
+
+    assert resumed == 0
+    assert len(sender.calls) == 1
+    assert reminder.next_run_at == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)

@@ -1454,15 +1454,15 @@ class TaskManagementRepository(Protocol):
         Commit the current transaction.
 
         Purpose:
-            Release the reminder claim before sending so the delivery lease is
-            visible to other workers.
+            Persist a reminder delivery or generation step before continuing so
+            locks are released and earlier work survives later failures.
 
         Returns:
             None: The transaction is committed.
 
         Notes:
-            - Only the dispatcher calls this explicitly; all other repository
-              methods flush without committing.
+            - The dispatcher and ``SeriesService.generate`` call this explicitly;
+              all other repository methods flush without committing.
         """
         ...
 

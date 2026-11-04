@@ -614,3 +614,27 @@ async def test_task_list_rejects_max_date_with_bad_request_envelope(app: FastAPI
     body = response.json()
     assert body["code"] == "bad_request"
     assert body["request_id"] == response.headers["x-request-id"]
+
+
+async def test_task_list_rejects_min_date_in_positive_offset_zone(app: FastAPI) -> None:
+    """The first calendar date maps to a 400 instead of an internal error."""
+    repository = FakeTaskManagementRepository()
+    repository.user_timezones[1] = "Europe/Moscow"
+    palette = PaletteService(repository)
+    series = SeriesService(
+        repository,
+        ProjectService(repository, palette, clock=fixed_now),
+        LabelService(repository, palette, clock=fixed_now),
+        clock=fixed_now,
+    )
+    service = TaskService(repository, series, clock=fixed_now)
+    app.dependency_overrides[get_task_service] = lambda: service
+    app.dependency_overrides[get_current_access] = lambda: _claims()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/v1/tasks", params={"date": "0001-01-01"})
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "bad_request"
+    assert body["request_id"] == response.headers["x-request-id"]

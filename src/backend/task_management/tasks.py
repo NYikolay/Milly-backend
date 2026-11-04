@@ -115,16 +115,16 @@ class TaskService:
         date_end: datetime | None = None
         if filters.date is not None:
             zone = await self._user_timezone(user_id)
-            date_start = localize_wall_time(filters.date, time(0, 0), zone)
             try:
+                date_start = localize_wall_time(filters.date, time(0, 0), zone)
                 next_local_date = filters.date + timedelta(days=1)
+                date_end = localize_wall_time(
+                    next_local_date,
+                    time(0, 0),
+                    zone,
+                )
             except OverflowError as error:
                 raise BadRequestError(_INVALID_DATE_RANGE) from error
-            date_end = localize_wall_time(
-                next_local_date,
-                time(0, 0),
-                zone,
-            )
         tasks = await self._repository.list_tasks(
             user_id,
             date_start=date_start,

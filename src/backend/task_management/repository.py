@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfoNotFoundError
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.core.errors import BadRequestError
 from backend.models.color_palette import ColorPalette
 from backend.models.label import Label
 from backend.models.project import Project
@@ -1362,7 +1363,7 @@ class SqlAlchemyTaskManagementRepository:
                         due_at=task.due_at,
                         now=now,
                     )
-                except (ZoneInfoNotFoundError, ValueError):  # fmt: skip
+                except (ZoneInfoNotFoundError, ValueError, BadRequestError):  # fmt: skip
                     reminder.next_run_at = None
         await self._session.flush()
 
@@ -2118,14 +2119,14 @@ class SqlAlchemyTaskManagementRepository:
         Commit the current transaction.
 
         Purpose:
-            Release the reminder claim before sending so the delivery lease is
-            visible to other workers.
+            Persist a reminder delivery or generation step before continuing so
+            locks are released and earlier work survives later failures.
 
         Returns:
             None: The transaction is committed.
 
         Notes:
-            - Only the dispatcher calls this explicitly.
+            - The dispatcher and ``SeriesService.generate`` call this explicitly.
         """
         await self._session.commit()
 

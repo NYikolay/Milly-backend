@@ -381,15 +381,22 @@ class ReminderDispatcher:
               fifth failed attempt marks the delivery failed.
             - Before-due reminders clear ``next_run_at`` after a successful or
               final failed delivery.
+            - The next slot is computed before sending; a successful send is
+              committed before the slot update so a later slot failure cannot
+              cause a second message.
             - Every delivery outcome commits so earlier work survives a later
               failure; unexpected errors roll back and continue with the next
-              reminder.
+              reminder without touching expired ORM objects.
         """
         now = self._clock()
         sent = 0
-        for candidate in await self._repository.list_due_reminders(now):
+        candidates = [
+            (reminder.id, reminder.user_id)
+            for reminder in await self._repository.list_due_reminders(now)
+        ]
+        for reminder_id, _user_id in candidates:
             try:
-                reminder = await self._repository.claim_due_reminder(candidate.id, now)
+                reminder = await self._repository.claim_due_reminder(reminder_id, now)
                 if reminder is None or reminder.next_run_at is None:
                     await self._repository.commit()
                     continue
@@ -453,6 +460,7 @@ class ReminderDispatcher:
                     await self._repository.commit()
                     continue
 
+                next_slot = next_reminder_slot(reminder, current=scheduled_for, now=now)
                 await self._repository.mark_delivery_sending(delivery, now)
                 await self._repository.commit()
                 chat_id = await self._repository.get_telegram_id(reminder.user_id)
@@ -464,7 +472,7 @@ class ReminderDispatcher:
                     )
                     await self._repository.update_reminder_next_run_at(
                         reminder,
-                        next_reminder_slot(reminder, current=scheduled_for, now=now),
+                        next_slot,
                     )
                     await self._repository.commit()
                     continue
@@ -485,17 +493,15 @@ class ReminderDispatcher:
                     continue
 
                 await self._repository.mark_delivery_sent(delivery, now, message_id)
-                await self._repository.update_reminder_next_run_at(
-                    reminder,
-                    next_reminder_slot(reminder, current=scheduled_for, now=now),
-                )
+                await self._repository.commit()
+                await self._repository.update_reminder_next_run_at(reminder, next_slot)
                 await self._repository.commit()
                 sent += 1
             except Exception as error:
                 await self._repository.rollback()
                 logger.warning(
                     "task.reminder_dispatch_failed",
-                    reminder_id=candidate.id,
+                    reminder_id=reminder_id,
                     error=type(error).__name__,
                 )
         return sent
@@ -505,9 +511,9 @@ class ReminderDispatcher:
         Resolve the owner title when a claimed reminder may still be delivered.
 
         Purpose:
-            Recheck the task or series and its project after the row lock so a
-            concurrent completion, toggle, archive, or deletion cannot send a
-            stale reminder.
+            Recheck the task or series, the parent series toggle, and the
+            project after the row lock so a concurrent completion, toggle,
+            archive, or deletion cannot send a stale reminder.
 
         Args:
             reminder: Reminder claimed for delivery.
@@ -525,6 +531,13 @@ class ReminderDispatcher:
                 task.project_id,
             ):
                 return None
+            if task.series_id is not None:
+                series = await self._repository.get_series(
+                    reminder.user_id,
+                    task.series_id,
+                )
+                if series is None or not series.reminders_enabled:
+                    return None
             return task.title
         if reminder.series_id is not None:
             series = await self._repository.get_series(reminder.user_id, reminder.series_id)

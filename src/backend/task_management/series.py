@@ -485,6 +485,8 @@ class SeriesService:
               by another worker is skipped until the next run.
             - Commits after each series so a later failure does not roll back
               earlier successful work and row locks are released promptly.
+            - Candidate ids are snapshotted before processing so rollback does
+              not require touching expired ORM objects.
             - Unexpected per-series errors roll back and continue with the next
               series.
             - Idempotent for slots already present in the repository.
@@ -494,11 +496,15 @@ class SeriesService:
         """
         created = 0
         horizon = now + timedelta(days=HORIZON_DAYS)
-        for candidate in await self._repository.list_series_for_generation(now):
+        candidates = [
+            (series.id, series.user_id)
+            for series in await self._repository.list_series_for_generation(now)
+        ]
+        for series_id, series_user_id in candidates:
             try:
                 series = await self._repository.claim_series_for_generation(
-                    candidate.id,
-                    candidate.user_id,
+                    series_id,
+                    series_user_id,
                 )
                 if series is None:
                     await self._repository.commit()
@@ -518,7 +524,7 @@ class SeriesService:
                 await self._repository.rollback()
                 logger.warning(
                     "task.series_generation_failed",
-                    series_id=candidate.id,
+                    series_id=series_id,
                     error=type(error).__name__,
                 )
         return created

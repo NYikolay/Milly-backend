@@ -535,19 +535,26 @@ async def test_delete_series_cancels_overdue_instance_reminders_and_keeps_histor
 
 
 async def test_generation_continues_after_one_series_fails_unexpectedly() -> None:
-    """A claim failure for one series rolls back only that series."""
+    """A middle-series rollback does not block the series after it."""
     repository = FakeTaskManagementRepository()
-    bad = repository.insert_series(
+    first = repository.insert_series(
         make_series(
             series_id=1,
             time_of_day=time(9, 0),
             starts_on=fixed_now().date(),
         )
     )
-    good = repository.insert_series(
+    bad = repository.insert_series(
         make_series(
             series_id=2,
             time_of_day=time(10, 0),
+            starts_on=fixed_now().date(),
+        )
+    )
+    third = repository.insert_series(
+        make_series(
+            series_id=3,
+            time_of_day=time(11, 0),
             starts_on=fixed_now().date(),
         )
     )
@@ -559,7 +566,10 @@ async def test_generation_continues_after_one_series_fails_unexpectedly() -> Non
     assert created > 0
     assert repository.rollbacks == 1
     assert repository.commits >= 1
-    assert {task.series_id for task in repository.tasks.values()} == {good.id}
+    assert {task.series_id for task in repository.tasks.values()} == {
+        first.id,
+        third.id,
+    }
 
 
 async def test_create_series_rejects_aware_time_of_day_at_service_boundary() -> None:

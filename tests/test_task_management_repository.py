@@ -613,3 +613,36 @@ async def test_get_telegram_id_reads_the_linked_profile() -> None:
     assert telegram_id == 99
     assert "telegram_profiles.telegram_id" in sql
     assert "telegram_profiles.user_id = 7" in sql
+
+
+async def test_resume_project_reminders_clears_slot_on_datetime_overflow() -> None:
+    """An extreme stored reminder is cleared instead of failing unarchive."""
+    from datetime import UTC
+
+    from backend.task_management.enums import ReminderKind
+    from tests.task_management_fakes import make_reminder, make_task
+
+    task = make_task(
+        task_id=4,
+        project_id=PROJECT_ID,
+        due_at=datetime.min.replace(tzinfo=UTC),
+        reminders_enabled=True,
+    )
+    reminder = make_reminder(
+        reminder_id=2,
+        task_id=task.id,
+        kind=ReminderKind.BEFORE_DUE,
+        offset_minutes=1,
+    )
+    session = RecordingSession(
+        results=[
+            RecordingResult(values=[]),
+            RecordingResult(values=[task]),
+            RecordingResult(values=[reminder]),
+        ]
+    )
+    repository = make_repository(session)
+
+    await repository.resume_project_reminders(USER_ID, PROJECT_ID, NOW)
+
+    assert reminder.next_run_at is None
