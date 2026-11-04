@@ -1,0 +1,424 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock
+from uuid import UUID
+
+import pytest
+
+from backend.core.errors import BadRequestError, ConflictError, ErrorCode, NotFoundError
+from backend.models.color_palette import ColorPalette
+from backend.models.project import Project
+from backend.task_management.palette import PaletteService
+from backend.task_management.ports import TaskManagementRepository
+from backend.task_management.projects import (
+    ProjectProgress,
+    ProjectService,
+    ProjectSummary,
+)
+
+NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
+USER_ID = 7
+
+
+def clock() -> datetime:
+    """Return the fixed service clock."""
+    return NOW
+
+
+def make_repository() -> AsyncMock:
+    """Build an async repository double constrained to the task-management port."""
+    return AsyncMock(spec=TaskManagementRepository)
+
+
+def make_color(*, color_id: int = 1) -> ColorPalette:
+    """Build a palette color with deterministic values."""
+    return ColorPalette(
+        id=color_id,
+        slug=f"color-{color_id}",
+        name=f"Color {color_id}",
+        hex="#000000",
+        sort_order=color_id,
+        is_active=True,
+    )
+
+
+def make_project(
+    *,
+    project_id: int = 1,
+    name: str = "Work",
+    color_id: int = 1,
+    archived_at: datetime | None = None,
+) -> Project:
+    """Build a user project with deterministic values."""
+    return Project(
+        id=project_id,
+        user_id=USER_ID,
+        name=name,
+        description=None,
+        color_id=color_id,
+        icon=None,
+        archived_at=archived_at,
+        deleted_at=None,
+        deletion_batch_id=None,
+    )
+
+
+def make_service(repository: AsyncMock) -> ProjectService:
+    """Build a project service with the fixed clock and real palette rules."""
+    return ProjectService(repository, PaletteService(repository), clock=clock)
+
+
+async def _return_project(project: Project) -> Project:
+    """Return the project passed to the repository double."""
+    return project
+
+
+async def test_list_returns_progress_and_palette_color() -> None:
+    """Project summaries include task progress and the assigned palette color."""
+    repository = make_repository()
+    project = make_project()
+    color = make_color()
+    repository.list_projects.return_value = [project]
+    repository.project_progress.return_value = (5, 2)
+    repository.get_palette_color.return_value = color
+
+    service = make_service(repository)
+
+    result = await service.list(USER_ID, include_archived=False)
+
+    assert result == [
+        ProjectSummary(
+            project=project,
+            progress=ProjectProgress(total=5, completed=2, remaining=3),
+            color=color,
+        ),
+    ]
+    repository.list_projects.assert_awaited_once_with(USER_ID, include_archived=False)
+    repository.project_progress.assert_awaited_once_with(USER_ID, project.id)
+
+
+async def test_list_hides_archived_projects_unless_requested() -> None:
+    """Archived projects disappear from active lists but remain available."""
+    repository = make_repository()
+    active = make_project(project_id=1, name="Active")
+    archived = make_project(project_id=2, name="Archived", archived_at=NOW)
+    color = make_color()
+
+    async def list_projects(user_id: int, *, include_archived: bool) -> list[Project]:
+        """Mimic the repository archive filter."""
+        assert user_id == USER_ID
+        return [active, archived] if include_archived else [active]
+
+    repository.list_projects.side_effect = list_projects
+    repository.project_progress.return_value = (0, 0)
+    repository.get_palette_color.return_value = color
+
+    service = make_service(repository)
+
+    active_result = await service.list(USER_ID, include_archived=False)
+    all_result = await service.list(USER_ID, include_archived=True)
+
+    assert [summary.project for summary in active_result] == [active]
+    assert [summary.project for summary in all_result] == [active, archived]
+
+
+async def test_get_returns_project() -> None:
+    """An owned project is returned by id."""
+    repository = make_repository()
+    project = make_project()
+    repository.get_project.return_value = project
+
+    service = make_service(repository)
+
+    result = await service.get(USER_ID, project.id)
+
+    assert result is project
+    repository.get_project.assert_awaited_once_with(USER_ID, project.id, for_update=False)
+
+
+async def test_get_cross_user_project_raises_not_found() -> None:
+    """Another user's project is indistinguishable from a missing project."""
+    repository = make_repository()
+    repository.get_project.return_value = None
+
+    service = make_service(repository)
+
+    with pytest.raises(NotFoundError) as error:
+        await service.get(USER_ID, 999)
+
+    assert error.value.code is ErrorCode.NOT_FOUND
+
+
+async def test_create_trims_name_and_uses_default_color() -> None:
+    """Project creation strips the name and resolves the default active color."""
+    repository = make_repository()
+    color = make_color()
+    repository.project_name_exists.return_value = False
+    repository.get_default_palette_color.return_value = color
+    repository.add_project.side_effect = _return_project
+
+    service = make_service(repository)
+
+    result = await service.create(
+        USER_ID,
+        name="  Work  ",
+        description="Description",
+        color_id=None,
+        icon="briefcase-business",
+    )
+
+    assert result.user_id == USER_ID
+    assert result.name == "Work"
+    assert result.description == "Description"
+    assert result.color_id == color.id
+    assert result.icon == "briefcase-business"
+    repository.project_name_exists.assert_awaited_once_with(USER_ID, "Work")
+    repository.get_default_palette_color.assert_awaited_once_with()
+    repository.add_project.assert_awaited_once_with(result)
+
+
+async def test_create_rejects_empty_name() -> None:
+    """A project name that is empty after trimming is rejected."""
+    repository = make_repository()
+
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError) as error:
+        await service.create(USER_ID, name="   ", description=None, color_id=None, icon=None)
+
+    assert error.value.code is ErrorCode.BAD_REQUEST
+    repository.add_project.assert_not_awaited()
+
+
+async def test_create_rejects_duplicate_active_name() -> None:
+    """A duplicate active project name raises a conflict."""
+    repository = make_repository()
+    repository.project_name_exists.return_value = True
+
+    service = make_service(repository)
+
+    with pytest.raises(ConflictError) as error:
+        await service.create(USER_ID, name="Work", description=None, color_id=None, icon=None)
+
+    assert str(error.value) == "Project name already exists"
+    repository.add_project.assert_not_awaited()
+
+
+async def test_update_changes_trimmed_name_and_clears_optional_fields() -> None:
+    """Project updates trim names and clear optional fields when explicitly None."""
+    repository = make_repository()
+    project = make_project()
+    project.description = "Old"
+    project.icon = "leaf"
+    new_color = make_color(color_id=2)
+    repository.get_project.return_value = project
+    repository.project_name_exists.return_value = False
+    repository.get_palette_color.return_value = new_color
+
+    service = make_service(repository)
+
+    result = await service.update(
+        USER_ID,
+        project.id,
+        name="  Renamed  ",
+        description=None,
+        color_id=new_color.id,
+        icon=None,
+    )
+
+    assert result is project
+    assert project.name == "Renamed"
+    assert project.description is None
+    assert project.icon is None
+    assert project.color_id == new_color.id
+    repository.project_name_exists.assert_awaited_once_with(
+        USER_ID,
+        "Renamed",
+        exclude_project_id=project.id,
+    )
+    repository.get_palette_color.assert_awaited_once_with(new_color.id)
+
+
+async def test_update_keeps_omitted_optional_fields() -> None:
+    """Omitted description and icon values keep their current project values."""
+    repository = make_repository()
+    project = make_project()
+    project.description = "Keep"
+    project.icon = "leaf"
+    repository.get_project.return_value = project
+
+    service = make_service(repository)
+
+    await service.update(USER_ID, project.id)
+
+    assert project.description == "Keep"
+    assert project.icon == "leaf"
+
+
+async def test_update_cannot_move_to_inactive_color() -> None:
+    """Moving a project to an inactive palette color is rejected."""
+    repository = make_repository()
+    project = make_project(color_id=1)
+    repository.get_project.return_value = project
+    repository.get_palette_color.return_value = ColorPalette(
+        id=9,
+        slug="inactive",
+        name="Inactive",
+        hex="#000000",
+        sort_order=9,
+        is_active=False,
+    )
+
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError) as error:
+        await service.update(USER_ID, project.id, color_id=9)
+
+    assert error.value.code is ErrorCode.BAD_REQUEST
+    assert project.color_id == 1
+
+
+async def test_update_rejects_empty_name() -> None:
+    """An update name that is empty after trimming is rejected."""
+    repository = make_repository()
+    project = make_project()
+    repository.get_project.return_value = project
+
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError):
+        await service.update(USER_ID, project.id, name="  ")
+
+
+async def test_update_rejects_duplicate_name() -> None:
+    """An update cannot take a name used by another active project."""
+    repository = make_repository()
+    project = make_project()
+    repository.get_project.return_value = project
+    repository.project_name_exists.return_value = True
+
+    service = make_service(repository)
+
+    with pytest.raises(ConflictError) as error:
+        await service.update(USER_ID, project.id, name="Other")
+
+    assert str(error.value) == "Project name already exists"
+
+
+async def test_archive_sets_archived_at() -> None:
+    """Archiving records the injected current time."""
+    repository = make_repository()
+    project = make_project()
+    repository.get_project.return_value = project
+
+    service = make_service(repository)
+
+    result = await service.archive(USER_ID, project.id)
+
+    assert result is project
+    assert project.archived_at == NOW
+    repository.get_project.assert_awaited_once_with(USER_ID, project.id, for_update=True)
+
+
+async def test_archive_keeps_existing_archive_timestamp() -> None:
+    """Archiving an already archived project does not move its timestamp."""
+    repository = make_repository()
+    project = make_project(archived_at=NOW)
+    repository.get_project.return_value = project
+
+    service = make_service(repository)
+
+    await service.archive(USER_ID, project.id)
+
+    assert project.archived_at == NOW
+
+
+async def test_unarchive_clears_archived_at() -> None:
+    """Unarchiving a project makes it active again."""
+    repository = make_repository()
+    project = make_project(archived_at=NOW)
+    repository.get_project.return_value = project
+    repository.project_name_exists.return_value = False
+
+    service = make_service(repository)
+
+    result = await service.unarchive(USER_ID, project.id)
+
+    assert result is project
+    assert project.archived_at is None
+    repository.project_name_exists.assert_awaited_once_with(
+        USER_ID,
+        project.name,
+        exclude_project_id=project.id,
+    )
+
+
+async def test_unarchive_rejects_name_conflict_with_active_project() -> None:
+    """Unarchiving a project whose name is active elsewhere raises a conflict."""
+    repository = make_repository()
+    project = make_project(name="Work", archived_at=NOW)
+    repository.get_project.return_value = project
+    repository.project_name_exists.return_value = True
+
+    service = make_service(repository)
+
+    with pytest.raises(ConflictError) as error:
+        await service.unarchive(USER_ID, project.id)
+
+    assert str(error.value) == "Project name already exists"
+    assert project.archived_at == NOW
+
+
+async def test_delete_soft_deletes_project_with_batch_and_cancels_deliveries() -> None:
+    """Deleting a project uses one batch and delegates cascade and cancellation."""
+    repository = make_repository()
+    project = make_project()
+    repository.get_project.return_value = project
+
+    service = make_service(repository)
+
+    await service.delete(USER_ID, project.id)
+
+    repository.soft_delete_project.assert_awaited_once()
+    call = repository.soft_delete_project.await_args
+    assert call is not None
+    assert call.args[0] is project
+    assert isinstance(call.args[1], UUID)
+    assert call.args[2] == NOW
+    assert project.deletion_batch_id == call.args[1]
+    assert project.deleted_at == NOW
+    repository.get_project.assert_awaited_once_with(USER_ID, project.id, for_update=True)
+
+
+async def test_stats_returns_active_archived_and_planned_counts() -> None:
+    """Dashboard statistics combine project counts with planned tasks."""
+    repository = make_repository()
+
+    async def count_projects(user_id: int, *, archived: bool) -> int:
+        """Mimic active and archived project counts."""
+        assert user_id == USER_ID
+        return 1 if archived else 3
+
+    repository.count_projects.side_effect = count_projects
+    repository.planned_tasks_count.return_value = 4
+
+    service = make_service(repository)
+
+    result = await service.stats(USER_ID)
+
+    assert result == {"active": 3, "archived": 1, "planned": 4}
+    repository.planned_tasks_count.assert_awaited_once_with(USER_ID)
+
+
+async def test_delete_cross_user_project_raises_not_found() -> None:
+    """Another user's project cannot be deleted."""
+    repository = make_repository()
+    repository.get_project.return_value = None
+
+    service = make_service(repository)
+
+    with pytest.raises(NotFoundError):
+        await service.delete(USER_ID, 999)
+
+    repository.soft_delete_project.assert_not_awaited()
