@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 
@@ -11,6 +11,7 @@ from backend.task_management.labels import LabelService
 from backend.task_management.palette import PaletteService
 from backend.task_management.projects import ProjectService
 from backend.task_management.reminders import ReminderDispatcher, ReminderInput
+from backend.task_management.schedule import HORIZON_DAYS
 from backend.task_management.series import SeriesService
 from backend.task_management.tasks import TaskFilters, TaskService
 from tests.task_management_fakes import (
@@ -22,12 +23,13 @@ from tests.task_management_fakes import (
 USER_ID = 7
 SECOND_REMINDER_AT = datetime(2026, 11, 6, 8, 30, tzinfo=UTC)
 THIRD_REMINDER_AT = datetime(2026, 11, 7, 8, 30, tzinfo=UTC)
+POST_HORIZON_NOW = fixed_now() + timedelta(days=HORIZON_DAYS + 1)
 REMINDER_TEXT = "Напоминание: Daily review"
 
 
 def make_services(
     repository: FakeTaskManagementRepository,
-) -> tuple[ProjectService, SeriesService, TaskService]:
+) -> tuple[PaletteService, ProjectService, SeriesService, TaskService]:
     """
     Build the real task-management services over the shared fake repository.
 
@@ -39,21 +41,22 @@ def make_services(
         repository: In-memory repository double shared by all services.
 
     Returns:
-        tuple[ProjectService, SeriesService, TaskService]: Project, series, and
-            task services wired with the fixed test clock.
+        tuple[PaletteService, ProjectService, SeriesService, TaskService]:
+            Palette, project, series, and task services wired with the fixed
+            test clock.
     """
     palette = PaletteService(repository)
     projects = ProjectService(repository, palette, clock=fixed_now)
     labels = LabelService(repository, palette, clock=fixed_now)
     series = SeriesService(repository, projects, labels, clock=fixed_now)
     tasks = TaskService(repository, series, clock=fixed_now)
-    return projects, series, tasks
+    return palette, projects, series, tasks
 
 
 async def test_daily_series_lifecycle_end_to_end() -> None:
     """Drive a daily series through generation, reminders, archive, and delete."""
     repository = FakeTaskManagementRepository()
-    projects, series_service, task_service = make_services(repository)
+    palette, projects, series_service, task_service = make_services(repository)
 
     color = repository.insert_color(
         ColorPalette(
@@ -66,7 +69,7 @@ async def test_daily_series_lifecycle_end_to_end() -> None:
     )
     project = await projects.create(USER_ID, name="Work", color_id=color.id)
 
-    assert color.is_active is True
+    assert [item.slug for item in await palette.list_active()] == ["default", "ocean"]
     assert project.color_id == color.id
 
     series = await series_service.create(
@@ -77,7 +80,7 @@ async def test_daily_series_lifecycle_end_to_end() -> None:
         time_of_day=time(9, 0),
         timezone="UTC",
         starts_on=date(2026, 11, 4),
-        ends_on=date(2026, 11, 7),
+        ends_on=None,
         project_id=project.id,
         label_ids=(),
         reminders_enabled=True,
@@ -88,15 +91,14 @@ async def test_daily_series_lifecycle_end_to_end() -> None:
         key=lambda task: task.due_at,
     )
 
-    assert [task.due_at for task in tasks] == [
+    assert [task.due_at for task in tasks[:3]] == [
         datetime(2026, 11, 5, 9, 0, tzinfo=UTC),
         datetime(2026, 11, 6, 9, 0, tzinfo=UTC),
         datetime(2026, 11, 7, 9, 0, tzinfo=UTC),
     ]
-    assert await series_service.generate(fixed_now()) == 0
-    assert len(repository.tasks) == 3
+    assert len(tasks) == HORIZON_DAYS
 
-    first, second, third = tasks
+    first, second, third = tasks[:3]
     completed = await task_service.complete(USER_ID, first.id)
 
     assert completed.task.completed_at == fixed_now()
@@ -142,8 +144,8 @@ async def test_daily_series_lifecycle_end_to_end() -> None:
             reminder.next_run_at is None
             for reminder in await repository.list_task_reminders(USER_ID, task.id)
         )
-    assert await series_service.generate(fixed_now()) == 0
-    assert len(repository.tasks) == 3
+    assert await series_service.generate(POST_HORIZON_NOW) == 0
+    assert len(repository.tasks) == HORIZON_DAYS
     paused_sender = FakeSender()
     paused_dispatcher = ReminderDispatcher(
         repository,
@@ -157,6 +159,9 @@ async def test_daily_series_lifecycle_end_to_end() -> None:
     restored = await projects.unarchive(USER_ID, project.id)
 
     assert restored.archived_at is None
+    created = await series_service.generate(POST_HORIZON_NOW)
+    assert created == HORIZON_DAYS
+    assert len(repository.tasks) == HORIZON_DAYS * 2
     third_reminder = (await repository.list_task_reminders(USER_ID, third.id))[0]
     assert third_reminder.next_run_at == THIRD_REMINDER_AT
 
@@ -182,7 +187,7 @@ async def test_daily_series_lifecycle_end_to_end() -> None:
     assert pending.status == "cancelled"
     assert pending.locked_at is None
     assert pending.next_attempt_at is None
-    assert all(task.deleted_at == fixed_now() for task in tasks)
+    assert all(task.deleted_at == fixed_now() for task in repository.tasks.values())
     assert series.deleted_at == fixed_now()
     assert await task_service.list(USER_ID, TaskFilters()) == []
     assert await series_service.list(USER_ID) == []
