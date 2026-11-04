@@ -29,6 +29,7 @@ from backend.task_management.reminders import (
 from backend.task_management.schedule import HORIZON_DAYS, daily_due_times
 
 _SERIES_NOT_FOUND = "Series not found"
+_LABEL_NOT_FOUND = "Label not found"
 _TITLE_REQUIRED = "Series title is required"
 _INVALID_TIMEZONE = "Invalid timezone"
 _INVALID_RANGE = "Series end date must not be before the start date"
@@ -880,16 +881,15 @@ class SeriesService:
 
         Raises:
             NotFoundError: If any label does not exist for this user.
+
+        Notes:
+            - Performs one batch ownership and existence query.
         """
-        owned: list[int] = []
-        seen: set[int] = set()
-        for label_id in label_ids:
-            label: Label = await self._label_service.get(user_id, label_id)
-            if label.id in seen:
-                continue
-            seen.add(label.id)
-            owned.append(label.id)
-        return tuple(owned)
+        unique_ids = tuple(dict.fromkeys(label_ids))
+        labels = await self._label_service.list_by_ids(user_id, unique_ids)
+        if len(labels) != len(unique_ids):
+            raise NotFoundError(_LABEL_NOT_FOUND)
+        return unique_ids
 
     def _normalize_title(self, title: str) -> str:
         """

@@ -637,6 +637,38 @@ async def test_update_project_clears_description_and_icon_with_explicit_null(
     ]
 
 
+async def test_create_project_rejects_too_long_description(
+    project_client: AsyncClient,
+    fake_project_service: FakeProjectService,
+) -> None:
+    """Reject a description longer than 5000 characters on creation."""
+    response = await project_client.post(
+        "/api/v1/projects",
+        json={"name": "Work", "description": "x" * 5001},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+    assert fake_project_service.created == []
+
+
+async def test_update_project_rejects_too_long_description(
+    project_client: AsyncClient,
+    fake_project_service: FakeProjectService,
+) -> None:
+    """Reject a description longer than 5000 characters on update."""
+    fake_project_service.add_summary(_summary())
+
+    response = await project_client.patch(
+        "/api/v1/projects/1",
+        json={"description": "x" * 5001},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+    assert fake_project_service.updated == []
+
+
 @pytest.mark.parametrize("payload", [{"name": "Work", "icon": "x" * 33}])
 async def test_create_project_rejects_long_icon(
     project_client: AsyncClient,

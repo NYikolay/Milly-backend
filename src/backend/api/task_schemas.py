@@ -39,7 +39,7 @@ class ProjectCreate(BaseModel):
     """Fields accepted when creating a project."""
 
     name: str = Field(min_length=1, max_length=120)
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=5000)
     color_id: int | None = Field(default=None, gt=0)
     icon: str | None = Field(default=None, max_length=32)
 
@@ -71,7 +71,7 @@ class ProjectUpdate(BaseModel):
     """Optional fields accepted when updating a project."""
 
     name: str | None = Field(default=None, min_length=1, max_length=120)
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=5000)
     color_id: int | None = Field(default=None, gt=0)
     icon: str | None = Field(default=None, max_length=32)
 
@@ -435,11 +435,11 @@ class TaskCreate(BaseModel):
     """Fields accepted when creating a one-off task."""
 
     title: str = Field(min_length=1, max_length=120)
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=5000)
     priority: Priority = Priority.NEITHER
     due_at: datetime
     project_id: int | None = Field(default=None, gt=0)
-    label_ids: list[int] = Field(default_factory=list)
+    label_ids: list[int] = Field(default_factory=list, max_length=100)
     reminders_enabled: bool = False
     reminders: list[ReminderInputSchema] = Field(default_factory=list)
 
@@ -496,11 +496,11 @@ class TaskUpdate(BaseModel):
     """Optional fields accepted when updating a task."""
 
     title: str | None = Field(default=None, min_length=1, max_length=120)
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=5000)
     priority: Priority | None = None
     due_at: datetime | None = None
     project_id: int | None = Field(default=None, gt=0)
-    label_ids: list[int] | None = None
+    label_ids: list[int] | None = Field(default=None, max_length=100)
     reminders_enabled: bool | None = None
     reminders: list[ReminderInputSchema] | None = None
 
@@ -647,14 +647,14 @@ class SeriesCreate(BaseModel):
     """Fields accepted when creating a daily recurring series."""
 
     title: str = Field(min_length=1, max_length=120)
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=5000)
     priority: Priority = Priority.NEITHER
     time_of_day: time
     timezone: str = Field(min_length=1, max_length=64)
     starts_on: Date
     ends_on: Date | None = None
     project_id: int | None = Field(default=None, gt=0)
-    label_ids: list[int] = Field(default_factory=list)
+    label_ids: list[int] = Field(default_factory=list, max_length=100)
     reminders_enabled: bool = False
     reminders: list[ReminderInputSchema] = Field(default_factory=list)
 
@@ -758,14 +758,14 @@ class SeriesUpdate(BaseModel):
     """Optional fields accepted when updating a recurring series."""
 
     title: str | None = Field(default=None, min_length=1, max_length=120)
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=5000)
     priority: Priority | None = None
     time_of_day: time | None = None
     timezone: str | None = Field(default=None, min_length=1, max_length=64)
     starts_on: Date | None = None
     ends_on: Date | None = None
     project_id: int | None = Field(default=None, gt=0)
-    label_ids: list[int] | None = None
+    label_ids: list[int] | None = Field(default=None, max_length=100)
     reminders_enabled: bool | None = None
     reminders: list[ReminderInputSchema] | None = None
 

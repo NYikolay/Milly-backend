@@ -85,6 +85,30 @@ class LabelService:
             raise NotFoundError(_LABEL_NOT_FOUND)
         return label
 
+    async def list_by_ids(
+        self,
+        user_id: int,
+        label_ids: Sequence[int],
+    ) -> Sequence[Label]:
+        """
+        Load multiple owned labels in one query.
+
+        Purpose:
+            Validate a label selection before assigning it to tasks or series.
+
+        Args:
+            user_id: Owner identifier.
+            label_ids: Label identifiers to resolve.
+
+        Returns:
+            Sequence[Label]: Matching non-deleted owned labels; unknown or
+                soft-deleted identifiers are omitted.
+
+        Notes:
+            - Performs no writes and does not commit.
+        """
+        return await self._repository.get_labels_by_ids(user_id, label_ids)
+
     async def create(
         self,
         user_id: int,

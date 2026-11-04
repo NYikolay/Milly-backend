@@ -92,6 +92,7 @@ class FakeTaskManagementRepository:
         self.task_labels: set[tuple[int, int]] = set()
         self.series_labels: set[tuple[int, int]] = set()
         self.batch_calls: list[tuple[str, tuple[int, ...]]] = []
+        self.label_batch_calls: list[tuple[tuple[int, ...],]] = []
         self.bulk_calls: list[str] = []
         self.due_reminder_limits: list[int] = []
         self.commits = 0
@@ -419,7 +420,8 @@ class FakeTaskManagementRepository:
         user_id: int,
         label_ids: Sequence[int],
     ) -> Sequence[Label]:
-        """Return matching non-deleted owned labels."""
+        """Record the batch and return matching non-deleted owned labels."""
+        self.label_batch_calls.append((tuple(label_ids),))
         return [
             self.labels[label_id]
             for label_id in label_ids

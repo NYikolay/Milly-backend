@@ -205,6 +205,62 @@ async def test_create_series_returns_schedule_and_generated_metadata(
     assert [item.kind for item in recorded["reminders"]] == [ReminderKind.SCHEDULED]
 
 
+async def test_series_create_rejects_too_many_labels(series_client: AsyncClient) -> None:
+    """Reject more than 100 label identifiers on series creation."""
+    response = await series_client.post(
+        "/api/v1/task-series",
+        json={
+            "title": "Many",
+            "time_of_day": "09:00:00",
+            "timezone": "UTC",
+            "starts_on": "2026-11-04",
+            "label_ids": list(range(1, 102)),
+        },
+    )
+
+    assert response.status_code == 422
+
+
+async def test_series_update_rejects_too_many_labels(series_client: AsyncClient) -> None:
+    """Reject more than 100 label identifiers on series update."""
+    response = await series_client.patch(
+        "/api/v1/task-series/1",
+        json={"label_ids": list(range(1, 102))},
+    )
+
+    assert response.status_code == 422
+
+
+async def test_series_create_rejects_too_long_description(
+    series_client: AsyncClient,
+) -> None:
+    """Reject a description longer than 5000 characters on series creation."""
+    response = await series_client.post(
+        "/api/v1/task-series",
+        json={
+            "title": "Long",
+            "time_of_day": "09:00:00",
+            "timezone": "UTC",
+            "starts_on": "2026-11-04",
+            "description": "x" * 5001,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+async def test_series_update_rejects_too_long_description(
+    series_client: AsyncClient,
+) -> None:
+    """Reject a description longer than 5000 characters on series update."""
+    response = await series_client.patch(
+        "/api/v1/task-series/1",
+        json={"description": "x" * 5001},
+    )
+
+    assert response.status_code == 422
+
+
 async def test_list_series_returns_details(
     series_client: AsyncClient,
     fake_series_service: FakeSeriesService,

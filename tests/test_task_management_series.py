@@ -126,6 +126,32 @@ async def test_generation_copies_snapshot_fields_and_label_ids() -> None:
     assert [item.id for item in await repository.list_task_labels(USER_ID, first.id)] == [label.id]
 
 
+async def test_series_label_validation_uses_one_batch_query() -> None:
+    """Validate a deduplicated label selection with one repository call."""
+    repository = FakeTaskManagementRepository()
+    repository.insert_label(make_label(label_id=1))
+    repository.insert_label(make_label(label_id=2))
+    service = make_service(repository)
+
+    series = await service.create(
+        USER_ID,
+        title="Daily",
+        description=None,
+        priority=Priority.NEITHER,
+        time_of_day=time(9, 0),
+        timezone="UTC",
+        starts_on=fixed_now().date(),
+        ends_on=None,
+        project_id=None,
+        label_ids=(1, 1, 2),
+        reminders_enabled=False,
+        reminders=(),
+    )
+
+    assert repository.label_batch_calls == [((1, 2),)]
+    assert repository.series_labels == {(series.id, 1), (series.id, 2)}
+
+
 async def test_generation_is_idempotent_for_an_existing_slot() -> None:
     """Generation skips a slot already present for the series."""
     repository = FakeTaskManagementRepository()

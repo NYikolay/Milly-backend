@@ -267,6 +267,54 @@ async def test_create_task_returns_reminders_and_next_run(
     ]
 
 
+async def test_task_create_rejects_too_many_labels(task_client: AsyncClient) -> None:
+    """Reject more than 100 label identifiers on task creation."""
+    response = await task_client.post(
+        "/api/v1/tasks",
+        json={
+            "title": "Many",
+            "due_at": "2026-11-04T09:00:00Z",
+            "label_ids": list(range(1, 102)),
+        },
+    )
+
+    assert response.status_code == 422
+
+
+async def test_task_update_rejects_too_many_labels(task_client: AsyncClient) -> None:
+    """Reject more than 100 label identifiers on task update."""
+    response = await task_client.patch(
+        "/api/v1/tasks/1",
+        json={"label_ids": list(range(1, 102))},
+    )
+
+    assert response.status_code == 422
+
+
+async def test_task_create_rejects_too_long_description(task_client: AsyncClient) -> None:
+    """Reject a description longer than 5000 characters on task creation."""
+    response = await task_client.post(
+        "/api/v1/tasks",
+        json={
+            "title": "Long",
+            "due_at": "2026-11-04T09:00:00Z",
+            "description": "x" * 5001,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+async def test_task_update_rejects_too_long_description(task_client: AsyncClient) -> None:
+    """Reject a description longer than 5000 characters on task update."""
+    response = await task_client.patch(
+        "/api/v1/tasks/1",
+        json={"description": "x" * 5001},
+    )
+
+    assert response.status_code == 422
+
+
 async def test_list_tasks_passes_all_filters(
     task_client: AsyncClient,
     fake_task_service: FakeTaskService,
