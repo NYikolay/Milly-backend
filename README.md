@@ -15,13 +15,15 @@ backend/
 │   ├── api/                 # роутеры, зависимости и Pydantic-схемы
 │   │   ├── errors/          # схемы, нормализация валидации, маппинг,
 │   │   │                    # обработчики, middleware, OpenAPI-класс роутов
-│   │   └── routes/          # health.py, auth.py
+│   │   └── routes/          # health, auth, palette, projects, labels,
+│   │                        # tasks, task-series
 │   ├── admin/               # SQLAdmin: вьюхи, вход, монтирование
 │   ├── auth/                # initData, JWT, refresh-сессии и cookie
 │   ├── core/                # настройки, логирование, middleware
 │   │   └── errors.py        # коды ошибок и исключения
 │   ├── db/                  # engine/session, declarative base, readiness
-│   ├── models/              # User, TelegramProfile, AuthSession
+│   ├── models/              # ORM: auth и управление задачами
+│   ├── task_management/     # сервисы, репозиторий и правила задач
 │   └── tasks/               # broker, worker, scheduler, генерация и доставка
 ├── tests/                   # unit-тесты без инфраструктуры
 ├── compose.yml              # production-подобный стек
@@ -31,9 +33,11 @@ backend/
 ```
 
 Правило зависимостей: `main.py` собирает приложение и подключает роутеры;
-`api` и `auth` зависят от `core`, `db` и `models`; `tasks` — от `db`,
-`core` и `task_management`; `db` — от `core`. `auth` не импортирует `api`. `api.errors`
-зависит от `core.errors` и FastAPI; `core.errors` не импортирует `api`.
+`api` зависит от `core`, `db`, `models`, `auth` и `task_management`; `auth`,
+`db` и `task_management` зависят от `core`; `task_management` также использует
+`models`; `tasks` — от `db`, `core` и `task_management`. `auth` не импортирует
+`api`. `api.errors` зависит от `core.errors` и FastAPI; `core.errors` не
+импортирует `api`.
 
 ## Быстрый старт
 
@@ -250,6 +254,111 @@ forwarded-заголовкам и соответствующая настрой�
 `AUTH_REFRESH_COOKIE_SAMESITE=none`. Реальные значения не коммитятся: их
 задают через окружение или secret manager.
 
+## Управление задачами
+
+Все маршруты находятся под `API_V1_STR` (по умолчанию `/api/v1`) и требуют
+access-токен в `Authorization: Bearer`. Ошибки используют общий конверт из
+раздела «Ошибки API». Часовой пояс пользователя, по которому считаются
+локальные дни и слоты `scheduled`-напоминаний, хранится в профиле:
+
+```text
+PATCH /api/v1/auth/me/timezone
+{"timezone": "Europe/Moscow"}
+200 {... "timezone": "Europe/Moscow" ...}
+```
+
+### Палитра
+
+`GET /api/v1/color-palette` возвращает только активные цвета, упорядоченные по
+`sort_order` и `id`. Проекты и метки хранят `color_id` и продолжают отдавать
+выбранный цвет даже после деактивации записи палитры; деактивировать или
+удалить последний активный цвет нельзя (`409 conflict`).
+
+### Проекты
+
+| Метод | Путь | Назначение |
+| --- | --- | --- |
+| `GET` | `/api/v1/projects?include_archived=false` | список проектов с прогрессом и цветом |
+| `POST` | `/api/v1/projects` | создать проект (`201`) |
+| `GET` | `/api/v1/projects/{project_id}` | один проект |
+| `PATCH` | `/api/v1/projects/{project_id}` | частично обновить |
+| `POST` | `/api/v1/projects/{project_id}/archive` | архивировать |
+| `POST` | `/api/v1/projects/{project_id}/unarchive` | вернуть из архива |
+| `DELETE` | `/api/v1/projects/{project_id}` | soft-delete (`204`) |
+
+Архив скрывает проект из списков по умолчанию, останавливает генерацию его
+серий и доставку напоминаний. Unarchive заново рассчитывает будущие слоты от
+текущего времени без догоняющих отправок. Удаление помечает проект, его серии
+и задачи удалёнными и отменяет активные доставки.
+
+### Метки
+
+| Метод | Путь | Назначение |
+| --- | --- | --- |
+| `GET` | `/api/v1/labels` | список меток с цветом |
+| `POST` | `/api/v1/labels` | создать метку (`201`) |
+| `PATCH` | `/api/v1/labels/{label_id}` | частично обновить |
+| `DELETE` | `/api/v1/labels/{label_id}` | soft-delete, идемпотентно (`204`) |
+
+### Задачи
+
+| Метод | Путь | Назначение |
+| --- | --- | --- |
+| `GET` | `/api/v1/tasks` | список задач с фильтрами |
+| `POST` | `/api/v1/tasks` | создать разовую задачу (`201`) |
+| `GET` | `/api/v1/tasks/{task_id}` | одна задача |
+| `PATCH` | `/api/v1/tasks/{task_id}` | частично обновить |
+| `POST` | `/api/v1/tasks/{task_id}/complete` | завершить |
+| `POST` | `/api/v1/tasks/{task_id}/uncomplete` | вернуть в работу |
+| `DELETE` | `/api/v1/tasks/{task_id}` | удалить (`204`) |
+
+Фильтры списка: `date` (локальный день пользователя), `project_ids`,
+`priorities`, `status` (`all`, `open`, `completed`, `overdue`), `recurrence`
+(`all`, `regular`, `one_off`), `q` и `include_archived_projects`. Повторяемые
+параметры передаются несколько раз, например
+`?project_ids=1&project_ids=2&priorities=urgent_important`.
+
+Завершение экземпляра серии останавливает напоминания только этого экземпляра
+и не завершает серию. `PATCH` экземпляра серии применяет изменения к серии и её
+будущим незавершённым экземплярам; `DELETE` экземпляра удаляет серию по
+правилам ниже.
+
+### Повторяющиеся серии
+
+| Метод | Путь | Назначение |
+| --- | --- | --- |
+| `GET` | `/api/v1/task-series` | список серий с метками и шаблонами напоминаний |
+| `POST` | `/api/v1/task-series` | создать серию (`201`) |
+| `GET` | `/api/v1/task-series/{series_id}` | одна серия |
+| `PATCH` | `/api/v1/task-series/{series_id}` | частично обновить |
+| `DELETE` | `/api/v1/task-series/{series_id}` | удалить (`204`) |
+
+Поддерживается только ежедневная повторяемость: `frequency` всегда `daily`.
+Серия задаёт локальное время `time_of_day`, IANA-часовой пояс `timezone`,
+начальную дату `starts_on` и необязательную включающую конечную дату `ends_on`.
+
+- При создании серии экземпляры генерируются начиная со следующего будущего
+  наступления и до горизонта **90 дней**; прошедшие даты не бэкфиллятся.
+- Если первое наступление находится за горизонтом, создаётся ровно один
+  экземпляр на эту дату.
+- `generated_through` содержит время последнего сгенерированного экземпляра.
+- Периодическая задача `generate_task_series` идемпотентно догенерирует
+  недостающие экземпляры в пределах горизонта.
+- Изменение расписания пересоздаёт будущие незавершённые экземпляры; прошлые и
+  завершённые экземпляры сохраняют снимок полей.
+- Удаление серии скрывает её и будущие незавершённые экземпляры, но сохраняет
+  историю прошедших и завершённых задач.
+
+### Напоминания
+
+Поддерживаются правила `before_due` (`offset_minutes`) и `scheduled`
+(`interval_days` и `time_of_day`); на задачу или серию допускается не более
+одного правила каждого вида. Экземпляры серии получают копии шаблонных правил.
+`dispatch_task_reminders` доставляет наступившие напоминания идемпотентно по
+ключу `(reminder_id, scheduled_for)`: повторный запуск не отправляет то же
+напоминание дважды. Неудачная отправка повторяется с экспоненциальной паузой,
+после пятой неудачи доставка помечается как `failed`.
+
 ## Админка
 
 SQLAdmin доступна по `/admin` и включается, когда одновременно заданы
@@ -315,8 +424,9 @@ poetry run alembic upgrade head --sql
 Планировщик запускает две фоновые задачи:
 
 - `generate_task_series` — каждые 15 минут (`*/15 * * * *`, schedule_id
-  `task-series-generation`) догенерирует будущие экземпляры повторяющихся
-  серий; пишет в лог `task.series_generated` с количеством созданных задач.
+  `task-series-generation`) идемпотентно догенерирует будущие экземпляры
+  ежедневных серий в горизонт 90 дней; пишет в лог `task.series_generated` с
+  количеством созданных задач.
 - `dispatch_task_reminders` — каждую минуту (`* * * * *`, schedule_id
   `reminder-delivery`) отправляет наступившие напоминания в Telegram и
   обновляет состояние доставки; пишет в лог `task.reminders_dispatched` с
@@ -392,8 +502,8 @@ docker compose config --quiet
 
 ## Ограничения скелета
 
-- Нет email, frontend и бизнес-моделей; `models/` содержит только `User`,
-  `TelegramProfile` и `AuthSession`.
+- Нет email, frontend и AI-интеграций; `models/` содержит auth-модели и модели
+  управления задачами, а `PROVIDER_*` пока не используются.
 - Scheduler не HA: допускается ровно одна реплика.
 - PgBouncer работает в transaction mode; asyncpg использует отключённые
   prepared statement caches.
