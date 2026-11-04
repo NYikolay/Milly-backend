@@ -123,9 +123,10 @@ class ProjectResponse(BaseModel):
 
 
 class ProjectListResponse(BaseModel):
-    """Projects visible to the authenticated user."""
+    """Projects visible to the authenticated user with a next-page cursor."""
 
     items: list[ProjectResponse]
+    next_cursor: str | None = None
 
 
 class LabelCreate(BaseModel):
@@ -572,9 +573,10 @@ class TaskResponse(BaseModel):
 
 
 class TaskListResponse(BaseModel):
-    """Filtered tasks visible to the authenticated user."""
+    """Filtered tasks visible to the authenticated user with a next-page cursor."""
 
     items: list[TaskResponse]
+    next_cursor: str | None = None
 
 
 class TaskFiltersQuery(BaseModel):
