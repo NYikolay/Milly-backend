@@ -280,7 +280,9 @@ class TaskService:
 
         Notes:
             - For a series instance only future incomplete instances change.
-            - Due-time or reminder changes rebuild the affected reminder rows.
+            - Due-time, reminder, or re-enabled master-toggle changes rebuild
+              the affected reminder rows from the current time.
+            - Disabling the master toggle clears reminder slots.
             - Locks the task row and does not commit.
         """
         task = await self._require_task(user_id, task_id, for_update=True)
@@ -318,10 +320,15 @@ class TaskService:
                 user_id,
                 owned_label_ids,
             )
+        toggle_changed = (
+            reminders_enabled is not None and reminders_enabled != task.reminders_enabled
+        )
         if reminders_enabled is not None:
             task.reminders_enabled = reminders_enabled
 
-        if due_changed or reminders is not None:
+        if toggle_changed and not reminders_enabled:
+            await self._repository.cancel_task_reminders(user_id, task.id)
+        elif due_changed or reminders is not None or (toggle_changed and reminders_enabled):
             await self._rebuild_task_reminders(
                 user_id,
                 task,

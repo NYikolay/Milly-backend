@@ -443,3 +443,18 @@ async def test_palette_color_is_used_checks_projects_and_labels() -> None:
     assert "projects.color_id = 4" in sql
     assert "EXISTS (SELECT labels.id" in sql
     assert "labels.color_id = 4" in sql
+
+
+async def test_claim_series_for_generation_uses_skip_locked() -> None:
+    """Generation claims lock the tenant-scoped series row without blocking."""
+    session = RecordingSession(results=[RecordingResult(scalar=None)])
+    repository = make_repository(session)
+
+    result = await repository.claim_series_for_generation(3, USER_ID)
+    sql = compile_statement(session.statements[-1])
+
+    assert result is None
+    assert "task_series.id = 3" in sql
+    assert "task_series.user_id = 7" in sql
+    assert "task_series.deleted_at IS NULL" in sql
+    assert "FOR UPDATE SKIP LOCKED" in sql

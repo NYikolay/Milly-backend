@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime, time, timedelta
 import pytest
 
 from backend.core.errors import ErrorCode, NotFoundError
-from backend.task_management.enums import Priority
+from backend.task_management.enums import Priority, ReminderKind
 from backend.task_management.labels import LabelService
 from backend.task_management.palette import PaletteService
 from backend.task_management.projects import ProjectService
@@ -15,6 +15,7 @@ from tests.task_management_fakes import (
     fixed_now,
     make_label,
     make_project,
+    make_reminder,
     make_series,
     make_task,
 )
@@ -277,3 +278,135 @@ async def test_get_cross_user_series_raises_not_found() -> None:
         await service.get(USER_ID, 999)
 
     assert error.value.code is ErrorCode.NOT_FOUND
+
+
+async def test_timezone_edit_retargets_template_and_instance_reminders() -> None:
+    """Changing only the series timezone retargets reminders to the new zone."""
+    repository = FakeTaskManagementRepository()
+    project = repository.insert_project(make_project())
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            project_id=project.id,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    template = repository.insert_reminder(
+        make_reminder(
+            reminder_id=1,
+            series_id=series.id,
+            kind=ReminderKind.SCHEDULED,
+            offset_minutes=None,
+            interval_days=1,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+            next_run_at=None,
+        )
+    )
+    old_future = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            project_id=project.id,
+            due_at=fixed_now() + timedelta(days=1),
+            reminders_enabled=True,
+        )
+    )
+    repository.insert_reminder(
+        make_reminder(
+            reminder_id=2,
+            task_id=old_future.id,
+            kind=ReminderKind.SCHEDULED,
+            offset_minutes=None,
+            interval_days=1,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+            next_run_at=fixed_now() + timedelta(days=1),
+        )
+    )
+    service = make_service(repository)
+
+    updated = await service.update(USER_ID, series.id, timezone="Asia/Tokyo")
+
+    assert updated.timezone == "Asia/Tokyo"
+    assert template.timezone == "Asia/Tokyo"
+    assert old_future.deleted_at == fixed_now()
+    new_tasks = [
+        task
+        for task in repository.tasks.values()
+        if task.series_id == series.id and task.deleted_at is None
+    ]
+    assert new_tasks
+    for task in new_tasks:
+        for reminder in await repository.list_task_reminders(USER_ID, task.id):
+            if reminder.kind == ReminderKind.SCHEDULED.value:
+                assert reminder.timezone == "Asia/Tokyo"
+
+
+async def test_edit_driven_regeneration_refuses_archived_project() -> None:
+    """A schedule edit does not regenerate instances for an archived project."""
+    repository = FakeTaskManagementRepository()
+    project = repository.insert_project(make_project(archived_at=fixed_now()))
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            project_id=project.id,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    service = make_service(repository)
+
+    updated = await service.update(USER_ID, series.id, time_of_day=time(10, 0))
+
+    assert updated.time_of_day == time(10, 0)
+    assert not [
+        task
+        for task in repository.tasks.values()
+        if task.series_id == series.id and task.deleted_at is None
+    ]
+
+
+async def test_generate_skips_series_locked_by_another_worker() -> None:
+    """A series locked by another worker is skipped until the next run."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+            starts_on=fixed_now().date(),
+        )
+    )
+    repository.blocked_series_ids.add(series.id)
+    service = make_service(repository)
+
+    created = await service.generate(fixed_now())
+
+    assert created == 0
+    assert repository.claimed_series_ids == [series.id]
+    assert repository.tasks == {}
+
+
+async def test_generate_skips_archived_projects() -> None:
+    """The periodic generation job never materializes archived project series."""
+    repository = FakeTaskManagementRepository()
+    project = repository.insert_project(make_project(archived_at=fixed_now()))
+    repository.insert_series(
+        make_series(
+            series_id=1,
+            project_id=project.id,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+            starts_on=fixed_now().date(),
+        )
+    )
+    service = make_service(repository)
+
+    created = await service.generate(fixed_now())
+
+    assert created == 0
+    assert repository.tasks == {}

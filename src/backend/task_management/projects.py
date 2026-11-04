@@ -298,6 +298,8 @@ class ProjectService:
 
         Notes:
             - Unarchiving an already active project changes nothing.
+            - The archive-to-active transition recomputes future reminder
+              slots from the current time without catching up missed slots.
             - Locks the project row and does not commit.
         """
         project = await self._require_project(user_id, project_id, for_update=True)
@@ -310,6 +312,11 @@ class ProjectService:
         ):
             raise ConflictError(_PROJECT_NAME_EXISTS)
         project.archived_at = None
+        await self._repository.resume_project_reminders(
+            user_id,
+            project.id,
+            self._clock(),
+        )
         return project
 
     async def delete(self, user_id: int, project_id: int) -> None:

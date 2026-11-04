@@ -846,6 +846,40 @@ class TaskManagementRepository(Protocol):
         """
         ...
 
+    async def resume_project_reminders(
+        self,
+        user_id: int,
+        project_id: int,
+        now: datetime,
+    ) -> None:
+        """
+        Recompute reminder slots for a project after unarchiving.
+
+        Purpose:
+            Resume delivery when an archived project becomes active again
+            without backfilling slots missed while it was paused.
+
+        Args:
+            user_id: Owner identifier.
+            project_id: Project identifier.
+            now: Current instant used as the lower bound for scheduled slots.
+
+        Returns:
+            None: The changes stay in the current unit of work.
+
+        Notes:
+            - Template series reminders are retargeted to the series timezone
+              and keep ``next_run_at=None``.
+            - Future incomplete task reminders are recomputed: before-due
+              slots come from ``due_at`` and become ``None`` when past;
+              scheduled slots advance to the first suitable slot after
+              ``now``.
+            - Cancelled deliveries are left for the dispatcher to reactivate
+              when their recomputed slot becomes current.
+            - Flushes but does not commit.
+        """
+        ...
+
     async def project_is_active(self, user_id: int, project_id: int) -> bool:
         """
         Check whether a project is active.
@@ -1041,6 +1075,33 @@ class TaskManagementRepository(Protocol):
 
         Notes:
             - Performs no writes and does not commit.
+        """
+        ...
+
+    async def claim_series_for_generation(
+        self,
+        series_id: int,
+        user_id: int,
+    ) -> TaskSeries | None:
+        """
+        Claim a series for generation with a non-blocking row lock.
+
+        Purpose:
+            Serialize overlapping generation workers and concurrent series
+            edits with ``FOR UPDATE SKIP LOCKED``.
+
+        Args:
+            series_id: Series identifier.
+            user_id: Owner identifier.
+
+        Returns:
+            TaskSeries | None: The locked non-deleted series, or ``None`` when
+                another transaction holds the row.
+
+        Notes:
+            - Locks the ``task_series`` row until the transaction ends.
+            - A locked series is skipped until the next generation run.
+            - Flushes but does not commit.
         """
         ...
 

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,8 +19,12 @@ from backend.models.task_label import TaskLabel
 from backend.models.task_reminder import TaskReminder
 from backend.models.task_series import TaskSeries
 from backend.models.user import User
-from backend.task_management.enums import DeliveryStatus
-from backend.task_management.schedule import HORIZON_DAYS
+from backend.task_management.enums import DeliveryStatus, ReminderKind
+from backend.task_management.schedule import (
+    HORIZON_DAYS,
+    before_due_time,
+    first_scheduled_time,
+)
 
 
 class SqlAlchemyTaskManagementRepository:
@@ -1263,6 +1268,113 @@ class SqlAlchemyTaskManagementRepository:
         await self._cancel_reminder_slots(user_id, reminder_ids)
         await self._session.flush()
 
+    async def resume_project_reminders(
+        self,
+        user_id: int,
+        project_id: int,
+        now: datetime,
+    ) -> None:
+        """
+        Recompute reminder slots for a project after unarchiving.
+
+        Purpose:
+            Resume delivery when an archived project becomes active again
+            without backfilling slots missed while it was paused.
+
+        Args:
+            user_id: Owner identifier.
+            project_id: Project identifier.
+            now: Current instant used as the lower bound for scheduled slots.
+
+        Returns:
+            None: The changes stay in the current unit of work.
+
+        Notes:
+            - Template series reminders are retargeted to the series timezone
+              and keep ``next_run_at=None``.
+            - Future incomplete task reminders are recomputed: before-due
+              slots come from ``due_at`` and become ``None`` when past;
+              scheduled slots advance to the first suitable slot after
+              ``now``.
+            - Cancelled deliveries are left for the dispatcher to reactivate
+              when their recomputed slot becomes current.
+            - Flushes but does not commit.
+        """
+        series_result = await self._session.execute(
+            select(TaskSeries).where(
+                TaskSeries.user_id == user_id,
+                TaskSeries.project_id == project_id,
+                TaskSeries.deleted_at.is_(None),
+            )
+        )
+        for series in series_result.scalars().all():
+            reminders_result = await self._session.execute(
+                select(TaskReminder).where(
+                    TaskReminder.user_id == user_id,
+                    TaskReminder.series_id == series.id,
+                )
+            )
+            for reminder in reminders_result.scalars().all():
+                reminder.next_run_at = None
+                if reminder.kind == ReminderKind.SCHEDULED.value:
+                    reminder.timezone = series.timezone
+
+        task_result = await self._session.execute(
+            select(Task).where(
+                Task.user_id == user_id,
+                Task.project_id == project_id,
+                Task.deleted_at.is_(None),
+                Task.completed_at.is_(None),
+                Task.due_at > now,
+            )
+        )
+        for task in task_result.scalars().all():
+            reminders_result = await self._session.execute(
+                select(TaskReminder).where(
+                    TaskReminder.user_id == user_id,
+                    TaskReminder.task_id == task.id,
+                )
+            )
+            for reminder in reminders_result.scalars().all():
+                if reminder.kind == ReminderKind.BEFORE_DUE.value:
+                    slot = before_due_time(
+                        due_at=task.due_at,
+                        offset_minutes=reminder.offset_minutes or 0,
+                    )
+                    reminder.next_run_at = slot if slot > now else None
+                elif reminder.kind == ReminderKind.SCHEDULED.value:
+                    timezone = self._reminder_timezone(reminder.timezone)
+                    reminder.next_run_at = first_scheduled_time(
+                        due_at=task.due_at,
+                        time_of_day=reminder.time_of_day or time(0, 0),
+                        timezone=timezone,
+                        interval_days=reminder.interval_days or 1,
+                        now=now,
+                    )
+        await self._session.flush()
+
+    def _reminder_timezone(self, name: str | None) -> ZoneInfo:
+        """
+        Resolve a stored reminder timezone with a UTC fallback.
+
+        Purpose:
+            Keep slot recomputation robust when legacy or corrupt timezone
+            values are encountered.
+
+        Args:
+            name: Stored IANA timezone name, if any.
+
+        Returns:
+            ZoneInfo: The resolved timezone, or UTC when the name is invalid.
+
+        Notes:
+            - Performs no writes.
+        """
+        try:
+            return ZoneInfo(name or "UTC")
+        except ZoneInfoNotFoundError, ValueError:
+            return ZoneInfo("UTC")
+
     async def project_is_active(self, user_id: int, project_id: int) -> bool:
         """
         Check whether a project is active.
@@ -1531,6 +1643,42 @@ class SqlAlchemyTaskManagementRepository:
             .order_by(TaskSeries.id)
         )
         return result.scalars().all()
+
+    async def claim_series_for_generation(
+        self,
+        series_id: int,
+        user_id: int,
+    ) -> TaskSeries | None:
+        """
+        Claim a series for generation with a non-blocking row lock.
+
+        Purpose:
+            Serialize overlapping generation workers and concurrent series
+            edits with ``FOR UPDATE SKIP LOCKED``.
+
+        Args:
+            series_id: Series identifier.
+            user_id: Owner identifier.
+
+        Returns:
+            TaskSeries | None: The locked non-deleted series, or ``None`` when
+                another transaction holds the row.
+
+        Notes:
+            - Locks the ``task_series`` row until the transaction ends.
+            - A locked series is skipped until the next generation run.
+            - Flushes but does not commit.
+        """
+        result = await self._session.execute(
+            select(TaskSeries)
+            .where(
+                TaskSeries.id == series_id,
+                TaskSeries.user_id == user_id,
+                TaskSeries.deleted_at.is_(None),
+            )
+            .with_for_update(skip_locked=True)
+        )
+        return result.scalar_one_or_none()
 
     async def get_series_tasks_for_update(
         self,

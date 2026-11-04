@@ -207,12 +207,11 @@ async def test_list_applies_filters_and_archived_project_visibility() -> None:
         TaskFilters(
             date=date(2026, 11, 4),
             include_archived_projects=True,
-            priorities=(Priority.URGENT_IMPORTANT,),
         ),
     )
 
     assert [detail.task.title for detail in visible] == ["Today"]
-    assert [detail.task.title for detail in all_projects] == ["Today"]
+    assert [detail.task.title for detail in all_projects] == ["Today", "Hidden"]
 
 
 async def test_update_series_task_applies_to_future_incomplete_instances_only() -> None:
@@ -441,3 +440,122 @@ async def test_archive_project_pauses_task_reminders_and_deliveries() -> None:
     assert project.archived_at == fixed_now()
     assert reminder.next_run_at is None
     assert delivery.status == "cancelled"
+
+
+async def test_unarchive_resumes_reminders_without_catching_up() -> None:
+    """Unarchiving recomputes future slots and retargets series templates."""
+    repository = FakeTaskManagementRepository()
+    project = repository.insert_project(make_project(archived_at=fixed_now()))
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            project_id=project.id,
+            time_of_day=time(9, 0),
+            timezone="Asia/Tokyo",
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    template = repository.insert_reminder(
+        make_reminder(
+            reminder_id=1,
+            series_id=series.id,
+            kind=ReminderKind.SCHEDULED,
+            offset_minutes=None,
+            interval_days=1,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+            next_run_at=None,
+        )
+    )
+    future = repository.insert_task(
+        make_task(
+            task_id=1,
+            project_id=project.id,
+            due_at=fixed_now() + timedelta(hours=2),
+            reminders_enabled=True,
+        )
+    )
+    before_due = repository.insert_reminder(
+        make_reminder(
+            reminder_id=2,
+            task_id=future.id,
+            kind=ReminderKind.BEFORE_DUE,
+            offset_minutes=30,
+            next_run_at=None,
+        )
+    )
+    scheduled = repository.insert_reminder(
+        make_reminder(
+            reminder_id=3,
+            task_id=future.id,
+            kind=ReminderKind.SCHEDULED,
+            offset_minutes=None,
+            interval_days=1,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+            next_run_at=None,
+        )
+    )
+    soon = repository.insert_task(
+        make_task(
+            task_id=2,
+            project_id=project.id,
+            due_at=fixed_now() + timedelta(minutes=10),
+            reminders_enabled=True,
+        )
+    )
+    past_before_due = repository.insert_reminder(
+        make_reminder(
+            reminder_id=4,
+            task_id=soon.id,
+            kind=ReminderKind.BEFORE_DUE,
+            offset_minutes=30,
+            next_run_at=None,
+        )
+    )
+    service = ProjectService(
+        repository,
+        PaletteService(repository),
+        clock=fixed_now,
+    )
+
+    await service.unarchive(USER_ID, project.id)
+
+    assert project.archived_at is None
+    assert template.timezone == "Asia/Tokyo"
+    assert template.next_run_at is None
+    assert before_due.next_run_at == future.due_at - timedelta(minutes=30)
+    assert scheduled.next_run_at == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
+    assert past_before_due.next_run_at is None
+
+
+async def test_re_enabling_reminders_rebuilds_slots_from_now() -> None:
+    """Re-enabling the master toggle rebuilds reminder slots from now."""
+    repository = FakeTaskManagementRepository()
+    task = repository.insert_task(
+        make_task(
+            task_id=1,
+            due_at=fixed_now() + timedelta(hours=2),
+            reminders_enabled=False,
+        )
+    )
+    repository.insert_reminder(
+        make_reminder(
+            reminder_id=1,
+            task_id=task.id,
+            kind=ReminderKind.BEFORE_DUE,
+            offset_minutes=30,
+            next_run_at=None,
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(USER_ID, task.id, reminders_enabled=True)
+
+    assert detail.task.reminders_enabled is True
+    assert len(detail.reminders) == 1
+    assert detail.reminders[0].next_run_at == task.due_at - timedelta(minutes=30)
+
+    await service.update(USER_ID, task.id, reminders_enabled=False)
+
+    assert all(reminder.next_run_at is None for reminder in repository.reminders.values())

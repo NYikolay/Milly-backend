@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from backend.models.color_palette import ColorPalette
 from backend.models.label import Label
@@ -13,7 +14,11 @@ from backend.models.task import Task
 from backend.models.task_reminder import TaskReminder
 from backend.models.task_series import TaskSeries
 from backend.task_management.enums import DeliveryStatus, ReminderKind
-from backend.task_management.schedule import HORIZON_DAYS
+from backend.task_management.schedule import (
+    HORIZON_DAYS,
+    before_due_time,
+    first_scheduled_time,
+)
 
 _ACTIVE_DELIVERY_STATUSES = {
     DeliveryStatus.PENDING.value,
@@ -89,6 +94,8 @@ class FakeTaskManagementRepository:
         self.task_labels: set[tuple[int, int]] = set()
         self.series_labels: set[tuple[int, int]] = set()
         self.commits = 0
+        self.claimed_series_ids: list[int] = []
+        self.blocked_series_ids: set[int] = set()
         self._next_ids: dict[str, int] = {}
 
     def _next_id(self, name: str, collection: dict[int, Any]) -> int:
@@ -287,18 +294,26 @@ class FakeTaskManagementRepository:
         """Soft-delete a project, its series, tasks, and active deliveries."""
         project.deleted_at = deleted_at
         project.deletion_batch_id = batch_id
-        reminder_ids: set[int] = set()
+        series_ids: set[int] = set()
+        task_ids: set[int] = set()
         for series in self.series.values():
             if series.project_id == project.id and series.user_id == project.user_id:
                 series.deleted_at = deleted_at
                 series.deletion_batch_id = batch_id
+                series_ids.add(series.id)
         for task in self.tasks.values():
             if task.project_id == project.id and task.user_id == project.user_id:
                 task.deleted_at = deleted_at
                 task.deletion_batch_id = batch_id
-        for reminder in self.reminders.values():
-            reminder_ids.add(reminder.id)
-            reminder.next_run_at = None
+                task_ids.add(task.id)
+        reminder_ids = {
+            reminder.id
+            for reminder in self.reminders.values()
+            if reminder.user_id == project.user_id
+            and (reminder.task_id in task_ids or reminder.series_id in series_ids)
+        }
+        for reminder_id in reminder_ids:
+            self.reminders[reminder_id].next_run_at = None
         self._cancel_deliveries(reminder_ids)
 
     async def list_labels(self, user_id: int) -> Sequence[Label]:
@@ -584,6 +599,52 @@ class FakeTaskManagementRepository:
             self.reminders[reminder_id].next_run_at = None
         self._cancel_deliveries(reminder_ids)
 
+    async def resume_project_reminders(
+        self,
+        user_id: int,
+        project_id: int,
+        now: datetime,
+    ) -> None:
+        """Recompute future reminder slots for a reactivated project."""
+        for series in self.series.values():
+            if (
+                series.user_id != user_id
+                or series.project_id != project_id
+                or series.deleted_at is not None
+            ):
+                continue
+            for reminder in self.reminders.values():
+                if reminder.user_id == user_id and reminder.series_id == series.id:
+                    reminder.next_run_at = None
+                    if reminder.kind == ReminderKind.SCHEDULED.value:
+                        reminder.timezone = series.timezone
+        for task in self.tasks.values():
+            if (
+                task.user_id != user_id
+                or task.project_id != project_id
+                or task.deleted_at is not None
+                or task.completed_at is not None
+                or task.due_at <= now
+            ):
+                continue
+            for reminder in self.reminders.values():
+                if reminder.user_id != user_id or reminder.task_id != task.id:
+                    continue
+                if reminder.kind == ReminderKind.BEFORE_DUE.value:
+                    slot = before_due_time(
+                        due_at=task.due_at,
+                        offset_minutes=reminder.offset_minutes or 0,
+                    )
+                    reminder.next_run_at = slot if slot > now else None
+                elif reminder.kind == ReminderKind.SCHEDULED.value:
+                    reminder.next_run_at = first_scheduled_time(
+                        due_at=task.due_at,
+                        time_of_day=reminder.time_of_day or time(0, 0),
+                        timezone=ZoneInfo(reminder.timezone or "UTC"),
+                        interval_days=reminder.interval_days or 1,
+                        now=now,
+                    )
+
     async def project_is_active(self, user_id: int, project_id: int) -> bool:
         """Return whether a project exists and is neither archived nor deleted."""
         project = self.projects.get(project_id)
@@ -676,6 +737,20 @@ class FakeTaskManagementRepository:
             ),
             key=lambda series: series.id,
         )
+
+    async def claim_series_for_generation(
+        self,
+        series_id: int,
+        user_id: int,
+    ) -> TaskSeries | None:
+        """Return a series for generation unless the fake marks it locked."""
+        self.claimed_series_ids.append(series_id)
+        if series_id in self.blocked_series_ids:
+            return None
+        series = self.series.get(series_id)
+        if series is None or series.user_id != user_id or series.deleted_at is not None:
+            return None
+        return series
 
     async def get_series_tasks_for_update(
         self,

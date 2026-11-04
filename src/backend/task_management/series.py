@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -10,7 +10,7 @@ from backend.models.label import Label
 from backend.models.task import Task
 from backend.models.task_reminder import TaskReminder
 from backend.models.task_series import TaskSeries
-from backend.task_management.enums import Priority, SeriesFrequency
+from backend.task_management.enums import Priority, ReminderKind, SeriesFrequency
 from backend.task_management.labels import LabelService
 from backend.task_management.ports import TaskManagementRepository
 from backend.task_management.projects import ProjectService
@@ -21,7 +21,7 @@ from backend.task_management.reminders import (
     reminder_input_from_row,
     validate_reminder_inputs,
 )
-from backend.task_management.schedule import daily_due_times
+from backend.task_management.schedule import HORIZON_DAYS, daily_due_times
 
 _SERIES_NOT_FOUND = "Series not found"
 _TITLE_REQUIRED = "Series title is required"
@@ -251,11 +251,15 @@ class SeriesService:
         Notes:
             - A schedule change soft-deletes old future incomplete instances
               and regenerates replacements from the current time.
+            - A timezone-only edit retargets template scheduled reminders to
+              the new series zone before regeneration.
+            - Regeneration refuses archived or deleted projects.
             - Other changes update future incomplete snapshots, labels, and
               reminders in place.
-            - Locks the series row and does not commit.
+            - Locks the series row and its task rows, and does not commit.
         """
         series = await self._require_series(user_id, series_id, for_update=True)
+        previous_reminders_enabled = series.reminders_enabled
         normalized_title = self._normalize_title(title) if title is not None else series.title
         zone = self._timezone(timezone) if timezone is not None else ZoneInfo(series.timezone)
         new_starts_on = starts_on if starts_on is not None else series.starts_on
@@ -267,9 +271,13 @@ class SeriesService:
             await self._validate_labels(user_id, label_ids) if label_ids is not None else None
         )
         validated_reminders = validate_reminder_inputs(reminders) if reminders is not None else None
+        timezone_changed = zone.key != series.timezone
+        toggle_changed = (
+            reminders_enabled is not None and reminders_enabled != previous_reminders_enabled
+        )
         schedule_changed = (
             (time_of_day is not None and time_of_day != series.time_of_day)
-            or zone.key != series.timezone
+            or timezone_changed
             or new_starts_on != series.starts_on
             or new_ends_on != series.ends_on
         )
@@ -309,14 +317,20 @@ class SeriesService:
                         timezone_name=series.timezone,
                     )
                 )
+        elif timezone_changed:
+            for template in await self._repository.list_series_reminders(user_id, series.id):
+                if template.kind == ReminderKind.SCHEDULED.value:
+                    template.timezone = series.timezone
 
         now = self._clock()
         if schedule_changed:
-            future_tasks = await self._repository.list_future_series_tasks(
+            locked_tasks = await self._repository.get_series_tasks_for_update(
                 series.id,
                 user_id,
-                now,
             )
+            future_tasks = [
+                task for task in locked_tasks if task.due_at > now and task.completed_at is None
+            ]
             batch_id = uuid4()
             for task in future_tasks:
                 await self._repository.cancel_task_reminders(user_id, task.id)
@@ -335,7 +349,11 @@ class SeriesService:
                 project_id=project_id,
                 label_ids=owned_label_ids,
                 reminders_enabled=reminders_enabled,
-                rebuild_reminders=validated_reminders is not None,
+                rebuild_reminders=(
+                    validated_reminders is not None
+                    or (toggle_changed and reminders_enabled is True)
+                ),
+                cancel_reminders=(toggle_changed and reminders_enabled is False),
             )
         await self._repository.flush()
         return series
@@ -360,16 +378,18 @@ class SeriesService:
         Notes:
             - Cancels reminder deliveries for future instances and template
               reminders, then marks the series and those instances deleted.
-            - Locks the series row and does not commit.
+            - Locks the series row and its task rows, and does not commit.
         """
         series = await self._require_series(user_id, series_id, for_update=True)
         now = self._clock()
         batch_id = uuid4()
-        future_tasks = await self._repository.list_future_series_tasks(
+        locked_tasks = await self._repository.get_series_tasks_for_update(
             series.id,
             user_id,
-            now,
         )
+        future_tasks = [
+            task for task in locked_tasks if task.due_at > now and task.completed_at is None
+        ]
         for task in future_tasks:
             await self._repository.cancel_task_reminders(user_id, task.id)
             await self._repository.soft_delete_task(task, now, batch_id)
@@ -394,12 +414,23 @@ class SeriesService:
         Notes:
             - Selects non-deleted series below the 90-day horizon whose project
               is active.
+            - Claims each series with ``FOR UPDATE SKIP LOCKED``; a series held
+              by another worker is skipped until the next run.
             - Idempotent for slots already present in the repository.
             - Sets ``generated_through`` to the last generated due time, or to
               ``now`` when the series produced no instances.
         """
         created = 0
-        for series in await self._repository.list_series_for_generation(now):
+        horizon = now + timedelta(days=HORIZON_DAYS)
+        for candidate in await self._repository.list_series_for_generation(now):
+            series = await self._repository.claim_series_for_generation(
+                candidate.id,
+                candidate.user_id,
+            )
+            if series is None:
+                continue
+            if series.generated_through is not None and series.generated_through >= horizon:
+                continue
             if series.project_id is not None and not await self._repository.project_is_active(
                 series.user_id,
                 series.project_id,
@@ -427,10 +458,17 @@ class SeriesService:
             BadRequestError: If the stored timezone is no longer valid.
 
         Notes:
+            - Refuses to materialize instances when the series project is
+              archived or deleted.
             - Copies snapshot fields, the series label set, and template
               reminders into every new instance.
             - Flushes through the repository but does not commit.
         """
+        if series.project_id is not None and not await self._repository.project_is_active(
+            series.user_id,
+            series.project_id,
+        ):
+            return 0
         zone = self._timezone(series.timezone)
         due_times = daily_due_times(
             starts_on=series.starts_on,
@@ -542,6 +580,7 @@ class SeriesService:
         label_ids: Sequence[int] | None,
         reminders_enabled: bool | None,
         rebuild_reminders: bool,
+        cancel_reminders: bool,
     ) -> None:
         """
         Update future incomplete instances in place.
@@ -561,22 +600,26 @@ class SeriesService:
             label_ids: New label selection, or ``None`` when unchanged.
             reminders_enabled: New master toggle, or ``None`` when unchanged.
             rebuild_reminders: Whether instance reminders must be regenerated.
+            cancel_reminders: Whether instance reminder slots must be cleared.
 
         Returns:
             None: The changes stay in the current unit of work.
 
         Notes:
             - Locks the future instance rows through the repository query.
+            - Cancellation takes precedence over a rebuild when both are set.
             - Does not commit.
         """
-        future_tasks = await self._repository.list_future_series_tasks(
+        locked_tasks = await self._repository.get_series_tasks_for_update(
             series.id,
             user_id,
-            now,
         )
+        future_tasks = [
+            task for task in locked_tasks if task.due_at > now and task.completed_at is None
+        ]
         template_reminders = (
             await self._repository.list_series_reminders(user_id, series.id)
-            if rebuild_reminders
+            if rebuild_reminders and not cancel_reminders
             else ()
         )
         for task in future_tasks:
@@ -596,7 +639,9 @@ class SeriesService:
                     user_id,
                     label_ids,
                 )
-            if rebuild_reminders:
+            if cancel_reminders:
+                await self._repository.cancel_task_reminders(user_id, task.id)
+            elif rebuild_reminders:
                 await self._repository.cancel_task_reminders(user_id, task.id)
                 await self._repository.delete_task_reminders(user_id, task.id)
                 for template in template_reminders:
