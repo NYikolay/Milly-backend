@@ -488,7 +488,12 @@ docker compose config --quiet
   `LOG_LEVEL`, `LOG_JSON`, `CORS_ORIGINS`, `ALLOWED_HOSTS`;
 - PostgreSQL: `POSTGRES_*`, `DATABASE_URL`, `DIRECT_DATABASE_URL`,
   `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_RECYCLE`,
-  `DB_STATEMENT_TIMEOUT_MS`, `DB_POOL_TIMEOUT_SECONDS`, `SQL_ECHO`;
+  `DB_STATEMENT_TIMEOUT_MS`, `DB_POOL_TIMEOUT_SECONDS`, `SQL_ECHO`.
+  `DB_STATEMENT_TIMEOUT_MS` задаёт и клиентский `command_timeout` asyncpg, и
+  серверный `statement_timeout`. В Compose `DATABASE_URL` идёт через
+  PgBouncer в transaction mode, который игнорирует `statement_timeout` в
+  startup parameters (см. `IGNORE_STARTUP_PARAMETERS` в `compose.yml`),
+  поэтому там действующим ограничением остаётся клиентский `command_timeout`;
 - NATS/taskiq: `NATS_*`, `TASKIQ_RESULT_EX_TIME`, `TASKIQ_KEEP_RESULTS`;
 - Redis: `REDIS_URL`, `REDIS_PASSWORD`, `REDIS_HOST_PORT` (host-порт dev
   Compose, по умолчанию `6380`);

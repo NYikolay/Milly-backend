@@ -22,3 +22,26 @@ def test_database_engine_receives_timeouts(monkeypatch: pytest.MonkeyPatch) -> N
     assert captured["connect_args"]["command_timeout"] == 30.0
     assert captured["connect_args"]["server_settings"]["statement_timeout"] == "30000"
     assert captured["connect_args"]["server_settings"]["application_name"] == "Milly API"
+
+
+def test_database_engine_receives_overridden_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pass overridden statement and pool timeouts to the async engine."""
+    captured: dict[str, Any] = {}
+
+    def fake_create_async_engine(url: str, **kwargs: Any) -> object:
+        captured["url"] = url
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("backend.db.session.create_async_engine", fake_create_async_engine)
+    monkeypatch.setattr("backend.db.session.async_sessionmaker", lambda *args, **kwargs: object())
+    Database(
+        Settings(
+            _env_file=None,
+            db_statement_timeout_ms=1500,
+            db_pool_timeout_seconds=3,
+        )
+    )
+    assert captured["pool_timeout"] == 3
+    assert captured["connect_args"]["command_timeout"] == 1.5
+    assert captured["connect_args"]["server_settings"]["statement_timeout"] == "1500"

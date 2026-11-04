@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import SecretStr, ValidationError
@@ -364,3 +365,15 @@ def test_db_timeout_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(_env_file=None)
     assert settings.db_statement_timeout_ms == 5000
     assert settings.db_pool_timeout_seconds == 3
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["db_statement_timeout_ms", "db_pool_timeout_seconds"],
+)
+@pytest.mark.parametrize("value", [0, -1])
+def test_db_timeouts_must_be_positive(field: str, value: int) -> None:
+    """Reject non-positive database timeout settings."""
+    settings_kwargs: dict[str, Any] = {field: value}
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **settings_kwargs)

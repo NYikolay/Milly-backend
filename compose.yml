@@ -87,7 +87,7 @@ services:
       RESERVE_POOL_SIZE: "5"
       MAX_DB_CONNECTIONS: "40"
       MAX_PREPARED_STATEMENTS: "200"
-      IGNORE_STARTUP_PARAMETERS: extra_float_digits
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits,statement_timeout
     healthcheck:
       test: ["CMD-SHELL", 'pg_isready -h 127.0.0.1 -p 6432 -U "$$DB_USER" -d "$$DB_NAME"']
       interval: 5s
