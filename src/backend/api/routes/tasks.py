@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import Query, Response, status
+from fastapi import Depends, Query, Response, status
 
 from backend.api.deps import CurrentAccessDep, TaskServiceDep
 from backend.api.errors.openapi import StandardizedAPIRouter, document_errors
+from backend.api.pagination import (
+    DEFAULT_PAGE_SIZE,
+    MAX_CURSOR_LENGTH,
+    MAX_PAGE_SIZE,
+    decode_cursor,
+    encode_cursor,
+    filter_fingerprint,
+)
 from backend.api.task_schemas import (
     ReminderResponse,
     TaskCreate,
@@ -15,15 +24,15 @@ from backend.api.task_schemas import (
     TaskResponse,
     TaskUpdate,
 )
-from backend.core.errors import ErrorCode
+from backend.core.errors import BadRequestError, ErrorCode
 from backend.task_management.enums import Priority
-from backend.task_management.tasks import TaskDetail
+from backend.task_management.tasks import TaskDetail, TaskListCursor
 
 router = StandardizedAPIRouter(prefix="/tasks", tags=["tasks"])
 
 _ERRORS = {
     ErrorCode.NOT_FOUND: "The task, project, label, or series does not exist for the user.",
-    ErrorCode.BAD_REQUEST: "A task field or reminder rule is invalid.",
+    ErrorCode.BAD_REQUEST: "A task field, reminder rule, or pagination cursor is invalid.",
     ErrorCode.UNAUTHORIZED: "The bearer token is missing or invalid.",
 }
 
@@ -82,6 +91,92 @@ def _task_changes(payload: TaskUpdate) -> dict[str, Any]:
     return changes
 
 
+def _task_filters(
+    filters: Annotated[TaskFiltersQuery, Query()],
+) -> TaskFiltersQuery:
+    """
+    Resolve task-list filters from the query string.
+
+    Purpose:
+        Keep the query model flattened into individual parameters while the
+        list route also accepts standalone ``limit`` and ``cursor`` parameters.
+
+    Args:
+        filters: Query parameters shared by all task filters.
+
+    Returns:
+        TaskFiltersQuery: The validated filter model.
+    """
+    return filters
+
+
+def _filters_fingerprint(filters: TaskFiltersQuery) -> str:
+    """
+    Build the canonical fingerprint of task-list filters.
+
+    Purpose:
+        Bind a pagination cursor to the exact filter set that produced it.
+
+    Args:
+        filters: Validated task-list query parameters.
+
+    Returns:
+        str: Stable digest of the canonical filter mapping.
+
+    Notes:
+        - ``project_ids`` and ``priorities`` are sorted; ``q`` is unchanged so
+          whitespace and casing keep affecting the fingerprint.
+    """
+    return filter_fingerprint(
+        {
+            "date": filters.date.isoformat() if filters.date is not None else None,
+            "include_archived_projects": filters.include_archived_projects,
+            "priorities": sorted(priority.value for priority in filters.priorities),
+            "project_ids": sorted(filters.project_ids),
+            "q": filters.q,
+            "recurrence": filters.recurrence,
+            "status": filters.status,
+        }
+    )
+
+
+def _task_list_cursor(order_key: list[object]) -> TaskListCursor:
+    """
+    Convert a decoded cursor ordering key into a typed task cursor.
+
+    Purpose:
+        Validate the ordering-key shape and types before querying the next
+        page.
+
+    Args:
+        order_key: Decoded ordering values from the cursor.
+
+    Returns:
+        TaskListCursor: The aware due time and task identifier of the last
+            returned task.
+
+    Raises:
+        BadRequestError: If the key does not contain exactly an aware ISO-8601
+            due time and a non-boolean integer task identifier.
+    """
+    try:
+        if len(order_key) != 2:
+            raise ValueError
+        due_value, task_id = order_key
+        if (
+            not isinstance(due_value, str)
+            or not isinstance(task_id, int)
+            or isinstance(task_id, bool)
+        ):
+            raise ValueError
+        due_at = datetime.fromisoformat(due_value)
+        if due_at.tzinfo is None or due_at.utcoffset() is None:
+            raise ValueError
+    except TypeError, ValueError:
+        raise BadRequestError("Invalid pagination cursor") from None
+    return TaskListCursor(due_at=due_at, task_id=task_id)
+
+
 @router.get(
     "",
     response_model=TaskListResponse,
@@ -90,33 +185,74 @@ def _task_changes(payload: TaskUpdate) -> dict[str, Any]:
 async def list_tasks(
     claims: CurrentAccessDep,
     service: TaskServiceDep,
-    filters: Annotated[TaskFiltersQuery, Query()],
+    filters: Annotated[TaskFiltersQuery, Depends(_task_filters)],
+    limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+    cursor: Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)] = None,
 ) -> TaskListResponse:
     """
-    List the authenticated user's tasks.
+    List one page of the authenticated user's tasks.
 
     Purpose:
         Return tasks filtered by date, project, priority, status, recurrence,
-        and text, including labels and reminders.
+        and text, including labels and reminders, with a cursor for the next
+        page.
 
     Args:
         claims: Verified access-token claims.
         service: Task service resolving filtered details.
         filters: Query parameters translated into service filters.
+        limit: Maximum number of tasks to return, from 1 to 100.
+        cursor: Opaque cursor returned as ``next_cursor`` by the previous page.
 
     Returns:
-        TaskListResponse: Matching tasks in repository order.
+        TaskListResponse: Matching tasks in ``(due_at, id)`` order and the
+            cursor for the next page, or ``None`` on the last page.
 
     Raises:
         UnauthorizedError (HTTP 401): If the bearer token is missing or
             invalid.
-        BadRequestError (HTTP 400): If the stored user timezone is invalid.
+        BadRequestError (HTTP 400): If the stored user timezone is invalid or
+            the cursor is malformed, belongs to another user, or was issued
+            for different filters.
 
     Notes:
         - The date filter uses UTC bounds of the user's local day.
+        - The client must resend the same filters together with ``cursor``.
     """
-    details = await service.list(claims.user_id, filters.to_filters())
-    return TaskListResponse(items=[_task_response(detail) for detail in details])
+    fingerprint = _filters_fingerprint(filters)
+    after = (
+        _task_list_cursor(
+            decode_cursor(
+                cursor,
+                user_id=claims.user_id,
+                filter_fingerprint=fingerprint,
+            )
+        )
+        if cursor is not None
+        else None
+    )
+    page = await service.list(
+        claims.user_id,
+        filters.to_filters(),
+        limit=limit,
+        after=after,
+    )
+    next_cursor = (
+        encode_cursor(
+            user_id=claims.user_id,
+            filter_fingerprint=fingerprint,
+            order_key=[
+                page.next_cursor.due_at.isoformat(),
+                page.next_cursor.task_id,
+            ],
+        )
+        if page.next_cursor is not None
+        else None
+    )
+    return TaskListResponse(
+        items=[_task_response(detail) for detail in page.items],
+        next_cursor=next_cursor,
+    )
 
 
 @router.post(

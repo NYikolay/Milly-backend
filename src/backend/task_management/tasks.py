@@ -58,6 +58,22 @@ class TaskDetail:
     project: Project | None
 
 
+@dataclass(frozen=True)
+class TaskListCursor:
+    """Ordering key of the last task on a page."""
+
+    due_at: datetime
+    task_id: int
+
+
+@dataclass(frozen=True)
+class TaskPage:
+    """One page of task details with a cursor for the next page."""
+
+    items: Sequence[TaskDetail]
+    next_cursor: TaskListCursor | None
+
+
 class TaskService:
     """Coordinates one-off tasks and series-instance operations."""
 
@@ -88,21 +104,32 @@ class TaskService:
         self._series_service = series_service
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
 
-    async def list(self, user_id: int, filters: TaskFilters) -> list[TaskDetail]:
+    async def list(
+        self,
+        user_id: int,
+        filters: TaskFilters,
+        *,
+        limit: int,
+        after: TaskListCursor | None = None,
+    ) -> TaskPage:
         """
-        List task details for a user.
+        List one page of task details for a user.
 
         Purpose:
-            Provide the filtered task list with labels, reminders, and project
-            data.
+            Provide the filtered task page with labels, reminders, and project
+            data loaded through batch queries.
 
         Args:
             user_id: Owner identifier.
             filters: Date, project, priority, status, recurrence, text, and
                 archive filters.
+            limit: Maximum number of task details to return.
+            after: Optional ordering key of the last task on the previous page.
 
         Returns:
-            list[TaskDetail]: Matching task details in repository order.
+            TaskPage: Matching task details in ``(due_at, id)`` order and the
+                cursor for the next page, or ``None`` when this is the last
+                page.
 
         Raises:
             BadRequestError: If the stored user timezone is invalid or the date
@@ -110,6 +137,10 @@ class TaskService:
 
         Notes:
             - The date filter uses UTC bounds of the user's local day.
+            - The repository is queried for ``limit + 1`` rows so the extra row
+              only signals another page.
+            - Related labels, reminders, and projects are loaded with at most
+              three batch queries; an empty page issues no batch queries.
             - Performs no writes and does not commit.
         """
         date_start: datetime | None = None
@@ -137,8 +168,20 @@ class TaskService:
             query=filters.query,
             include_archived_projects=filters.include_archived_projects,
             now=self._clock(),
+            limit=limit + 1,
+            after_due_at=after.due_at if after is not None else None,
+            after_task_id=after.task_id if after is not None else None,
         )
-        return [await self._detail(user_id, task) for task in tasks]
+        page_tasks = tuple(tasks[:limit])
+        next_cursor = (
+            TaskListCursor(due_at=page_tasks[-1].due_at, task_id=page_tasks[-1].id)
+            if len(tasks) > limit and page_tasks
+            else None
+        )
+        return TaskPage(
+            items=await self._details(user_id, page_tasks),
+            next_cursor=next_cursor,
+        )
 
     async def get(self, user_id: int, task_id: int) -> TaskDetail:
         """
@@ -660,6 +703,55 @@ class TaskService:
             reminders=reminders,
             project=project,
         )
+
+    async def _details(
+        self,
+        user_id: int,
+        tasks: Sequence[Task],
+    ) -> Sequence[TaskDetail]:
+        """
+        Load related data for a page of tasks with batch queries.
+
+        Purpose:
+            Avoid one label, reminder, and project query per task when building
+            a task list response.
+
+        Args:
+            user_id: Owner identifier.
+            tasks: Tasks belonging to the page.
+
+        Returns:
+            Sequence[TaskDetail]: The tasks with labels, reminders, and
+                projects attached in the same order as ``tasks``.
+
+        Notes:
+            - Returns immediately without issuing batch queries for an empty
+              page.
+            - Performs no writes and does not commit.
+        """
+        if not tasks:
+            return []
+        task_ids = tuple(task.id for task in tasks)
+        project_ids = tuple(
+            sorted({task.project_id for task in tasks if task.project_id is not None})
+        )
+        labels_by_task = await self._repository.list_task_labels_for_tasks(user_id, task_ids)
+        reminders_by_task = await self._repository.list_task_reminders_for_tasks(
+            user_id,
+            task_ids,
+        )
+        projects_by_id = await self._repository.get_projects_by_ids(user_id, project_ids)
+        return [
+            TaskDetail(
+                task=task,
+                labels=labels_by_task.get(task.id, ()),
+                reminders=reminders_by_task.get(task.id, ()),
+                project=(
+                    projects_by_id.get(task.project_id) if task.project_id is not None else None
+                ),
+            )
+            for task in tasks
+        ]
 
     async def _require_task(
         self,

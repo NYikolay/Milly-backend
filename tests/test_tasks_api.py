@@ -19,7 +19,13 @@ from backend.task_management.labels import LabelService
 from backend.task_management.palette import PaletteService
 from backend.task_management.projects import ProjectService
 from backend.task_management.series import SeriesService
-from backend.task_management.tasks import TaskDetail, TaskFilters, TaskService
+from backend.task_management.tasks import (
+    TaskDetail,
+    TaskFilters,
+    TaskListCursor,
+    TaskPage,
+    TaskService,
+)
 from tests.task_management_fakes import FakeTaskManagementRepository, fixed_now
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
@@ -45,6 +51,7 @@ def _task_detail(
     user_id: int = 1,
     series_id: int | None = None,
     title: str = "Task",
+    due_at: datetime = DUE_AT,
     completed_at: datetime | None = None,
     reminders_enabled: bool = True,
 ) -> TaskDetail:
@@ -57,7 +64,7 @@ def _task_detail(
         title=title,
         description="Description",
         priority=Priority.URGENT_IMPORTANT.value,
-        due_at=DUE_AT,
+        due_at=due_at,
         completed_at=completed_at,
         reminders_enabled=reminders_enabled,
         created_at=NOW,
@@ -103,11 +110,35 @@ class FakeTaskService:
         """Store a prepared task detail."""
         self.details[detail.task.id] = detail
 
-    async def list(self, user_id: int, filters: TaskFilters) -> list[TaskDetail]:
-        """Record list filters and return prepared details."""
+    async def list(
+        self,
+        user_id: int,
+        filters: TaskFilters,
+        *,
+        limit: int,
+        after: TaskListCursor | None = None,
+    ) -> TaskPage:
+        """Record list filters and return the requested prepared page."""
         self.list_calls.append((user_id, filters))
         self.user_calls.append(("list", user_id))
-        return list(self.details.values())
+        details = sorted(
+            self.details.values(),
+            key=lambda detail: (detail.task.due_at, detail.task.id),
+        )
+        if after is not None:
+            details = [
+                detail
+                for detail in details
+                if detail.task.due_at > after.due_at
+                or (detail.task.due_at == after.due_at and detail.task.id > after.task_id)
+            ]
+        page = details[:limit]
+        next_cursor = (
+            TaskListCursor(due_at=page[-1].task.due_at, task_id=page[-1].task.id)
+            if len(details) > limit and page
+            else None
+        )
+        return TaskPage(items=page, next_cursor=next_cursor)
 
     async def get(self, user_id: int, task_id: int) -> TaskDetail:
         """Return a prepared detail or raise the configured error."""
@@ -269,6 +300,86 @@ async def test_list_tasks_passes_all_filters(
     assert filters.recurrence == "regular"
     assert filters.query == "report"
     assert filters.include_archived_projects is True
+
+
+async def test_task_list_returns_default_page_size(
+    task_client: AsyncClient,
+    fake_task_service: FakeTaskService,
+) -> None:
+    """Return at most the default page size and a next-page cursor."""
+    for index in range(51):
+        fake_task_service.add_detail(
+            _task_detail(task_id=index + 1, due_at=NOW + timedelta(minutes=index))
+        )
+
+    response = await task_client.get("/api/v1/tasks")
+
+    body = response.json()
+    assert response.status_code == 200
+    assert len(body["items"]) == 50
+    assert body["next_cursor"] is not None
+
+
+async def test_task_list_second_page_has_no_duplicates(
+    task_client: AsyncClient,
+    fake_task_service: FakeTaskService,
+) -> None:
+    """Continue after the last item of the first page without duplicates."""
+    for index in range(51):
+        fake_task_service.add_detail(
+            _task_detail(task_id=index + 1, due_at=NOW + timedelta(minutes=index))
+        )
+
+    first = (await task_client.get("/api/v1/tasks")).json()
+    second = (
+        await task_client.get("/api/v1/tasks", params={"cursor": first["next_cursor"]})
+    ).json()
+
+    first_ids = {item["id"] for item in first["items"]}
+    second_ids = {item["id"] for item in second["items"]}
+    assert first_ids.isdisjoint(second_ids)
+    assert first_ids | second_ids == set(range(1, 52))
+    assert second["next_cursor"] is None
+
+
+async def test_task_list_rejects_filter_mismatch_cursor(
+    task_client: AsyncClient,
+    fake_task_service: FakeTaskService,
+) -> None:
+    """Reject a cursor issued for a different filter set."""
+    fake_task_service.add_detail(_task_detail(task_id=1, due_at=NOW))
+    fake_task_service.add_detail(_task_detail(task_id=2, due_at=NOW + timedelta(minutes=1)))
+
+    first = (await task_client.get("/api/v1/tasks", params={"status": "open", "limit": 1})).json()
+    assert first["next_cursor"] is not None
+    response = await task_client.get(
+        "/api/v1/tasks",
+        params={"status": "completed", "limit": 1, "cursor": first["next_cursor"]},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "bad_request"
+
+
+async def test_task_list_rejects_invalid_cursor(task_client: AsyncClient) -> None:
+    """Reject a cursor that is not an opaque pagination token."""
+    response = await task_client.get("/api/v1/tasks", params={"cursor": "not-base64"})
+
+    assert response.status_code == 400
+
+
+async def test_task_list_equal_due_at_uses_id_tiebreaker(
+    task_client: AsyncClient,
+    fake_task_service: FakeTaskService,
+) -> None:
+    """Order rows with equal due times by identifier ascending."""
+    due_at = NOW
+    for task_id in (3, 1, 2):
+        fake_task_service.add_detail(_task_detail(task_id=task_id, due_at=due_at))
+
+    ids = [item["id"] for item in (await task_client.get("/api/v1/tasks")).json()["items"]]
+
+    assert ids == [1, 2, 3]
 
 
 async def test_read_task_returns_detail(

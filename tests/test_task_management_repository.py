@@ -120,6 +120,18 @@ class RecordingResult:
         """
         return self._row
 
+    def all(self) -> list[Any]:
+        """
+        Return every configured row.
+
+        Purpose:
+            Support row-returning batch repository methods.
+
+        Returns:
+            list[Any]: Configured row values.
+        """
+        return list(self._values)
+
 
 class RecordingSession:
     """Async session double that records statements without a database."""
@@ -646,3 +658,60 @@ async def test_resume_project_reminders_clears_slot_on_datetime_overflow() -> No
     await repository.resume_project_reminders(USER_ID, PROJECT_ID, NOW)
 
     assert reminder.next_run_at is None
+
+
+async def test_list_tasks_applies_cursor_and_limit() -> None:
+    """Task pagination applies the compound cursor predicate and a bounded limit."""
+    session = RecordingSession()
+    repository = make_repository(session)
+
+    await repository.list_tasks(
+        USER_ID,
+        date_start=None,
+        date_end=None,
+        project_ids=(),
+        priorities=(),
+        status="all",
+        recurrence="all",
+        query=None,
+        include_archived_projects=False,
+        now=NOW,
+        limit=26,
+        after_due_at=NOW,
+        after_task_id=10,
+    )
+    sql = compile_statement(session.statements[-1])
+
+    assert "tasks.due_at > '" in sql
+    assert "tasks.due_at = '" in sql
+    assert "tasks.id > 10" in sql
+    assert "ORDER BY tasks.due_at, tasks.id" in sql
+    assert "LIMIT 26" in sql
+
+
+async def test_list_tasks_batch_methods_filter_by_user_and_ids() -> None:
+    """Batch enrichment scopes each query to the owner and the requested ids."""
+    session = RecordingSession()
+    repository = make_repository(session)
+
+    labels = await repository.list_task_labels_for_tasks(USER_ID, (1, 2))
+    labels_sql = compile_statement(session.statements[-1])
+
+    reminders = await repository.list_task_reminders_for_tasks(USER_ID, (1, 2))
+    reminders_sql = compile_statement(session.statements[-1])
+
+    projects = await repository.get_projects_by_ids(USER_ID, (5, 6))
+    projects_sql = compile_statement(session.statements[-1])
+
+    assert labels == {}
+    assert reminders == {}
+    assert projects == {}
+    assert "task_labels.user_id = 7" in labels_sql
+    assert "task_labels.task_id IN (1, 2)" in labels_sql
+    assert "labels.user_id = 7" in labels_sql
+    assert "labels.deleted_at IS NULL" in labels_sql
+    assert "task_reminders.user_id = 7" in reminders_sql
+    assert "task_reminders.task_id IN (1, 2)" in reminders_sql
+    assert "projects.user_id = 7" in projects_sql
+    assert "projects.deleted_at IS NULL" in projects_sql
+    assert "projects.id IN (5, 6)" in projects_sql

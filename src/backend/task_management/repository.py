@@ -6,7 +6,7 @@ from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfoNotFoundError
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.errors import BadRequestError
@@ -774,13 +774,16 @@ class SqlAlchemyTaskManagementRepository:
         query: str | None,
         include_archived_projects: bool,
         now: datetime,
+        limit: int,
+        after_due_at: datetime | None,
+        after_task_id: int | None,
     ) -> Sequence[Task]:
         """
         List non-deleted tasks using the service-level filters.
 
         Purpose:
             Power the task list with date, project, priority, status,
-            recurrence, text, and archive filters.
+            recurrence, text, and archive filters, returning at most one page.
 
         Args:
             user_id: Owner identifier.
@@ -794,11 +797,17 @@ class SqlAlchemyTaskManagementRepository:
             include_archived_projects: Whether tasks in archived projects are
                 included.
             now: Current instant used to evaluate the overdue status.
+            limit: Maximum number of tasks to return.
+            after_due_at: Cursor due time of the last task on the previous page.
+            after_task_id: Cursor identifier of the last task on the previous
+                page.
 
         Returns:
             Sequence[Task]: Matching tasks ordered by ``(due_at, id)``.
 
         Notes:
+            - The cursor predicate is applied only when both cursor values are
+              provided.
             - Performs no writes and does not commit.
         """
         statement = select(Task).where(
@@ -846,8 +855,133 @@ class SqlAlchemyTaskManagementRepository:
                     Task.project_id.in_(active_project_ids),
                 )
             )
-        result = await self._session.execute(statement.order_by(Task.due_at, Task.id))
+        if after_due_at is not None and after_task_id is not None:
+            statement = statement.where(
+                or_(
+                    Task.due_at > after_due_at,
+                    and_(
+                        Task.due_at == after_due_at,
+                        Task.id > after_task_id,
+                    ),
+                )
+            )
+        result = await self._session.execute(statement.order_by(Task.due_at, Task.id).limit(limit))
         return result.scalars().all()
+
+    async def list_task_labels_for_tasks(
+        self,
+        user_id: int,
+        task_ids: Sequence[int],
+    ) -> dict[int, Sequence[Label]]:
+        """
+        List non-deleted labels grouped by task.
+
+        Purpose:
+            Enrich a page of task details without one label query per task.
+
+        Args:
+            user_id: Owner identifier.
+            task_ids: Task identifiers to enrich.
+
+        Returns:
+            dict[int, Sequence[Label]]: Assigned labels keyed by task
+                identifier; tasks without labels are absent.
+
+        Notes:
+            - Returns an empty mapping without a query for an empty input.
+            - Performs no writes and does not commit.
+        """
+        if not task_ids:
+            return {}
+        result = await self._session.execute(
+            select(Label, TaskLabel.task_id)
+            .join(TaskLabel, TaskLabel.label_id == Label.id)
+            .where(
+                TaskLabel.user_id == user_id,
+                TaskLabel.task_id.in_(task_ids),
+                Label.user_id == user_id,
+                Label.deleted_at.is_(None),
+            )
+            .order_by(TaskLabel.task_id, Label.id)
+        )
+        grouped: dict[int, Sequence[Label]] = {}
+        for label, task_id in result.all():
+            grouped[task_id] = (*grouped.get(task_id, ()), label)
+        return grouped
+
+    async def list_task_reminders_for_tasks(
+        self,
+        user_id: int,
+        task_ids: Sequence[int],
+    ) -> dict[int, Sequence[TaskReminder]]:
+        """
+        List reminders grouped by task.
+
+        Purpose:
+            Enrich a page of task details without one reminder query per task.
+
+        Args:
+            user_id: Owner identifier.
+            task_ids: Task identifiers to enrich.
+
+        Returns:
+            dict[int, Sequence[TaskReminder]]: Reminders keyed by task
+                identifier; tasks without reminders are absent.
+
+        Notes:
+            - Returns an empty mapping without a query for an empty input.
+            - Performs no writes and does not commit.
+        """
+        if not task_ids:
+            return {}
+        result = await self._session.execute(
+            select(TaskReminder)
+            .where(
+                TaskReminder.user_id == user_id,
+                TaskReminder.task_id.in_(task_ids),
+            )
+            .order_by(TaskReminder.task_id, TaskReminder.id)
+        )
+        grouped: dict[int, Sequence[TaskReminder]] = {}
+        for reminder in result.scalars().all():
+            if reminder.task_id is None:
+                continue
+            grouped[reminder.task_id] = (*grouped.get(reminder.task_id, ()), reminder)
+        return grouped
+
+    async def get_projects_by_ids(
+        self,
+        user_id: int,
+        project_ids: Sequence[int],
+    ) -> dict[int, Project]:
+        """
+        Load non-deleted projects grouped by identifier.
+
+        Purpose:
+            Enrich a page of task details with project data in one query.
+
+        Args:
+            user_id: Owner identifier.
+            project_ids: Project identifiers to load.
+
+        Returns:
+            dict[int, Project]: Owned non-deleted projects keyed by identifier;
+                missing or cross-user projects are absent.
+
+        Notes:
+            - Returns an empty mapping without a query for an empty input.
+            - Performs no writes and does not commit.
+        """
+        if not project_ids:
+            return {}
+        result = await self._session.execute(
+            select(Project).where(
+                Project.user_id == user_id,
+                Project.deleted_at.is_(None),
+                Project.id.in_(project_ids),
+            )
+        )
+        return {project.id: project for project in result.scalars().all()}
 
     async def get_task(
         self,

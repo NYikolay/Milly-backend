@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 
+from backend.api.pagination import DEFAULT_PAGE_SIZE
 from backend.core.errors import NotFoundError
 from backend.models.color_palette import ColorPalette
 from backend.task_management.enums import Priority, ReminderKind
@@ -191,7 +192,7 @@ async def test_daily_series_lifecycle_end_to_end() -> None:
     assert pending.next_attempt_at is None
     assert all(task.deleted_at == fixed_now() for task in repository.tasks.values())
     assert series.deleted_at == fixed_now()
-    assert await task_service.list(USER_ID, TaskFilters()) == []
+    assert (await task_service.list(USER_ID, TaskFilters(), limit=DEFAULT_PAGE_SIZE)).items == []
     assert await series_service.list(USER_ID) == []
     with pytest.raises(NotFoundError):
         await projects.get(USER_ID, project.id)

@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 
+from backend.api.pagination import DEFAULT_PAGE_SIZE
 from backend.core.errors import BadRequestError, ErrorCode, NotFoundError
 from backend.task_management.enums import Priority, ReminderKind
 from backend.task_management.labels import LabelService
@@ -11,7 +12,7 @@ from backend.task_management.palette import PaletteService
 from backend.task_management.projects import ProjectService
 from backend.task_management.reminders import ReminderInput
 from backend.task_management.series import SeriesService
-from backend.task_management.tasks import TaskFilters, TaskService
+from backend.task_management.tasks import TaskFilters, TaskListCursor, TaskService
 from tests.task_management_fakes import (
     FakeTaskManagementRepository,
     fixed_now,
@@ -201,17 +202,82 @@ async def test_list_applies_filters_and_archived_project_visibility() -> None:
     )
     service = make_service(repository)
 
-    visible = await service.list(USER_ID, TaskFilters(date=date(2026, 11, 4)))
+    visible = await service.list(
+        USER_ID,
+        TaskFilters(date=date(2026, 11, 4)),
+        limit=DEFAULT_PAGE_SIZE,
+    )
     all_projects = await service.list(
         USER_ID,
         TaskFilters(
             date=date(2026, 11, 4),
             include_archived_projects=True,
         ),
+        limit=DEFAULT_PAGE_SIZE,
     )
 
-    assert [detail.task.title for detail in visible] == ["Today"]
-    assert [detail.task.title for detail in all_projects] == ["Today", "Hidden"]
+    assert [detail.task.title for detail in visible.items] == ["Today"]
+    assert [detail.task.title for detail in all_projects.items] == ["Today", "Hidden"]
+
+
+async def test_list_returns_page_and_cursor() -> None:
+    """Return the requested page size and a cursor built from the last kept task."""
+    repository = FakeTaskManagementRepository()
+    due_at = fixed_now()
+    for task_id in (1, 2, 3):
+        repository.insert_task(
+            make_task(task_id=task_id, due_at=due_at + timedelta(minutes=task_id))
+        )
+    service = make_service(repository)
+
+    page = await service.list(USER_ID, TaskFilters(), limit=2)
+    last_page = await service.list(
+        USER_ID,
+        TaskFilters(),
+        limit=2,
+        after=page.next_cursor,
+    )
+
+    assert [detail.task.id for detail in page.items] == [1, 2]
+    assert page.next_cursor == TaskListCursor(
+        due_at=due_at + timedelta(minutes=2),
+        task_id=2,
+    )
+    assert [detail.task.id for detail in last_page.items] == [3]
+    assert last_page.next_cursor is None
+
+
+async def test_list_uses_batch_related_queries() -> None:
+    """Enrich a page through one batch query per related collection."""
+    repository = FakeTaskManagementRepository()
+    project = repository.insert_project(make_project(project_id=1))
+    label = repository.insert_label(make_label(label_id=1))
+    due_at = fixed_now()
+    for task_id in (1, 2, 3):
+        repository.insert_task(
+            make_task(
+                task_id=task_id,
+                project_id=project.id,
+                due_at=due_at + timedelta(minutes=task_id),
+            )
+        )
+        repository.task_labels.add((task_id, label.id))
+        repository.insert_reminder(make_reminder(task_id=task_id))
+    service = make_service(repository)
+
+    page = await service.list(USER_ID, TaskFilters(), limit=DEFAULT_PAGE_SIZE)
+
+    assert [detail.project for detail in page.items] == [project, project, project]
+    assert [detail.labels for detail in page.items] == [[label], [label], [label]]
+    assert all(len(detail.reminders) == 1 for detail in page.items)
+    assert [name for name, _ in repository.batch_calls] == [
+        "list_task_labels_for_tasks",
+        "list_task_reminders_for_tasks",
+        "get_projects_by_ids",
+    ]
+    assert repository.batch_calls[0][1] == (1, 2, 3)
+    assert repository.batch_calls[1][1] == (1, 2, 3)
+    assert repository.batch_calls[2][1] == (1,)
 
 
 async def test_update_series_task_applies_to_future_incomplete_instances_only() -> None:
@@ -723,7 +789,7 @@ async def test_list_rejects_date_that_overflows_local_day_bounds() -> None:
     service = make_service(repository)
 
     with pytest.raises(BadRequestError):
-        await service.list(USER_ID, TaskFilters(date=date.max))
+        await service.list(USER_ID, TaskFilters(date=date.max), limit=DEFAULT_PAGE_SIZE)
 
 
 async def test_create_task_rejects_aware_reminder_time() -> None:

@@ -90,6 +90,7 @@ class FakeTaskManagementRepository:
         self.deliveries: dict[int, ReminderDelivery] = {}
         self.task_labels: set[tuple[int, int]] = set()
         self.series_labels: set[tuple[int, int]] = set()
+        self.batch_calls: list[tuple[str, tuple[int, ...]]] = []
         self.commits = 0
         self.rollbacks = 0
         self.claimed_series_ids: list[int] = []
@@ -235,6 +236,16 @@ class FakeTaskManagementRepository:
         if project is None or project.user_id != user_id or project.deleted_at is not None:
             return None
         return project
+
+    async def get_projects_by_ids(
+        self,
+        user_id: int,
+        project_ids: Sequence[int],
+    ) -> dict[int, Project]:
+        """Return non-deleted projects owned by a user keyed by identifier."""
+        self.batch_calls.append(("get_projects_by_ids", tuple(project_ids)))
+        projects = [await self.get_project(user_id, project_id) for project_id in project_ids]
+        return {project.id: project for project in projects if project is not None}
 
     async def project_name_exists(
         self,
@@ -407,8 +418,11 @@ class FakeTaskManagementRepository:
         query: str | None,
         include_archived_projects: bool,
         now: datetime,
+        limit: int,
+        after_due_at: datetime | None,
+        after_task_id: int | None,
     ) -> Sequence[Task]:
-        """List tasks applying the service-level filters."""
+        """List tasks applying service filters and the cursor page bounds."""
         tasks = [
             task
             for task in self.tasks.values()
@@ -441,7 +455,14 @@ class FakeTaskManagementRepository:
             ]
         if not include_archived_projects:
             tasks = [task for task in tasks if self._project_is_active(task.project_id)]
-        return sorted(tasks, key=lambda task: (task.due_at, task.id))
+        if after_due_at is not None and after_task_id is not None:
+            tasks = [
+                task
+                for task in tasks
+                if task.due_at > after_due_at
+                or (task.due_at == after_due_at and task.id > after_task_id)
+            ]
+        return sorted(tasks, key=lambda task: (task.due_at, task.id))[:limit]
 
     async def get_task(
         self,
@@ -503,6 +524,15 @@ class FakeTaskManagementRepository:
             and self.labels[label_id].deleted_at is None
         ]
 
+    async def list_task_labels_for_tasks(
+        self,
+        user_id: int,
+        task_ids: Sequence[int],
+    ) -> dict[int, Sequence[Label]]:
+        """Return labels assigned to each requested task."""
+        self.batch_calls.append(("list_task_labels_for_tasks", tuple(task_ids)))
+        return {task_id: await self.list_task_labels(user_id, task_id) for task_id in task_ids}
+
     async def list_task_reminders(
         self,
         user_id: int,
@@ -517,6 +547,15 @@ class FakeTaskManagementRepository:
             ),
             key=lambda reminder: reminder.id,
         )
+
+    async def list_task_reminders_for_tasks(
+        self,
+        user_id: int,
+        task_ids: Sequence[int],
+    ) -> dict[int, Sequence[TaskReminder]]:
+        """Return reminders attached to each requested task."""
+        self.batch_calls.append(("list_task_reminders_for_tasks", tuple(task_ids)))
+        return {task_id: await self.list_task_reminders(user_id, task_id) for task_id in task_ids}
 
     async def list_series_reminders(
         self,
