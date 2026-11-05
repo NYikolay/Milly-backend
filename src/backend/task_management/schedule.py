@@ -53,60 +53,107 @@ def localize_wall_time(local_date: date, time_of_day: time, timezone: ZoneInfo) 
     return datetime.fromtimestamp(upper, tz=UTC)
 
 
-def daily_due_times(
+def _phase_on_or_after(anchor: date, target: date, interval_days: int) -> date:
+    """
+    Find the nearest anchor-aligned phase date at or after a target date.
+
+    Purpose:
+        Keep periodic scheduling aligned to the series anchor while jumping
+        over any number of elapsed intervals in constant time.
+
+    Args:
+        anchor: First phase date of the series.
+        target: Earliest local date the caller wants to consider.
+        interval_days: Number of local days between phase dates.
+
+    Returns:
+        date: The anchor date when ``target`` is not later, otherwise the first
+            anchor-aligned date at or after ``target``.
+
+    Notes:
+        - Date arithmetic uses whole calendar days, so daylight-saving changes
+          never shift the phase.
+    """
+    if target <= anchor:
+        return anchor
+    steps = ((target - anchor).days + interval_days - 1) // interval_days
+    return anchor + timedelta(days=steps * interval_days)
+
+
+def series_due_times(
     *,
     starts_on: date,
     ends_on: date | None,
     time_of_day: time,
     timezone: ZoneInfo,
     now: datetime,
+    interval_days: int = 1,
     generated_through: datetime | None = None,
     horizon_days: int = HORIZON_DAYS,
 ) -> list[datetime]:
     """
-    Materialize daily series occurrences within the generation window.
+    Materialize phase-aligned series occurrences within the generation window.
 
     Purpose:
-        Produce the missing daily due instants for a recurring task, never
-        backfilling occurrences that are already in the past.
+        Produce the missing due instants for a daily or periodic recurring
+        task, never backfilling occurrences that are already in the past.
 
     Args:
-        starts_on: First local date on which the series may occur.
+        starts_on: First local date on which the series may occur and the phase
+            anchor for periodic schedules.
         ends_on: Optional inclusive final local date of the series.
         time_of_day: Local wall-clock time of each occurrence.
         timezone: IANA timezone of the series.
         now: Current absolute instant used as the lower bound.
+        interval_days: Number of local days between occurrences. Defaults to 1.
         generated_through: Instant through which occurrences were already generated.
         horizon_days: Number of days from ``now`` to materialize ahead.
 
     Returns:
         list[datetime]: Aware UTC due instants in ascending order.
 
+    Raises:
+        ValueError: If ``interval_days`` is less than one.
+
     Notes:
+        - Phase dates are ``starts_on`` plus whole multiples of
+          ``interval_days``; the phase is preserved across resumes and never
+          drifts with daylight-saving transitions.
         - A first candidate beyond the horizon is returned alone only when no
           occurrences were generated yet, so a future series still receives its
           first occurrence.
         - When resuming from ``generated_through``, a candidate beyond the
           horizon yields an empty list instead of overshooting the window.
-        - ``generated_through`` resumes on the next local day after the instant.
+        - ``generated_through`` resumes on the next local day after the instant,
+          then advances to the nearest phase date at or after it.
         - The search starts at the later of the series start and the current
-          local date; at most one extra day is applied when that slot has
-          already passed.
+          local date; one whole interval is applied when that slot has already
+          passed.
+        - Daylight-saving gaps clamp the wall time to the first valid instant
+          after the gap, while ambiguous fall-back times use the first
+          occurrence.
         - The returned list never contains an instant at or before ``now``.
     """
+    if interval_days < 1:
+        raise ValueError("interval_days must be at least 1")
+
     local_now = now.astimezone(timezone)
     if ends_on is not None and (ends_on < starts_on or ends_on < local_now.date()):
         return []
 
-    candidate_date = starts_on
+    lower_target = local_now.date()
     if generated_through is not None:
         generated_date = generated_through.astimezone(timezone).date()
-        candidate_date = max(candidate_date, generated_date + timedelta(days=1))
+        lower_target = generated_date + timedelta(days=1)
 
-    candidate_date = max(candidate_date, local_now.date())
+    candidate_date = _phase_on_or_after(
+        starts_on,
+        max(lower_target, local_now.date()),
+        interval_days,
+    )
     candidate = localize_wall_time(candidate_date, time_of_day, timezone)
     if candidate <= now:
-        candidate_date += timedelta(days=1)
+        candidate_date += timedelta(days=interval_days)
         candidate = localize_wall_time(candidate_date, time_of_day, timezone)
 
     if ends_on is not None and candidate_date > ends_on:
@@ -119,9 +166,56 @@ def daily_due_times(
     due_times: list[datetime] = []
     while candidate <= horizon_end and (ends_on is None or candidate_date <= ends_on):
         due_times.append(candidate)
-        candidate_date += timedelta(days=1)
+        candidate_date += timedelta(days=interval_days)
         candidate = localize_wall_time(candidate_date, time_of_day, timezone)
     return due_times
+
+
+def next_occurrence_after_date(
+    *,
+    anchor: date,
+    interval_days: int,
+    time_of_day: time,
+    timezone: ZoneInfo,
+    now: datetime,
+) -> datetime:
+    """
+    Compute the first phase occurrence strictly after the current local date.
+
+    Purpose:
+        Shift an overdue task or series forward to the next phase-aligned slot
+        without losing the original schedule phase.
+
+    Args:
+        anchor: First phase date of the series.
+        interval_days: Number of local days between occurrences.
+        time_of_day: Local wall-clock time of each occurrence.
+        timezone: IANA timezone of the series.
+        now: Current absolute instant used to derive the local date.
+
+    Returns:
+        datetime: The next phase occurrence as an aware UTC datetime.
+
+    Raises:
+        ValueError: If ``interval_days`` is less than one.
+
+    Notes:
+        - A future anchor is returned unchanged.
+        - Elapsed intervals are skipped arithmetically, so the result always
+          falls strictly after the current local date.
+        - Phase dates use whole calendar days and therefore do not drift with
+          daylight-saving transitions.
+    """
+    if interval_days < 1:
+        raise ValueError("interval_days must be at least 1")
+
+    local_today = now.astimezone(timezone).date()
+    if anchor > local_today:
+        occurrence_date = anchor
+    else:
+        steps = (local_today - anchor).days // interval_days + 1
+        occurrence_date = anchor + timedelta(days=steps * interval_days)
+    return localize_wall_time(occurrence_date, time_of_day, timezone)
 
 
 def next_daily_time(*, current: datetime, time_of_day: time, timezone: ZoneInfo) -> datetime:

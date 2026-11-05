@@ -26,7 +26,7 @@ from backend.task_management.reminders import (
     reminder_input_from_row,
     validate_reminder_inputs,
 )
-from backend.task_management.schedule import HORIZON_DAYS, daily_due_times
+from backend.task_management.schedule import HORIZON_DAYS, series_due_times
 
 _SERIES_NOT_FOUND = "Series not found"
 _LABEL_NOT_FOUND = "Label not found"
@@ -573,7 +573,7 @@ class SeriesService:
             return 0
         zone = self._timezone(series.timezone)
         try:
-            due_times = daily_due_times(
+            due_times = series_due_times(
                 starts_on=series.starts_on,
                 ends_on=series.ends_on,
                 time_of_day=series.time_of_day,

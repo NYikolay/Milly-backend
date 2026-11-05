@@ -16,6 +16,15 @@ class SeriesFrequency(StrEnum):
     """Supported recurring-series frequencies."""
 
     DAILY = "daily"
+    PERIODIC = "periodic"
+
+
+class TaskRecurrence(StrEnum):
+    """Task recurrence modes persisted as strings."""
+
+    ONE_OFF = "one_off"
+    REGULAR = "regular"
+    PERIODIC = "periodic"
 
 
 class ReminderKind(StrEnum):

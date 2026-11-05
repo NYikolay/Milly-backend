@@ -10,24 +10,26 @@ from backend.task_management.enums import (
     Priority,
     ReminderKind,
     SeriesFrequency,
+    TaskRecurrence,
 )
 from backend.task_management.schedule import (
     before_due_time,
-    daily_due_times,
     first_scheduled_time,
     localize_wall_time,
     next_daily_time,
+    next_occurrence_after_date,
     next_scheduled_time,
+    series_due_times,
 )
 
 MOSCOW = ZoneInfo("Europe/Moscow")
 BERLIN = ZoneInfo("Europe/Berlin")
 
 
-def test_daily_due_times_skips_past_and_starts_tomorrow() -> None:
+def test_series_due_times_skips_past_and_starts_tomorrow() -> None:
     """Skip past slots and start on the next day when today's slot has passed."""
     now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
-    result = daily_due_times(
+    result = series_due_times(
         starts_on=date(2026, 11, 1),
         ends_on=None,
         time_of_day=time(9, 0),
@@ -37,10 +39,10 @@ def test_daily_due_times_skips_past_and_starts_tomorrow() -> None:
     assert result[0] == datetime(2026, 11, 5, 6, 0, tzinfo=UTC)
 
 
-def test_daily_due_times_uses_today_when_slot_is_ahead() -> None:
+def test_series_due_times_uses_today_when_slot_is_ahead() -> None:
     """Keep today's slot when it is still ahead of the current instant."""
     now = datetime(2026, 11, 4, 4, 0, tzinfo=UTC)
-    result = daily_due_times(
+    result = series_due_times(
         starts_on=date(2026, 11, 1),
         ends_on=None,
         time_of_day=time(9, 0),
@@ -50,10 +52,10 @@ def test_daily_due_times_uses_today_when_slot_is_ahead() -> None:
     assert result[0] == datetime(2026, 11, 4, 6, 0, tzinfo=UTC)
 
 
-def test_daily_due_times_includes_future_start_even_beyond_horizon() -> None:
+def test_series_due_times_includes_future_start_even_beyond_horizon() -> None:
     """Return the first slot when a future series starts beyond the horizon."""
     now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
-    result = daily_due_times(
+    result = series_due_times(
         starts_on=date(2027, 6, 1),
         ends_on=None,
         time_of_day=time(9, 0),
@@ -63,10 +65,10 @@ def test_daily_due_times_includes_future_start_even_beyond_horizon() -> None:
     assert result == [datetime(2027, 6, 1, 6, 0, tzinfo=UTC)]
 
 
-def test_daily_due_times_stops_at_ends_on_inclusive() -> None:
+def test_series_due_times_stops_at_ends_on_inclusive() -> None:
     """Include the final local day and stop after it."""
     now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
-    result = daily_due_times(
+    result = series_due_times(
         starts_on=date(2026, 11, 5),
         ends_on=date(2026, 11, 7),
         time_of_day=time(9, 0),
@@ -80,10 +82,10 @@ def test_daily_due_times_stops_at_ends_on_inclusive() -> None:
     ]
 
 
-def test_daily_due_times_spring_forward_clamps_to_gap_end() -> None:
+def test_series_due_times_spring_forward_clamps_to_gap_end() -> None:
     """Clamp a nonexistent spring-forward wall time to the end of the gap."""
     now = datetime(2026, 3, 28, 12, 0, tzinfo=UTC)
-    result = daily_due_times(
+    result = series_due_times(
         starts_on=date(2026, 3, 29),
         ends_on=date(2026, 3, 29),
         time_of_day=time(2, 30),
@@ -93,10 +95,10 @@ def test_daily_due_times_spring_forward_clamps_to_gap_end() -> None:
     assert result == [datetime(2026, 3, 29, 1, 0, tzinfo=UTC)]
 
 
-def test_daily_due_times_fall_back_uses_first_occurrence() -> None:
+def test_series_due_times_fall_back_uses_first_occurrence() -> None:
     """Choose the first occurrence of an ambiguous fall-back wall time."""
     now = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
-    result = daily_due_times(
+    result = series_due_times(
         starts_on=date(2026, 10, 25),
         ends_on=date(2026, 10, 25),
         time_of_day=time(2, 30),
@@ -106,11 +108,11 @@ def test_daily_due_times_fall_back_uses_first_occurrence() -> None:
     assert result == [datetime(2026, 10, 25, 0, 30, tzinfo=UTC)]
 
 
-def test_daily_due_times_resumes_after_generated_through() -> None:
+def test_series_due_times_resumes_after_generated_through() -> None:
     """Resume on the local day after the previously generated instant."""
     now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
     generated_through = datetime(2026, 11, 6, 6, 0, tzinfo=UTC)
-    result = daily_due_times(
+    result = series_due_times(
         starts_on=date(2026, 11, 1),
         ends_on=date(2026, 11, 8),
         time_of_day=time(9, 0),
@@ -124,11 +126,11 @@ def test_daily_due_times_resumes_after_generated_through() -> None:
     ]
 
 
-def test_daily_due_times_generated_through_beyond_horizon_returns_empty() -> None:
+def test_series_due_times_generated_through_beyond_horizon_returns_empty() -> None:
     """Resuming past the horizon does not overshoot the generation window."""
     now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
     generated_through = datetime(2027, 6, 1, 6, 0, tzinfo=UTC)
-    result = daily_due_times(
+    result = series_due_times(
         starts_on=date(2026, 11, 1),
         ends_on=None,
         time_of_day=time(9, 0),
@@ -139,10 +141,10 @@ def test_daily_due_times_generated_through_beyond_horizon_returns_empty() -> Non
     assert result == []
 
 
-def test_daily_due_times_respects_custom_horizon() -> None:
+def test_series_due_times_respects_custom_horizon() -> None:
     """Emit slots only through the configured horizon, inclusive."""
     now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
-    result = daily_due_times(
+    result = series_due_times(
         starts_on=date(2026, 11, 1),
         ends_on=None,
         time_of_day=time(9, 0),
@@ -157,10 +159,10 @@ def test_daily_due_times_respects_custom_horizon() -> None:
     ]
 
 
-def test_daily_due_times_returns_empty_when_ends_before_start() -> None:
+def test_series_due_times_returns_empty_when_ends_before_start() -> None:
     """Return no slots when the series end precedes its start."""
     now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
-    result = daily_due_times(
+    result = series_due_times(
         starts_on=date(2026, 11, 7),
         ends_on=date(2026, 11, 5),
         time_of_day=time(9, 0),
@@ -170,10 +172,10 @@ def test_daily_due_times_returns_empty_when_ends_before_start() -> None:
     assert result == []
 
 
-def test_daily_due_times_returns_empty_when_ends_on_already_passed() -> None:
+def test_series_due_times_returns_empty_when_ends_on_already_passed() -> None:
     """Return no slots when the series end precedes the current local date."""
     now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
-    result = daily_due_times(
+    result = series_due_times(
         starts_on=date(2026, 10, 1),
         ends_on=date(2026, 11, 3),
         time_of_day=time(9, 0),
@@ -181,6 +183,117 @@ def test_daily_due_times_returns_empty_when_ends_on_already_passed() -> None:
         now=now,
     )
     assert result == []
+
+
+def test_series_due_times_periodic_uses_phase_and_skips_passed_slot() -> None:
+    """Start from the anchor phase and skip an already passed slot."""
+    now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
+    result = series_due_times(
+        starts_on=date(2026, 11, 1),
+        ends_on=None,
+        time_of_day=time(9, 0),
+        timezone=MOSCOW,
+        now=now,
+        interval_days=3,
+    )
+    assert result[0] == datetime(2026, 11, 7, 6, 0, tzinfo=UTC)
+    assert result[1] == datetime(2026, 11, 10, 6, 0, tzinfo=UTC)
+
+
+def test_series_due_times_periodic_resume_keeps_anchor_phase() -> None:
+    """Resume periodic generation on the anchor phase after generated_through."""
+    now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
+    result = series_due_times(
+        starts_on=date(2026, 11, 1),
+        ends_on=date(2026, 11, 16),
+        time_of_day=time(9, 0),
+        timezone=MOSCOW,
+        now=now,
+        interval_days=3,
+        generated_through=datetime(2026, 11, 7, 6, 0, tzinfo=UTC),
+    )
+    assert result == [
+        datetime(2026, 11, 10, 6, 0, tzinfo=UTC),
+        datetime(2026, 11, 13, 6, 0, tzinfo=UTC),
+        datetime(2026, 11, 16, 6, 0, tzinfo=UTC),
+    ]
+
+
+def test_series_due_times_periodic_future_start_beyond_horizon_returns_one() -> None:
+    """Return only the first phase slot when a future series starts beyond the horizon."""
+    now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
+    result = series_due_times(
+        starts_on=date(2027, 6, 1),
+        ends_on=None,
+        time_of_day=time(9, 0),
+        timezone=MOSCOW,
+        now=now,
+        interval_days=3,
+    )
+    assert result == [datetime(2027, 6, 1, 6, 0, tzinfo=UTC)]
+
+
+def test_series_due_times_periodic_stops_at_ends_on_inclusive() -> None:
+    """Include the final phase date when it equals ends_on and stop after it."""
+    now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
+    result = series_due_times(
+        starts_on=date(2026, 11, 1),
+        ends_on=date(2026, 11, 10),
+        time_of_day=time(9, 0),
+        timezone=MOSCOW,
+        now=now,
+        interval_days=3,
+    )
+    assert result == [
+        datetime(2026, 11, 7, 6, 0, tzinfo=UTC),
+        datetime(2026, 11, 10, 6, 0, tzinfo=UTC),
+    ]
+
+
+def test_series_due_times_periodic_respects_horizon() -> None:
+    """Stop emitting periodic slots once the horizon is exceeded."""
+    now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
+    result = series_due_times(
+        starts_on=date(2026, 11, 1),
+        ends_on=None,
+        time_of_day=time(9, 0),
+        timezone=MOSCOW,
+        now=now,
+        interval_days=3,
+        horizon_days=7,
+    )
+    assert result == [
+        datetime(2026, 11, 7, 6, 0, tzinfo=UTC),
+        datetime(2026, 11, 10, 6, 0, tzinfo=UTC),
+    ]
+
+
+def test_series_due_times_periodic_spring_forward_clamps() -> None:
+    """Clamp a periodic slot that falls into the spring-forward gap."""
+    now = datetime(2026, 3, 28, 12, 0, tzinfo=UTC)
+    result = series_due_times(
+        starts_on=date(2026, 3, 29),
+        ends_on=date(2026, 3, 29),
+        time_of_day=time(2, 30),
+        timezone=BERLIN,
+        now=now,
+        interval_days=1,
+    )
+    assert result == [datetime(2026, 3, 29, 1, 0, tzinfo=UTC)]
+
+
+@pytest.mark.parametrize("interval_days", [0, -1])
+def test_periodic_helpers_reject_non_positive_interval(interval_days: int) -> None:
+    """Reject a zero or negative interval before materializing slots."""
+    with pytest.raises(ValueError):
+        series_due_times(
+            starts_on=date(2026, 11, 1),
+            ends_on=None,
+            time_of_day=time(9, 0),
+            timezone=MOSCOW,
+            now=datetime(2026, 11, 4, 12, 0, tzinfo=UTC),
+            interval_days=interval_days,
+        )
 
 
 def test_localize_wall_time_spring_forward_clamps_to_gap_end() -> None:
@@ -211,6 +324,50 @@ def test_next_daily_time_advances_one_local_day() -> None:
         time_of_day=time(9, 0),
         timezone=MOSCOW,
     ) == datetime(2026, 11, 5, 6, 0, tzinfo=UTC)
+
+
+def test_next_occurrence_after_date_is_strictly_after_today() -> None:
+    """Return the next phase date strictly after the current local date."""
+    now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
+    assert next_occurrence_after_date(
+        anchor=date(2026, 11, 4),
+        interval_days=1,
+        time_of_day=time(9, 0),
+        timezone=MOSCOW,
+        now=now,
+    ) == datetime(2026, 11, 5, 6, 0, tzinfo=UTC)
+    assert next_occurrence_after_date(
+        anchor=date(2026, 11, 1),
+        interval_days=3,
+        time_of_day=time(9, 0),
+        timezone=MOSCOW,
+        now=now,
+    ) == datetime(2026, 11, 7, 6, 0, tzinfo=UTC)
+
+
+def test_next_occurrence_after_date_periodic_skips_multiple_passed_slots() -> None:
+    """Jump over several elapsed phase slots while preserving the anchor phase."""
+    now = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
+    assert next_occurrence_after_date(
+        anchor=date(2026, 10, 20),
+        interval_days=3,
+        time_of_day=time(9, 0),
+        timezone=MOSCOW,
+        now=now,
+    ) == datetime(2026, 11, 7, 6, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("interval_days", [0, -1])
+def test_next_occurrence_after_date_rejects_non_positive_interval(interval_days: int) -> None:
+    """Reject a zero or negative interval before computing the next phase date."""
+    with pytest.raises(ValueError, match="at least 1"):
+        next_occurrence_after_date(
+            anchor=date(2026, 11, 1),
+            interval_days=interval_days,
+            time_of_day=time(9, 0),
+            timezone=MOSCOW,
+            now=datetime(2026, 11, 4, 12, 0, tzinfo=UTC),
+        )
 
 
 def test_before_due_time_subtracts_offset() -> None:
@@ -299,10 +456,10 @@ def test_next_scheduled_time_rejects_non_positive_interval(interval_days: int) -
         )
 
 
-def test_daily_due_times_jumps_over_a_century() -> None:
+def test_series_due_times_jumps_over_a_century() -> None:
     """Start from the current local date instead of walking from the series start."""
     now = datetime(2099, 12, 1, tzinfo=UTC)
-    result = daily_due_times(
+    result = series_due_times(
         starts_on=date(2025, 1, 1),
         ends_on=None,
         time_of_day=time(9, 0),
@@ -337,6 +494,12 @@ def test_first_scheduled_time_keeps_future_due_anchor() -> None:
         now=datetime(2025, 1, 1, tzinfo=UTC),
     )
     assert result == datetime(2099, 12, 2, 9, 0, tzinfo=UTC)
+
+
+def test_task_recurrence_values() -> None:
+    """Keep task recurrence and periodic series values aligned with the API contract."""
+    assert {item.value for item in TaskRecurrence} == {"one_off", "regular", "periodic"}
+    assert SeriesFrequency.PERIODIC.value == "periodic"
 
 
 def test_enum_values_match_database_contract() -> None:
