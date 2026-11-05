@@ -1688,3 +1688,90 @@ async def test_lock_update_target_treats_soft_deleted_series_as_one_off() -> Non
     assert task.title == "New"
     assert task.series_id == series.id
     assert series.deleted_at == fixed_now()
+
+
+async def test_task_detail_classifies_dangling_series_reference_as_one_off() -> None:
+    """A task referencing a missing series is classified as one-off."""
+    repository = FakeTaskManagementRepository()
+    task = repository.insert_task(make_task(series_id=999, due_at=fixed_now() + timedelta(days=1)))
+    service = make_service(repository)
+
+    detail = await service.get(USER_ID, task.id)
+
+    assert detail.recurrence is TaskRecurrence.ONE_OFF
+
+
+async def test_list_batches_series_lookup_for_distinct_ids_including_deleted() -> None:
+    """A page with series tasks issues one deleted-inclusive batch series query."""
+    repository = FakeTaskManagementRepository()
+    daily = repository.insert_series(
+        make_series(
+            series_id=1,
+            frequency="daily",
+            interval_days=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    periodic = repository.insert_series(
+        make_series(
+            series_id=2,
+            frequency="periodic",
+            interval_days=3,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    repository.insert_task(make_task(task_id=1, due_at=fixed_now() + timedelta(minutes=1)))
+    repository.insert_task(
+        make_task(
+            task_id=2,
+            series_id=daily.id,
+            due_at=fixed_now() + timedelta(minutes=2),
+        )
+    )
+    repository.insert_task(
+        make_task(
+            task_id=3,
+            series_id=daily.id,
+            due_at=fixed_now() + timedelta(minutes=3),
+        )
+    )
+    repository.insert_task(
+        make_task(
+            task_id=4,
+            series_id=periodic.id,
+            due_at=fixed_now() + timedelta(minutes=4),
+        )
+    )
+    service = make_service(repository)
+
+    page = await service.list(USER_ID, TaskFilters(), limit=DEFAULT_PAGE_SIZE)
+
+    assert len(page.items) == 4
+    assert repository.series_batch_calls == [((daily.id, periodic.id), True)]
+
+
+async def test_list_skips_series_batch_query_when_no_task_has_series() -> None:
+    """A page without series tasks issues no batch series query."""
+    repository = FakeTaskManagementRepository()
+    repository.insert_task(make_task(task_id=1, due_at=fixed_now() + timedelta(minutes=1)))
+    repository.insert_task(make_task(task_id=2, due_at=fixed_now() + timedelta(minutes=2)))
+    service = make_service(repository)
+
+    page = await service.list(USER_ID, TaskFilters(), limit=DEFAULT_PAGE_SIZE)
+
+    assert len(page.items) == 2
+    assert repository.series_batch_calls == []
+
+
+async def test_list_empty_page_issues_no_batch_queries() -> None:
+    """An empty page skips every related-data batch query."""
+    repository = FakeTaskManagementRepository()
+    service = make_service(repository)
+
+    page = await service.list(USER_ID, TaskFilters(), limit=DEFAULT_PAGE_SIZE)
+
+    assert page.items == []
+    assert repository.batch_calls == []
+    assert repository.series_batch_calls == []

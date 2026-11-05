@@ -92,6 +92,7 @@ class FakeTaskManagementRepository:
         self.task_labels: set[tuple[int, int]] = set()
         self.series_labels: set[tuple[int, int]] = set()
         self.batch_calls: list[tuple[str, tuple[int, ...]]] = []
+        self.series_batch_calls: list[tuple[tuple[int, ...], bool]] = []
         self.label_batch_calls: list[tuple[tuple[int, ...],]] = []
         self.task_label_calls: list[tuple[int, int, tuple[int, ...]]] = []
         self.bulk_calls: list[str] = []
@@ -846,7 +847,8 @@ class FakeTaskManagementRepository:
         *,
         include_deleted: bool = False,
     ) -> dict[int, TaskSeries]:
-        """Return owned series keyed by identifier, including soft-deleted rows on demand."""
+        """Record the batch and return owned series keyed by identifier."""
+        self.series_batch_calls.append((tuple(series_ids), include_deleted))
         result: dict[int, TaskSeries] = {}
         for series_id in series_ids:
             series = await self.get_series(
