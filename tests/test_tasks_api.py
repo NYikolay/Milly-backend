@@ -15,7 +15,7 @@ from backend.core.errors import NotFoundError
 from backend.models.label import Label
 from backend.models.task import Task
 from backend.models.task_reminder import TaskReminder
-from backend.task_management.enums import Priority, ReminderKind
+from backend.task_management.enums import Priority, ReminderKind, TaskRecurrence
 from backend.task_management.labels import LabelService
 from backend.task_management.palette import PaletteService
 from backend.task_management.projects import ProjectService
@@ -71,6 +71,7 @@ def _task_detail(
     due_at: datetime = DUE_AT,
     completed_at: datetime | None = None,
     reminders_enabled: bool = True,
+    recurrence: TaskRecurrence = TaskRecurrence.ONE_OFF,
 ) -> TaskDetail:
     """Build a task detail with deterministic labels and reminders."""
     task = Task(
@@ -101,7 +102,13 @@ def _task_detail(
         timezone=None,
         next_run_at=REMINDER_AT,
     )
-    return TaskDetail(task=task, labels=[label], reminders=[reminder], project=None)
+    return TaskDetail(
+        task=task,
+        labels=[label],
+        reminders=[reminder],
+        project=None,
+        recurrence=recurrence,
+    )
 
 
 class FakeTaskService:
@@ -271,6 +278,7 @@ async def test_create_task_returns_reminders_and_next_run(
     body = response.json()
     assert body["title"] == "Task"
     assert body["priority"] == "urgent_important"
+    assert body["recurrence"] == "one_off"
     assert body["labels"] == [{"id": 3, "name": "Home"}]
     assert body["reminders"][0]["kind"] == "before_due"
     assert body["reminders"][0]["offset_minutes"] == 30
@@ -367,6 +375,23 @@ async def test_list_tasks_passes_all_filters(
     assert filters.recurrence == "regular"
     assert filters.query == "report"
     assert filters.include_archived_projects is True
+
+
+async def test_list_tasks_accepts_periodic_recurrence_filter(
+    task_client: AsyncClient,
+    fake_task_service: FakeTaskService,
+) -> None:
+    """Translate the periodic recurrence filter into service filters."""
+    fake_task_service.add_detail(_task_detail(recurrence=TaskRecurrence.PERIODIC))
+
+    response = await task_client.get(
+        "/api/v1/tasks",
+        params=[("recurrence", "periodic")],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["recurrence"] == "periodic"
+    assert fake_task_service.list_calls[0][1].recurrence == "periodic"
 
 
 async def test_task_list_returns_default_page_size(
@@ -510,7 +535,31 @@ async def test_read_task_returns_detail(
 
     assert response.status_code == 200
     assert response.json()["id"] == 1
+    assert response.json()["recurrence"] == "one_off"
     assert response.json()["reminders"][0]["id"] == 4
+
+
+@pytest.mark.parametrize(
+    ("recurrence", "expected"),
+    [
+        (TaskRecurrence.ONE_OFF, "one_off"),
+        (TaskRecurrence.REGULAR, "regular"),
+        (TaskRecurrence.PERIODIC, "periodic"),
+    ],
+)
+async def test_read_task_returns_recurrence(
+    task_client: AsyncClient,
+    fake_task_service: FakeTaskService,
+    recurrence: TaskRecurrence,
+    expected: str,
+) -> None:
+    """Serialize the recurrence mode of regular, periodic, and one-off tasks."""
+    fake_task_service.add_detail(_task_detail(recurrence=recurrence))
+
+    response = await task_client.get("/api/v1/tasks/1")
+
+    assert response.status_code == 200
+    assert response.json()["recurrence"] == expected
 
 
 async def test_complete_and_uncomplete_return_updated_task(
@@ -550,6 +599,53 @@ async def test_update_series_instance_delegates_to_service(
     assert task_id == 1
     assert changes["title"] == "Updated"
     assert [item.kind for item in changes["reminders"]] == [ReminderKind.BEFORE_DUE]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"recurrence": "one_off", "interval_days": None},
+        {"recurrence": "one_off", "interval_days": 3},
+        {"recurrence": "regular", "interval_days": 3},
+        {"recurrence": "periodic"},
+        {"recurrence": "periodic", "interval_days": 1},
+        {"interval_days": 1},
+    ],
+)
+async def test_task_update_rejects_invalid_recurrence_interval(
+    task_client: AsyncClient,
+    payload: dict[str, object],
+) -> None:
+    """Reject recurrence/interval pairs that violate the cross-field matrix."""
+    response = await task_client.patch("/api/v1/tasks/1", json=payload)
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"recurrence": "regular"},
+        {"recurrence": "regular", "interval_days": 1},
+        {"recurrence": "regular", "interval_days": None},
+        {"recurrence": "periodic", "interval_days": 3},
+        {"interval_days": 5},
+    ],
+)
+async def test_task_update_accepts_valid_recurrence_interval(
+    task_client: AsyncClient,
+    fake_task_service: FakeTaskService,
+    payload: dict[str, object],
+) -> None:
+    """Forward accepted recurrence/interval values to the task service."""
+    fake_task_service.add_detail(_task_detail())
+
+    response = await task_client.patch("/api/v1/tasks/1", json=payload)
+
+    assert response.status_code == 200
+    task_id, changes = fake_task_service.updated[0]
+    assert task_id == 1
+    assert changes == payload
 
 
 async def test_delete_task_returns_no_content(

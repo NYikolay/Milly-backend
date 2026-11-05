@@ -47,7 +47,7 @@ def _task_response(detail: TaskDetail) -> TaskResponse:
         detail: Task detail returned by the task service.
 
     Returns:
-        TaskResponse: The task with labels and reminders.
+        TaskResponse: The task with labels, reminders, and recurrence mode.
     """
     task = detail.task
     return TaskResponse(
@@ -57,6 +57,7 @@ def _task_response(detail: TaskDetail) -> TaskResponse:
         title=task.title,
         description=task.description,
         priority=Priority(task.priority),
+        recurrence=detail.recurrence,
         due_at=task.due_at,
         completed_at=task.completed_at,
         reminders_enabled=task.reminders_enabled,
@@ -73,7 +74,7 @@ def _task_changes(payload: TaskUpdate) -> dict[str, Any]:
 
     Purpose:
         Preserve omitted fields while converting reminder schemas into service
-        inputs.
+        inputs; recurrence and interval fields pass through unchanged.
 
     Args:
         payload: Partial task update fields.
@@ -359,6 +360,10 @@ async def update_task(
     Notes:
         - Omitted fields keep their current values; an explicit ``null``
           clears description or project.
+        - ``recurrence`` toggles a task between ``one_off``, ``regular``, and
+          ``periodic``; ``periodic`` requires ``interval_days >= 2``.
+        - An interval without ``recurrence`` is validated against the target
+          series by the service.
         - Future incomplete instances of a series are updated in place.
     """
     detail = await service.update(claims.user_id, task_id, **_task_changes(payload))
@@ -449,8 +454,9 @@ async def delete_task(
     Delete an owned task or its recurring series.
 
     Purpose:
-        Remove a one-off task or apply the series deletion rule for an
-        instance without returning the deleted entity.
+        Remove a one-off, completed, or overdue task individually, or apply the
+        series deletion rule for an active future instance without returning
+        the deleted entity.
 
     Args:
         task_id: Task identifier.
@@ -467,6 +473,8 @@ async def delete_task(
             this user.
 
     Notes:
+        - Deleting an active future series instance removes the series and all
+          of its future incomplete instances; other tasks are deleted alone.
         - The deletion is committed by the request-scoped session.
     """
     await service.delete(claims.user_id, task_id)

@@ -13,7 +13,12 @@ from backend.task_management.date_bounds import (
     require_supported_date,
     require_supported_datetime,
 )
-from backend.task_management.enums import Priority, ReminderKind
+from backend.task_management.enums import (
+    Priority,
+    ReminderKind,
+    SeriesFrequency,
+    TaskRecurrence,
+)
 from backend.task_management.reminders import ReminderInput
 from backend.task_management.tasks import TaskFilters
 
@@ -498,6 +503,8 @@ class TaskUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=5000)
     priority: Priority | None = None
+    recurrence: TaskRecurrence | None = None
+    interval_days: int | None = Field(default=None, ge=1, le=32_767)
     due_at: datetime | None = None
     project_id: int | None = Field(default=None, gt=0)
     label_ids: list[int] | None = Field(default=None, max_length=100)
@@ -554,6 +561,44 @@ class TaskUpdate(BaseModel):
         """
         return _require_unique_reminder_kinds(value)
 
+    @model_validator(mode="after")
+    def _validate_recurrence_interval(self) -> Self:
+        """
+        Enforce the task recurrence-mode and interval compatibility matrix.
+
+        Purpose:
+            Reject impossible PATCH combinations at the request boundary while
+            leaving target-series checks to the task service.
+
+        Returns:
+            Self: The validated update payload.
+
+        Raises:
+            ValueError: If ``one_off`` carries an interval, ``regular`` carries
+                an interval other than ``None`` or ``1``, ``periodic`` lacks an
+                interval of at least ``2``, or an interval supplied without a
+                recurrence mode is below ``2``.
+
+        Notes:
+            - ``model_fields_set`` distinguishes an omitted field from an
+              explicit ``null``.
+            - An interval supplied without a recurrence mode is forwarded so
+              the service can verify that the target series is periodic.
+        """
+        interval_supplied = "interval_days" in self.model_fields_set
+        if self.recurrence is TaskRecurrence.ONE_OFF:
+            if interval_supplied:
+                raise ValueError("one_off tasks do not accept interval_days")
+        elif self.recurrence is TaskRecurrence.REGULAR:
+            if interval_supplied and self.interval_days not in (None, 1):
+                raise ValueError("regular tasks accept only interval_days 1")
+        elif self.recurrence is TaskRecurrence.PERIODIC:
+            if self.interval_days is None or self.interval_days < 2:
+                raise ValueError("periodic tasks require interval_days >= 2")
+        elif interval_supplied and (self.interval_days is None or self.interval_days < 2):
+            raise ValueError("interval_days requires a periodic target")
+        return self
+
 
 class TaskResponse(BaseModel):
     """Task detail returned by task endpoints."""
@@ -564,6 +609,7 @@ class TaskResponse(BaseModel):
     title: str
     description: str | None
     priority: Priority
+    recurrence: TaskRecurrence
     due_at: datetime
     completed_at: datetime | None
     reminders_enabled: bool
@@ -587,7 +633,7 @@ class TaskFiltersQuery(BaseModel):
     project_ids: list[int] = Field(default_factory=list)
     priorities: list[Priority] = Field(default_factory=list)
     status: Literal["all", "open", "completed", "overdue"] = "all"
-    recurrence: Literal["all", "regular", "one_off"] = "all"
+    recurrence: Literal["all", "regular", "periodic", "one_off"] = "all"
     q: str | None = None
     include_archived_projects: bool = False
 
@@ -644,11 +690,13 @@ class TaskListQuery(TaskFiltersQuery):
 
 
 class SeriesCreate(BaseModel):
-    """Fields accepted when creating a daily recurring series."""
+    """Fields accepted when creating a daily or periodic recurring series."""
 
     title: str = Field(min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=5000)
     priority: Priority = Priority.NEITHER
+    frequency: SeriesFrequency = SeriesFrequency.DAILY
+    interval_days: int | None = Field(default=None, ge=1, le=32_767)
     time_of_day: time
     timezone: str = Field(min_length=1, max_length=64)
     starts_on: Date
@@ -753,6 +801,33 @@ class SeriesCreate(BaseModel):
         """
         return _require_unique_reminder_kinds(value) or []
 
+    @model_validator(mode="after")
+    def _validate_frequency_interval(self) -> Self:
+        """
+        Enforce the series frequency and interval compatibility matrix.
+
+        Purpose:
+            Reject impossible series schedules before the service persists or
+            regenerates occurrences.
+
+        Returns:
+            Self: The validated creation payload.
+
+        Raises:
+            ValueError: If a daily series requests an interval other than
+                ``None`` or ``1``, or a periodic series lacks an interval of at
+                least ``2``.
+
+        Notes:
+            - Daily series default to an omitted interval and store ``1``.
+        """
+        if self.frequency is SeriesFrequency.DAILY:
+            if self.interval_days not in (None, 1):
+                raise ValueError("daily series accept only interval_days 1")
+        elif self.interval_days is None or self.interval_days < 2:
+            raise ValueError("periodic series require interval_days >= 2")
+        return self
+
 
 class SeriesUpdate(BaseModel):
     """Optional fields accepted when updating a recurring series."""
@@ -760,6 +835,8 @@ class SeriesUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=5000)
     priority: Priority | None = None
+    frequency: SeriesFrequency | None = None
+    interval_days: int | None = Field(default=None, ge=1, le=32_767)
     time_of_day: time | None = None
     timezone: str | None = Field(default=None, min_length=1, max_length=64)
     starts_on: Date | None = None
@@ -858,6 +935,41 @@ class SeriesUpdate(BaseModel):
         """
         return _require_unique_reminder_kinds(value)
 
+    @model_validator(mode="after")
+    def _validate_frequency_interval(self) -> Self:
+        """
+        Enforce supplied series frequency and interval compatibility.
+
+        Purpose:
+            Reject impossible schedule pairs at the request boundary while
+            leaving interval-only and target-series checks to the service.
+
+        Returns:
+            Self: The validated update payload.
+
+        Raises:
+            ValueError: If both fields are supplied and a daily series requests
+                an interval other than ``None`` or ``1``, or a periodic series
+                requests an interval below ``2``.
+
+        Notes:
+            - An interval without a frequency is forwarded so the service can
+              verify the target series schedule.
+            - A frequency without an interval is forwarded so the service can
+              reuse or require an interval based on the stored series.
+        """
+        frequency_supplied = "frequency" in self.model_fields_set
+        interval_supplied = "interval_days" in self.model_fields_set
+        if frequency_supplied and interval_supplied:
+            if self.frequency is SeriesFrequency.DAILY:
+                if self.interval_days not in (None, 1):
+                    raise ValueError("daily series accept only interval_days 1")
+            elif self.frequency is SeriesFrequency.PERIODIC and (
+                self.interval_days is None or self.interval_days < 2
+            ):
+                raise ValueError("periodic series require interval_days >= 2")
+        return self
+
 
 class SeriesResponse(BaseModel):
     """Recurring series detail returned by series endpoints."""
@@ -866,7 +978,8 @@ class SeriesResponse(BaseModel):
     title: str
     description: str | None
     priority: Priority
-    frequency: Literal["daily"]
+    frequency: SeriesFrequency
+    interval_days: int
     time_of_day: time
     timezone: str
     starts_on: Date

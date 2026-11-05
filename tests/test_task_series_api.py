@@ -38,6 +38,8 @@ def _series_detail(
     series_id: int = 1,
     user_id: int = 1,
     title: str = "Daily",
+    frequency: str = "daily",
+    interval_days: int = 1,
 ) -> SeriesDetail:
     """Build a series detail with deterministic labels and template reminders."""
     series = TaskSeries(
@@ -47,7 +49,8 @@ def _series_detail(
         title=title,
         description="Every day",
         priority=Priority.IMPORTANT_NOT_URGENT.value,
-        frequency="daily",
+        frequency=frequency,
+        interval_days=interval_days,
         time_of_day=time(9, 0),
         timezone="Europe/Moscow",
         starts_on=date(2026, 11, 4),
@@ -127,7 +130,15 @@ class FakeSeriesService:
         if detail is None or detail.series.user_id != user_id:
             raise NotFoundError("Series not found")
         for field, value in changes.items():
-            if field in {"title", "description", "priority", "time_of_day", "timezone"}:
+            if field in {
+                "title",
+                "description",
+                "priority",
+                "frequency",
+                "interval_days",
+                "time_of_day",
+                "timezone",
+            }:
                 setattr(detail.series, field, getattr(value, "value", value))
             elif field in {"ends_on", "project_id"}:
                 setattr(detail.series, field, value)
@@ -192,6 +203,7 @@ async def test_create_series_returns_schedule_and_generated_metadata(
     body = response.json()
     assert body["id"] == 1
     assert body["frequency"] == "daily"
+    assert body["interval_days"] == 1
     assert body["timezone"] == "Europe/Moscow"
     assert body["time_of_day"] == "09:00:00"
     assert body["starts_on"] == "2026-11-04"
@@ -203,6 +215,64 @@ async def test_create_series_returns_schedule_and_generated_metadata(
     assert recorded["timezone"] == "Europe/Moscow"
     assert recorded["starts_on"] == date(2026, 11, 4)
     assert [item.kind for item in recorded["reminders"]] == [ReminderKind.SCHEDULED]
+
+
+async def test_create_periodic_series_returns_frequency_and_interval(
+    series_client: AsyncClient,
+    fake_series_service: FakeSeriesService,
+) -> None:
+    """Create a periodic series and return its frequency and interval."""
+    fake_series_service.add_detail(_series_detail(frequency="periodic", interval_days=3))
+
+    response = await series_client.post(
+        "/api/v1/task-series",
+        json={
+            "title": "Every third day",
+            "time_of_day": "09:00:00",
+            "timezone": "UTC",
+            "starts_on": "2026-11-04",
+            "frequency": "periodic",
+            "interval_days": 3,
+        },
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["frequency"] == "periodic"
+    assert body["interval_days"] == 3
+    recorded = fake_series_service.created[0]
+    assert recorded["frequency"] == "periodic"
+    assert recorded["interval_days"] == 3
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"frequency": "daily", "interval_days": 3},
+        {"frequency": "periodic"},
+        {"frequency": "periodic", "interval_days": 1},
+    ],
+)
+async def test_create_series_rejects_invalid_frequency_interval(
+    series_client: AsyncClient,
+    fake_series_service: FakeSeriesService,
+    payload: dict[str, object],
+) -> None:
+    """Reject invalid daily/periodic frequency and interval pairs."""
+    response = await series_client.post(
+        "/api/v1/task-series",
+        json={
+            "title": "Invalid",
+            "time_of_day": "09:00:00",
+            "timezone": "UTC",
+            "starts_on": "2026-11-04",
+            **payload,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+    assert fake_series_service.created == []
 
 
 async def test_series_create_rejects_too_many_labels(series_client: AsyncClient) -> None:
@@ -315,6 +385,67 @@ async def test_update_series_calls_service(
         "time_of_day": time(18, 0),
         "timezone": "UTC",
     }
+
+
+async def test_update_series_passes_frequency_and_interval(
+    series_client: AsyncClient,
+    fake_series_service: FakeSeriesService,
+) -> None:
+    """Forward a periodic frequency and interval update to the series service."""
+    fake_series_service.add_detail(_series_detail())
+
+    response = await series_client.patch(
+        "/api/v1/task-series/1",
+        json={"frequency": "periodic", "interval_days": 3},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["frequency"] == "periodic"
+    assert body["interval_days"] == 3
+    series_id, changes = fake_series_service.updated[0]
+    assert series_id == 1
+    assert changes["frequency"] == "periodic"
+    assert changes["interval_days"] == 3
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"frequency": "daily", "interval_days": 3},
+        {"frequency": "periodic", "interval_days": 1},
+    ],
+)
+async def test_update_series_rejects_invalid_frequency_interval(
+    series_client: AsyncClient,
+    fake_series_service: FakeSeriesService,
+    payload: dict[str, object],
+) -> None:
+    """Reject invalid frequency and interval updates at the request boundary."""
+    response = await series_client.patch("/api/v1/task-series/1", json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+    assert fake_series_service.updated == []
+
+
+async def test_update_series_passes_interval_only_for_periodic_series(
+    series_client: AsyncClient,
+    fake_series_service: FakeSeriesService,
+) -> None:
+    """Leave an interval-only update to the service for a periodic series."""
+    fake_series_service.add_detail(_series_detail(frequency="periodic", interval_days=3))
+
+    response = await series_client.patch(
+        "/api/v1/task-series/1",
+        json={"interval_days": 5},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["interval_days"] == 5
+    series_id, changes = fake_series_service.updated[0]
+    assert series_id == 1
+    assert changes == {"interval_days": 5}
 
 
 async def test_delete_series_calls_service(

@@ -39,7 +39,8 @@ def _series_response(detail: SeriesDetail) -> SeriesResponse:
         detail: Series detail returned by the series service.
 
     Returns:
-        SeriesResponse: The series fields exposed to clients.
+        SeriesResponse: The series fields exposed to clients, including its
+            frequency and interval between occurrences.
     """
     series = detail.series
     return SeriesResponse(
@@ -48,6 +49,7 @@ def _series_response(detail: SeriesDetail) -> SeriesResponse:
         description=series.description,
         priority=Priority(series.priority),
         frequency=SeriesFrequency(series.frequency),
+        interval_days=series.interval_days,
         time_of_day=series.time_of_day,
         timezone=series.timezone,
         starts_on=series.starts_on,
@@ -134,11 +136,12 @@ async def create_series(
     Create a daily recurring series for the authenticated user.
 
     Purpose:
-        Validate the request, persist the series template, generate its first
-        instances, and return the schedule and generation metadata.
+        Validate the request, persist a daily or periodic series template,
+        generate its first instances, and return the schedule and generation
+        metadata.
 
     Args:
-        payload: Series creation fields.
+        payload: Series creation fields, including frequency and interval.
         claims: Verified access-token claims.
         service: Series service performing creation and generation.
 
@@ -154,6 +157,8 @@ async def create_series(
             this user.
 
     Notes:
+        - Daily series default to an interval of one day; periodic series
+          require ``interval_days >= 2``.
         - The request-scoped session commits after the response is built.
         - ``generated_through`` reflects the last generated occurrence.
     """
@@ -162,6 +167,8 @@ async def create_series(
         title=payload.title,
         description=payload.description,
         priority=payload.priority,
+        frequency=payload.frequency,
+        interval_days=payload.interval_days,
         time_of_day=payload.time_of_day,
         timezone=payload.timezone,
         starts_on=payload.starts_on,
@@ -225,7 +232,8 @@ async def update_series(
 
     Purpose:
         Apply only the provided fields, regenerate future instances when the
-        schedule changes, and return the refreshed series.
+        frequency, interval, or other schedule fields change, and return the
+        refreshed series.
 
     Args:
         series_id: Series identifier.
@@ -247,6 +255,10 @@ async def update_series(
     Notes:
         - Past and completed instances keep their snapshots.
         - An explicit ``null`` clears description, end date, or project.
+        - Changing ``frequency`` or ``interval_days`` regenerates future
+          incomplete instances; periodic series require ``interval_days >= 2``.
+        - An interval without ``frequency`` is validated against the stored
+          series by the service.
     """
     await service.update(claims.user_id, series_id, **_series_changes(payload))
     return _series_response(await service.get_detail(claims.user_id, series_id))
