@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -276,6 +276,110 @@ class SeriesService:
         await self._repository.flush()
         return series
 
+    async def create_from_task(
+        self,
+        user_id: int,
+        task: Task,
+        *,
+        frequency: SeriesFrequency,
+        interval_days: int | None = None,
+    ) -> TaskSeries:
+        """
+        Convert a one-off task into a recurring series.
+
+        Purpose:
+            Snapshot the task into a new series template, attach the task to
+            it, and materialize future instances without duplicating the
+            current due slot.
+
+        Args:
+            user_id: Owner identifier.
+            task: Task to convert; the caller must already have excluded an
+                active series reference.
+            frequency: Target daily or periodic occurrence rhythm.
+            interval_days: Number of days between periodic occurrences; daily
+                series accept only ``None`` or ``1``. Defaults to ``None``.
+
+        Returns:
+            TaskSeries: The flushed series with the converted task attached.
+
+        Raises:
+            BadRequestError: If the user's stored timezone is invalid, the
+                frequency/interval pair is invalid, or the task project is
+                archived.
+            NotFoundError: If the task project or one of its labels does not
+                exist for this user.
+
+        Notes:
+            - A ``task.series_id`` pointing to a soft-deleted series is
+              overwritten by the new series.
+            - ``starts_on`` and ``time_of_day`` come from ``task.due_at`` in
+              the user's timezone, defaulting to UTC.
+            - Scheduled template reminders receive the series interval only
+              for periodic series; daily conversions keep the client interval.
+            - The current task's instance reminders are left untouched.
+            - Sets ``task.series_id`` before generation so the current due slot
+              is not duplicated.
+            - Flushes through the repository but does not commit.
+        """
+        resolved_frequency, resolved_interval_days = self._resolve_schedule(
+            frequency=frequency,
+            interval_days=interval_days,
+        )
+        timezone_name = await self._repository.get_user_timezone(user_id)
+        zone = self._timezone(timezone_name or "UTC")
+        local_due_at = task.due_at.astimezone(zone)
+        starts_on = local_due_at.date()
+        time_of_day = local_due_at.time()
+        await self._validate_project(user_id, task.project_id)
+        labels = await self._repository.list_task_labels(user_id, task.id)
+        owned_label_ids = await self._validate_labels(
+            user_id,
+            tuple(label.id for label in labels),
+        )
+        reminders = [
+            reminder_input_from_row(reminder)
+            for reminder in await self._repository.list_task_reminders(user_id, task.id)
+        ]
+        if resolved_frequency is SeriesFrequency.PERIODIC:
+            reminders = [
+                replace(reminder, interval_days=resolved_interval_days)
+                if reminder.kind is ReminderKind.SCHEDULED
+                else reminder
+                for reminder in reminders
+            ]
+        series = TaskSeries(
+            user_id=user_id,
+            project_id=task.project_id,
+            title=task.title,
+            description=task.description,
+            priority=task.priority,
+            frequency=resolved_frequency.value,
+            interval_days=resolved_interval_days,
+            time_of_day=time_of_day,
+            timezone=zone.key,
+            starts_on=starts_on,
+            ends_on=None,
+            generated_through=None,
+            reminders_enabled=task.reminders_enabled,
+        )
+        await self._repository.add_series(series)
+        await self._repository.add_series_labels(series.id, user_id, owned_label_ids)
+        for reminder in reminders:
+            await self._repository.add_reminder(
+                build_series_reminder(
+                    reminder,
+                    user_id=user_id,
+                    series_id=series.id,
+                    timezone_name=series.timezone,
+                )
+            )
+        task.series_id = series.id
+        now = self._clock()
+        await self._generate_series(series, now)
+        await self._repository.flush()
+        return series
+
     async def update(
         self,
         user_id: int,
@@ -461,6 +565,53 @@ class SeriesService:
             )
         await self._repository.flush()
         return series
+
+    async def detach_task(
+        self,
+        user_id: int,
+        task: Task,
+        series: TaskSeries,
+    ) -> None:
+        """
+        Detach one task from its series and delete the series.
+
+        Purpose:
+            Convert the selected instance back into a one-off task while
+            removing future instances that would otherwise keep the series
+            alive.
+
+        Args:
+            user_id: Owner identifier.
+            task: Task to keep; the caller must already hold the series lock.
+            series: Locked series to delete.
+
+        Returns:
+            None: The changes stay in the current unit of work.
+
+        Notes:
+            - Physically deletes future incomplete instances except ``task``;
+              past, completed, and overdue instances remain as history.
+            - Cancels template reminder slots and deliveries.
+            - Soft-deletes the series and clears the current task's series
+              reference.
+            - Locks the series task rows through the repository query and does
+              not commit.
+        """
+        now = self._clock()
+        locked_tasks = await self._repository.get_series_tasks_for_update(
+            series.id,
+            user_id,
+        )
+        removed_task_ids = tuple(
+            item.id
+            for item in locked_tasks
+            if item.id != task.id and item.completed_at is None and item.due_at > now
+        )
+        await self._repository.hard_delete_tasks(removed_task_ids, user_id)
+        await self._repository.cancel_series_reminders(user_id, series.id)
+        await self._repository.soft_delete_series(series, now, uuid4())
+        task.series_id = None
+        await self._repository.flush()
 
     async def delete(self, user_id: int, series_id: int) -> None:
         """
