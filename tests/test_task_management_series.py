@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 
 from backend.core.errors import BadRequestError, ErrorCode, NotFoundError
+from backend.models.task import Task
 from backend.task_management.enums import Priority, ReminderKind, SeriesFrequency
 from backend.task_management.labels import LabelService
 from backend.task_management.palette import PaletteService
@@ -33,6 +35,34 @@ def make_service(repository: FakeTaskManagementRepository) -> SeriesService:
         LabelService(repository, palette, clock=fixed_now),
         clock=fixed_now,
     )
+
+
+class FlushOrderingRepository(FakeTaskManagementRepository):
+    """Fake repository that records whether the linked task was flushed before dedupe."""
+
+    def __init__(self) -> None:
+        """Initialize the watched task and ordering flags."""
+        super().__init__()
+        self.watched_task: Task | None = None
+        self.task_flushed_before_due_lookup = False
+        self._task_flushed = False
+
+    async def flush(self) -> None:
+        """Record a flush that includes the watched task's series link."""
+        await super().flush()
+        if self.watched_task is not None and self.watched_task.series_id is not None:
+            self._task_flushed = True
+
+    async def list_series_due_times(
+        self,
+        series_id: int,
+        user_id: int,
+        *,
+        now: datetime,
+    ) -> Sequence[datetime]:
+        """Record whether the task link was flushed before the dedupe query."""
+        self.task_flushed_before_due_lookup = self._task_flushed
+        return await super().list_series_due_times(series_id, user_id, now=now)
 
 
 async def test_create_series_in_the_past_starts_from_the_next_future_slot() -> None:
@@ -1453,3 +1483,38 @@ async def test_detach_task_clears_deleted_task_related_rows() -> None:
     assert (current.id, label.id) in repository.task_labels
     assert current_reminder.id in repository.reminders
     assert current_delivery.id in repository.deliveries
+
+
+async def test_create_from_task_flushes_series_link_before_due_slot_dedupe() -> None:
+    """The converted task must be persisted before generation deduplicates slots."""
+    repository = FlushOrderingRepository()
+    task = repository.insert_task(make_task(due_at=datetime(2026, 11, 7, 6, 0, tzinfo=UTC)))
+    repository.watched_task = task
+    service = make_service(repository)
+
+    series = await service.create_from_task(
+        USER_ID,
+        task,
+        frequency=SeriesFrequency.DAILY,
+    )
+
+    assert task.series_id == series.id
+    assert repository.task_flushed_before_due_lookup is True
+
+
+async def test_create_from_task_rejects_derived_start_outside_supported_range() -> None:
+    """A local due date outside the supported bounds is rejected before writes."""
+    repository = FakeTaskManagementRepository()
+    repository.user_timezones[USER_ID] = "Pacific/Honolulu"
+    task = repository.insert_task(make_task(due_at=datetime(2025, 1, 1, 0, 0, tzinfo=UTC)))
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError):
+        await service.create_from_task(
+            USER_ID,
+            task,
+            frequency=SeriesFrequency.DAILY,
+        )
+
+    assert repository.series == {}
+    assert task.series_id is None

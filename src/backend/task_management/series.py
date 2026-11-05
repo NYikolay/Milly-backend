@@ -305,8 +305,8 @@ class SeriesService:
 
         Raises:
             BadRequestError: If the user's stored timezone is invalid, the
-                frequency/interval pair is invalid, or the task project is
-                archived.
+                frequency/interval pair is invalid, the derived start date is
+                outside the supported range, or the task project is archived.
             NotFoundError: If the task project or one of its labels does not
                 exist for this user.
 
@@ -318,8 +318,9 @@ class SeriesService:
             - Scheduled template reminders receive the series interval only
               for periodic series; daily conversions keep the client interval.
             - The current task's instance reminders are left untouched.
-            - Sets ``task.series_id`` before generation so the current due slot
-              is not duplicated.
+            - Sets ``task.series_id`` and flushes before generation so the
+              current due slot is visible to the dedupe query and is not
+              duplicated.
             - Flushes through the repository but does not commit.
         """
         resolved_frequency, resolved_interval_days = self._resolve_schedule(
@@ -331,6 +332,7 @@ class SeriesService:
         local_due_at = task.due_at.astimezone(zone)
         starts_on = local_due_at.date()
         time_of_day = local_due_at.time()
+        self._validate_range(starts_on, None)
         await self._validate_project(user_id, task.project_id)
         labels = await self._repository.list_task_labels(user_id, task.id)
         owned_label_ids = await self._validate_labels(
@@ -375,6 +377,7 @@ class SeriesService:
                 )
             )
         task.series_id = series.id
+        await self._repository.flush()
         now = self._clock()
         await self._generate_series(series, now)
         await self._repository.flush()
