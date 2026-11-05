@@ -11,6 +11,7 @@ from backend.task_management.enums import Priority, ReminderKind, SeriesFrequenc
 from backend.task_management.labels import LabelService
 from backend.task_management.palette import PaletteService
 from backend.task_management.projects import ProjectService
+from backend.task_management.reminders import ReminderInput
 from backend.task_management.series import SeriesService
 from tests.task_management_fakes import (
     FakeTaskManagementRepository,
@@ -984,6 +985,49 @@ async def test_create_periodic_series_stores_interval_and_generates_phase_slots(
     assert due_times[1] == datetime(2026, 11, 10, 6, 0, tzinfo=UTC)
 
 
+async def test_create_periodic_series_anchors_early_scheduled_reminder_to_due_date() -> None:
+    """An explicit periodic series keeps scheduled instances on task days."""
+    repository = FakeTaskManagementRepository()
+    service = make_service(repository)
+
+    series = await service.create(
+        USER_ID,
+        title="Periodic",
+        description=None,
+        priority=Priority.NEITHER,
+        frequency=SeriesFrequency.PERIODIC,
+        interval_days=3,
+        time_of_day=time(9, 0),
+        timezone="UTC",
+        starts_on=date(2026, 11, 1),
+        ends_on=None,
+        project_id=None,
+        label_ids=(),
+        reminders_enabled=True,
+        reminders=(
+            ReminderInput(
+                kind=ReminderKind.SCHEDULED,
+                interval_days=3,
+                time_of_day=time(8, 0),
+            ),
+        ),
+    )
+
+    tasks = sorted(
+        (task for task in repository.tasks.values() if task.series_id == series.id),
+        key=lambda task: task.due_at,
+    )
+    assert tasks
+    for task in tasks:
+        instance_reminders = await repository.list_task_reminders(USER_ID, task.id)
+        assert len(instance_reminders) == 1
+        assert instance_reminders[0].next_run_at == datetime.combine(
+            task.due_at.date(),
+            time(8, 0),
+            tzinfo=UTC,
+        )
+
+
 @pytest.mark.parametrize(
     ("frequency", "interval_days"),
     [
@@ -1358,7 +1402,7 @@ async def test_create_from_task_regular_preserves_reminder_interval() -> None:
 
 
 async def test_create_from_task_phase_anchors_periodic_scheduled_reminder() -> None:
-    """Anchor periodic conversion reminders to series occurrence days, not due plus one."""
+    """Anchor generated periodic conversion reminders to instance due dates."""
     repository = FakeTaskManagementRepository()
     due_at = datetime(2026, 11, 7, 9, 0, tzinfo=UTC)
     task = repository.insert_task(make_task(due_at=due_at, reminders_enabled=True))
@@ -1385,7 +1429,7 @@ async def test_create_from_task_phase_anchors_periodic_scheduled_reminder() -> N
 
     templates = await repository.list_series_reminders(USER_ID, series.id)
     assert templates[0].interval_days == 3
-    assert templates[0].next_run_at == datetime(2026, 11, 7, 8, 0, tzinfo=UTC)
+    assert templates[0].next_run_at is None
     generated = [
         item
         for item in repository.tasks.values()
@@ -1401,6 +1445,48 @@ async def test_create_from_task_phase_anchors_periodic_scheduled_reminder() -> N
             tzinfo=UTC,
         )
         assert (instance_reminders[0].next_run_at.date() - series.starts_on).days % 3 == 0
+
+
+async def test_create_from_task_periodic_template_reminder_is_not_dispatchable() -> None:
+    """A converted periodic template has no delivery slot of its own."""
+    repository = FakeTaskManagementRepository()
+    due_at = datetime(2026, 11, 7, 9, 0, tzinfo=UTC)
+    task = repository.insert_task(make_task(due_at=due_at, reminders_enabled=True))
+    repository.insert_reminder(
+        make_reminder(
+            reminder_id=1,
+            task_id=task.id,
+            kind=ReminderKind.SCHEDULED,
+            offset_minutes=None,
+            interval_days=1,
+            time_of_day=time(8, 0),
+            timezone="UTC",
+            next_run_at=due_at,
+        )
+    )
+    service = make_service(repository)
+
+    series = await service.create_from_task(
+        USER_ID,
+        task,
+        frequency=SeriesFrequency.PERIODIC,
+        interval_days=3,
+    )
+
+    templates = await repository.list_series_reminders(USER_ID, series.id)
+    assert templates
+    assert templates[0].next_run_at is None
+    generated_ids = {
+        item.id
+        for item in repository.tasks.values()
+        if item.series_id == series.id and item.id != task.id
+    }
+    due = await repository.list_due_reminders(
+        datetime(2026, 11, 10, 8, 0, tzinfo=UTC),
+        limit=100,
+    )
+    assert not any(reminder.series_id == series.id for reminder in due)
+    assert any(reminder.task_id in generated_ids for reminder in due)
 
 
 async def test_detach_task_hard_deletes_future_siblings_except_current() -> None:

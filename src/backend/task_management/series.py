@@ -26,11 +26,7 @@ from backend.task_management.reminders import (
     reminder_input_from_row,
     validate_reminder_inputs,
 )
-from backend.task_management.schedule import (
-    HORIZON_DAYS,
-    first_phase_scheduled_time,
-    series_due_times,
-)
+from backend.task_management.schedule import HORIZON_DAYS, series_due_times
 
 _SERIES_NOT_FOUND = "Series not found"
 _LABEL_NOT_FOUND = "Label not found"
@@ -322,9 +318,11 @@ class SeriesService:
               the user's timezone, defaulting to UTC.
             - Scheduled template reminders receive the series interval only
               for periodic series; daily conversions keep the client interval.
-            - A periodic conversion also phase-anchors the scheduled template
-              ``next_run_at`` to the first series occurrence after the current
-              instant, so copied instance reminders stay on task days.
+            - Template reminders are stored without ``next_run_at`` so they
+              never dispatch on their own.
+            - Generated periodic instance reminders anchor scheduled slots to
+              each instance's due date, while daily instances keep the
+              due-relative rule.
             - The current task's instance reminders are left untouched.
             - Sets ``task.series_id`` and flushes before generation so the
               current due slot is visible to the dedupe query and is not
@@ -377,25 +375,12 @@ class SeriesService:
         await self._repository.add_series_labels(series.id, user_id, owned_label_ids)
         now = self._clock()
         for reminder in reminders:
-            next_run_at = (
-                first_phase_scheduled_time(
-                    starts_on=series.starts_on,
-                    time_of_day=reminder.time_of_day or time(0, 0),
-                    timezone=zone,
-                    interval_days=resolved_interval_days,
-                    now=now,
-                )
-                if resolved_frequency is SeriesFrequency.PERIODIC
-                and reminder.kind is ReminderKind.SCHEDULED
-                else None
-            )
             await self._repository.add_reminder(
                 build_series_reminder(
                     reminder,
                     user_id=user_id,
                     series_id=series.id,
                     timezone_name=series.timezone,
-                    next_run_at=next_run_at,
                 )
             )
         task.series_id = series.id
@@ -772,6 +757,8 @@ class SeriesService:
               anchored to the series phase.
             - Copies snapshot fields, the series label set, and template
               reminders into every new instance.
+            - Periodic series anchor scheduled instance reminders to each
+              instance's due date; daily series use the due-relative rule.
             - Writes tasks, label rows, and instance reminders as three bulk
               batches with at most one flush each.
             - Leaves an existing ``generated_through`` unchanged when no new
@@ -853,6 +840,7 @@ class SeriesService:
                         task_id=task.id,
                         due_at=task.due_at,
                         fallback_timezone=series.timezone,
+                        is_periodic=series.frequency == SeriesFrequency.PERIODIC.value,
                         now=now,
                     )
                     if instance_reminder is None:
@@ -875,6 +863,7 @@ class SeriesService:
         task_id: int,
         due_at: datetime,
         fallback_timezone: str,
+        is_periodic: bool,
         now: datetime,
     ) -> TaskReminder | None:
         """
@@ -889,6 +878,7 @@ class SeriesService:
             task_id: Generated task identifier.
             due_at: Generated task due instant.
             fallback_timezone: Series timezone used when the template lacks one.
+            is_periodic: Whether the parent series uses a periodic frequency.
             now: Current instant used as the lower bound.
 
         Returns:
@@ -900,15 +890,15 @@ class SeriesService:
                 range.
 
         Notes:
-            - A scheduled template with a populated ``next_run_at`` (a
-              converted periodic series) anchors this instance reminder to the
-              instance's phase date. Explicit series templates keep
-              ``next_run_at=None`` and use the due-relative rule unchanged.
+            - Periodic series anchor scheduled reminders to the instance's
+              local due date, so a reminder earlier than the due time stays on
+              the task day and advances by its own interval.
+            - Daily series keep the due-relative rule unchanged.
         """
         timezone_name = template.timezone or fallback_timezone
         scheduled_starts_on = (
             due_at.astimezone(ZoneInfo(timezone_name)).date()
-            if template.kind == ReminderKind.SCHEDULED.value and template.next_run_at is not None
+            if is_periodic and template.kind == ReminderKind.SCHEDULED.value
             else None
         )
         return build_task_reminder(
@@ -1004,6 +994,7 @@ class SeriesService:
                         task_id=task.id,
                         due_at=task.due_at,
                         fallback_timezone=series.timezone,
+                        is_periodic=series.frequency == SeriesFrequency.PERIODIC.value,
                         now=now,
                     )
                     if instance_reminder is None:

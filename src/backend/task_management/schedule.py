@@ -343,7 +343,7 @@ def first_phase_scheduled_time(
     Compute the first phase-anchored scheduled reminder instant after now.
 
     Purpose:
-        Keep converted periodic reminder slots on series occurrence days when
+        Keep periodic scheduled reminder slots on series occurrence days when
         the reminder wall time is earlier than the task due time.
 
     Args:

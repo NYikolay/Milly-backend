@@ -211,7 +211,6 @@ def build_series_reminder(
     user_id: int,
     series_id: int,
     timezone_name: str,
-    next_run_at: datetime | None = None,
 ) -> TaskReminder:
     """
     Build a template reminder row for a series.
@@ -224,11 +223,13 @@ def build_series_reminder(
         user_id: Owner identifier.
         series_id: Series identifier.
         timezone_name: Series IANA timezone used for scheduled rules.
-        next_run_at: Optional phase anchor for a converted periodic scheduled
-            template. Defaults to ``None`` for explicit series creation.
 
     Returns:
         TaskReminder: The template reminder row.
+
+    Notes:
+        - Template reminders never carry ``next_run_at``; only generated task
+          instances receive deliverable slots.
     """
     return TaskReminder(
         user_id=user_id,
@@ -239,7 +240,7 @@ def build_series_reminder(
         interval_days=reminder.interval_days,
         time_of_day=reminder.time_of_day,
         timezone=timezone_name if reminder.kind is ReminderKind.SCHEDULED else None,
-        next_run_at=next_run_at,
+        next_run_at=None,
     )
 
 
