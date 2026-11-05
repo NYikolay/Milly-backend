@@ -133,7 +133,7 @@ async def create_series(
     service: SeriesServiceDep,
 ) -> SeriesResponse:
     """
-    Create a daily recurring series for the authenticated user.
+    Create a daily or periodic recurring series for the authenticated user.
 
     Purpose:
         Validate the request, persist a daily or periodic series template,

@@ -38,6 +38,7 @@ def _load_generation_index_migration() -> ModuleType:
 
 
 def _load_periodic_migration() -> ModuleType:
+    """Load the periodic task-series migration module from disk."""
     path = Path("alembic/versions/0005_periodic_task_series.py")
     spec = importlib.util.spec_from_file_location("migration_0005", path)
     assert spec is not None
@@ -48,6 +49,7 @@ def _load_periodic_migration() -> ModuleType:
 
 
 def test_periodic_migration_chain() -> None:
+    """Chain the periodic migration after the series generation index."""
     migration = _load_periodic_migration()
     assert migration.revision == "0005_periodic_task_series"
     assert migration.down_revision == "0004_task_series_generation_index"
@@ -56,23 +58,31 @@ def test_periodic_migration_chain() -> None:
 def test_periodic_migration_upgrade_and_downgrade_operations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Exercise the upgrade and downgrade branches through a recording operation fake."""
     migration = _load_periodic_migration()
     calls: list[tuple[object, ...]] = []
 
     class FakeOp:
+        """Recording stand-in for the Alembic operations proxy."""
+
         def add_column(self, *args: object, **kwargs: object) -> None:
+            """Record an add-column operation."""
             calls.append(("add_column", args, kwargs))
 
         def drop_constraint(self, *args: object, **kwargs: object) -> None:
+            """Record a drop-constraint operation."""
             calls.append(("drop_constraint", args, kwargs))
 
         def create_check_constraint(self, *args: object, **kwargs: object) -> None:
+            """Record a create-check-constraint operation."""
             calls.append(("create_check_constraint", args, kwargs))
 
         def drop_column(self, *args: object, **kwargs: object) -> None:
+            """Record a drop-column operation."""
             calls.append(("drop_column", args, kwargs))
 
         def execute(self, *args: object, **kwargs: object) -> None:
+            """Record an execute operation."""
             calls.append(("execute", args, kwargs))
 
     monkeypatch.setattr(migration, "op", FakeOp())
@@ -106,6 +116,7 @@ def _render_migration_sql(
 
 
 def test_periodic_migration_renders_exact_sql(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Render the periodic migration offline and pin its exact SQL statements."""
     migration = _load_periodic_migration()
 
     upgrade_statements = _render_migration_sql(migration, monkeypatch, migration.upgrade)

@@ -620,6 +620,7 @@ async def test_task_update_rejects_invalid_recurrence_interval(
     response = await task_client.patch("/api/v1/tasks/1", json=payload)
 
     assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
 
 
 @pytest.mark.parametrize(

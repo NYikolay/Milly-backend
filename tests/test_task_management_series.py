@@ -92,6 +92,8 @@ async def test_create_series_in_the_past_starts_from_the_next_future_slot() -> N
     assert tasks
     assert min(task.due_at for task in tasks) == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
     assert all(task.due_at > fixed_now() for task in tasks)
+    assert series.frequency == "daily"
+    assert series.interval_days == 1
     assert series.generated_through == tasks[-1].due_at
 
 
@@ -954,6 +956,7 @@ async def test_update_series_rejects_dates_outside_supported_range(
 
 
 async def test_create_periodic_series_stores_interval_and_generates_phase_slots() -> None:
+    """Store the periodic interval and materialize only phase-aligned slots."""
     repository = FakeTaskManagementRepository()
     service = make_service(repository)
 
@@ -993,6 +996,7 @@ async def test_create_series_rejects_invalid_frequency_interval(
     frequency: SeriesFrequency,
     interval_days: int | None,
 ) -> None:
+    """Reject daily intervals other than one and periodic intervals below two."""
     service = make_service(FakeTaskManagementRepository())
     with pytest.raises(BadRequestError):
         await service.create(
@@ -1239,6 +1243,7 @@ async def test_generate_series_uses_stored_interval() -> None:
 
 
 async def test_create_from_task_snapshots_and_does_not_duplicate_due_slot() -> None:
+    """Snapshot task fields and labels, generate future slots, and keep one due row."""
     repository = FakeTaskManagementRepository()
     repository.user_timezones[USER_ID] = "Europe/Moscow"
     project = repository.insert_project(make_project())
@@ -1277,12 +1282,24 @@ async def test_create_from_task_snapshots_and_does_not_duplicate_due_slot() -> N
     )
 
     assert task.series_id == series.id
+    assert series.title == "Snapshot"
+    assert series.description == "Description"
+    assert series.priority == Priority.URGENT_IMPORTANT.value
+    assert series.project_id == project.id
+    assert (series.id, label.id) in repository.series_labels
     assert series.starts_on == date(2026, 11, 7)
     assert series.time_of_day == time(9, 0)
     assert series.timezone == "Europe/Moscow"
     assert series.interval_days == 3
     assert series.reminders_enabled is True
     assert sum(1 for item in repository.tasks.values() if item.due_at == due_at) == 1
+    generated = [
+        item
+        for item in repository.tasks.values()
+        if item.series_id == series.id and item.id != task.id
+    ]
+    assert generated
+    assert all((item.due_at.date() - series.starts_on).days % 3 == 0 for item in generated)
     templates = await repository.list_series_reminders(USER_ID, series.id)
     assert templates[0].interval_days == 3
     instance_reminders = await repository.list_task_reminders(USER_ID, task.id)
@@ -1290,6 +1307,7 @@ async def test_create_from_task_snapshots_and_does_not_duplicate_due_slot() -> N
 
 
 async def test_create_from_task_rejects_archived_project() -> None:
+    """Reject conversion when the task project is archived."""
     repository = FakeTaskManagementRepository()
     project = repository.insert_project(make_project(archived_at=fixed_now()))
     task = repository.insert_task(
@@ -1339,7 +1357,54 @@ async def test_create_from_task_regular_preserves_reminder_interval() -> None:
     assert templates[0].interval_days == 2
 
 
+async def test_create_from_task_phase_anchors_periodic_scheduled_reminder() -> None:
+    """Anchor periodic conversion reminders to series occurrence days, not due plus one."""
+    repository = FakeTaskManagementRepository()
+    due_at = datetime(2026, 11, 7, 9, 0, tzinfo=UTC)
+    task = repository.insert_task(make_task(due_at=due_at, reminders_enabled=True))
+    repository.insert_reminder(
+        make_reminder(
+            reminder_id=1,
+            task_id=task.id,
+            kind=ReminderKind.SCHEDULED,
+            offset_minutes=None,
+            interval_days=1,
+            time_of_day=time(8, 0),
+            timezone="UTC",
+            next_run_at=due_at,
+        )
+    )
+    service = make_service(repository)
+
+    series = await service.create_from_task(
+        USER_ID,
+        task,
+        frequency=SeriesFrequency.PERIODIC,
+        interval_days=3,
+    )
+
+    templates = await repository.list_series_reminders(USER_ID, series.id)
+    assert templates[0].interval_days == 3
+    assert templates[0].next_run_at == datetime(2026, 11, 7, 8, 0, tzinfo=UTC)
+    generated = [
+        item
+        for item in repository.tasks.values()
+        if item.series_id == series.id and item.id != task.id
+    ]
+    assert generated
+    for item in generated:
+        instance_reminders = await repository.list_task_reminders(USER_ID, item.id)
+        assert len(instance_reminders) == 1
+        assert instance_reminders[0].next_run_at == datetime.combine(
+            item.due_at.date(),
+            time(8, 0),
+            tzinfo=UTC,
+        )
+        assert (instance_reminders[0].next_run_at.date() - series.starts_on).days % 3 == 0
+
+
 async def test_detach_task_hard_deletes_future_siblings_except_current() -> None:
+    """Delete future siblings, cancel templates, and keep past and completed history."""
     repository = FakeTaskManagementRepository()
     series = repository.insert_series(
         make_series(
@@ -1371,12 +1436,24 @@ async def test_detach_task_hard_deletes_future_siblings_except_current() -> None
     overdue = repository.insert_task(
         make_task(task_id=6, series_id=series.id, due_at=fixed_now() - timedelta(hours=1))
     )
+    template = repository.insert_reminder(
+        make_reminder(
+            series_id=series.id,
+            kind=ReminderKind.SCHEDULED,
+            offset_minutes=None,
+            interval_days=1,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+            next_run_at=fixed_now() + timedelta(days=1),
+        )
+    )
     service = make_service(repository)
 
     await service.detach_task(USER_ID, current, series)
 
     assert series.deleted_at == fixed_now()
     assert current.series_id is None
+    assert template.next_run_at is None
     assert {past.id, current.id, completed.id, overdue.id} <= set(repository.tasks)
     assert earlier_future.id not in repository.tasks
     assert later_future.id not in repository.tasks

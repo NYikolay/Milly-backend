@@ -26,7 +26,11 @@ from backend.task_management.reminders import (
     reminder_input_from_row,
     validate_reminder_inputs,
 )
-from backend.task_management.schedule import HORIZON_DAYS, series_due_times
+from backend.task_management.schedule import (
+    HORIZON_DAYS,
+    first_phase_scheduled_time,
+    series_due_times,
+)
 
 _SERIES_NOT_FOUND = "Series not found"
 _LABEL_NOT_FOUND = "Label not found"
@@ -306,7 +310,8 @@ class SeriesService:
         Raises:
             BadRequestError: If the user's stored timezone is invalid, the
                 frequency/interval pair is invalid, the derived start date is
-                outside the supported range, or the task project is archived.
+                outside the supported range, the task project is archived, or
+                generation overflows the supported calendar range.
             NotFoundError: If the task project or one of its labels does not
                 exist for this user.
 
@@ -317,6 +322,9 @@ class SeriesService:
               the user's timezone, defaulting to UTC.
             - Scheduled template reminders receive the series interval only
               for periodic series; daily conversions keep the client interval.
+            - A periodic conversion also phase-anchors the scheduled template
+              ``next_run_at`` to the first series occurrence after the current
+              instant, so copied instance reminders stay on task days.
             - The current task's instance reminders are left untouched.
             - Sets ``task.series_id`` and flushes before generation so the
               current due slot is visible to the dedupe query and is not
@@ -367,18 +375,31 @@ class SeriesService:
         )
         await self._repository.add_series(series)
         await self._repository.add_series_labels(series.id, user_id, owned_label_ids)
+        now = self._clock()
         for reminder in reminders:
+            next_run_at = (
+                first_phase_scheduled_time(
+                    starts_on=series.starts_on,
+                    time_of_day=reminder.time_of_day or time(0, 0),
+                    timezone=zone,
+                    interval_days=resolved_interval_days,
+                    now=now,
+                )
+                if resolved_frequency is SeriesFrequency.PERIODIC
+                and reminder.kind is ReminderKind.SCHEDULED
+                else None
+            )
             await self._repository.add_reminder(
                 build_series_reminder(
                     reminder,
                     user_id=user_id,
                     series_id=series.id,
                     timezone_name=series.timezone,
+                    next_run_at=next_run_at,
                 )
             )
         task.series_id = series.id
         await self._repository.flush()
-        now = self._clock()
         await self._generate_series(series, now)
         await self._repository.flush()
         return series
@@ -873,14 +894,31 @@ class SeriesService:
         Returns:
             TaskReminder | None: The instance reminder, or ``None`` when a
                 before-due moment has already passed.
+
+        Raises:
+            BadRequestError: If the reminder schedule overflows the datetime
+                range.
+
+        Notes:
+            - A scheduled template with a populated ``next_run_at`` (a
+              converted periodic series) anchors this instance reminder to the
+              instance's phase date. Explicit series templates keep
+              ``next_run_at=None`` and use the due-relative rule unchanged.
         """
+        timezone_name = template.timezone or fallback_timezone
+        scheduled_starts_on = (
+            due_at.astimezone(ZoneInfo(timezone_name)).date()
+            if template.kind == ReminderKind.SCHEDULED.value and template.next_run_at is not None
+            else None
+        )
         return build_task_reminder(
             reminder_input_from_row(template),
             user_id=template.user_id,
             task_id=task_id,
             due_at=due_at,
-            timezone_name=template.timezone or fallback_timezone,
+            timezone_name=timezone_name,
             now=now,
+            scheduled_starts_on=scheduled_starts_on,
         )
 
     async def _update_future_instances(

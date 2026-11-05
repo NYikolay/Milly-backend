@@ -168,12 +168,12 @@ class FakeTaskManagementRepository:
         project = self.projects.get(project_id)
         return project is not None and project.deleted_at is None and project.archived_at is None
 
-    def _series_frequency(self, series_id: int | None) -> str | None:
-        """Return the frequency of an optional series reference."""
+    def _series_frequency(self, user_id: int, series_id: int | None) -> str | None:
+        """Return the frequency of an optional series owned by the task owner."""
         if series_id is None:
             return None
         series = self.series.get(series_id)
-        if series is None:
+        if series is None or series.user_id != user_id:
             return None
         return series.frequency
 
@@ -517,13 +517,13 @@ class FakeTaskManagementRepository:
             tasks = [
                 task
                 for task in tasks
-                if self._series_frequency(task.series_id) == SeriesFrequency.DAILY.value
+                if self._series_frequency(user_id, task.series_id) == SeriesFrequency.DAILY.value
             ]
         elif recurrence == "periodic":
             tasks = [
                 task
                 for task in tasks
-                if self._series_frequency(task.series_id) == SeriesFrequency.PERIODIC.value
+                if self._series_frequency(user_id, task.series_id) == SeriesFrequency.PERIODIC.value
             ]
         elif recurrence == "one_off":
             tasks = [task for task in tasks if task.series_id is None]

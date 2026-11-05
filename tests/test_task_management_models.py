@@ -112,18 +112,23 @@ def test_delivery_has_idempotency_key() -> None:
 
 
 def test_task_series_interval_days_column_and_checks() -> None:
+    """Declare the interval column with both defaults and the full schedule predicate."""
     table = Base.metadata.tables["task_series"]
     assert isinstance(table.c.interval_days.type, SmallInteger)
     assert table.c.interval_days.nullable is False
+    assert getattr(table.c.interval_days.default, "arg", None) == 1
     assert table.c.interval_days.server_default is not None
+    assert str(getattr(table.c.interval_days.server_default, "arg", "")) == "1"
     checks = {
         constraint.name: str(constraint.sqltext)
         for constraint in table.constraints
         if isinstance(constraint, CheckConstraint)
     }
-    assert "interval_days >= 1" in checks["ck_task_series_interval_days_positive"]
-    assert "frequency = 'daily'" in checks["ck_task_series_frequency_interval"]
-    assert "frequency = 'periodic'" in checks["ck_task_series_frequency_interval"]
+    assert checks["ck_task_series_interval_days_positive"] == "interval_days >= 1"
+    assert checks["ck_task_series_frequency_interval"] == (
+        "(frequency = 'daily' AND interval_days = 1)"
+        " OR (frequency = 'periodic' AND interval_days >= 2)"
+    )
     assert "ck_task_series_frequency_daily" not in checks
 
 

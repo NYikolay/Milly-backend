@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from time import monotonic as _monotonic_clock
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -16,6 +16,7 @@ from backend.task_management.enums import DeliveryStatus, ReminderKind
 from backend.task_management.ports import TaskManagementRepository
 from backend.task_management.schedule import (
     before_due_time,
+    first_phase_scheduled_time,
     first_scheduled_time,
     localize_wall_time,
 )
@@ -119,6 +120,7 @@ def build_task_reminder(
     due_at: datetime,
     timezone_name: str,
     now: datetime,
+    scheduled_starts_on: date | None = None,
 ) -> TaskReminder | None:
     """
     Build a reminder row for a task instance.
@@ -134,6 +136,8 @@ def build_task_reminder(
         due_at: Task due instant.
         timezone_name: User IANA timezone used for scheduled rules.
         now: Current instant used as the lower bound.
+        scheduled_starts_on: Phase date used to anchor a scheduled reminder
+            instead of the due-relative rule. Defaults to ``None``.
 
     Returns:
         TaskReminder | None: The reminder row, or ``None`` when the before-due
@@ -141,6 +145,11 @@ def build_task_reminder(
 
     Raises:
         BadRequestError: If the reminder schedule overflows the datetime range.
+
+    Notes:
+        - A supplied ``scheduled_starts_on`` keeps scheduled slots on the
+          series phase even when the reminder wall time is earlier than
+          ``due_at``.
     """
     if reminder.kind is ReminderKind.BEFORE_DUE:
         try:
@@ -165,13 +174,22 @@ def build_task_reminder(
         )
 
     try:
-        slot = first_scheduled_time(
-            due_at=due_at,
-            time_of_day=reminder.time_of_day or time(0, 0),
-            timezone=ZoneInfo(timezone_name),
-            interval_days=reminder.interval_days or 1,
-            now=now,
-        )
+        if scheduled_starts_on is not None:
+            slot = first_phase_scheduled_time(
+                starts_on=scheduled_starts_on,
+                time_of_day=reminder.time_of_day or time(0, 0),
+                timezone=ZoneInfo(timezone_name),
+                interval_days=reminder.interval_days or 1,
+                now=now,
+            )
+        else:
+            slot = first_scheduled_time(
+                due_at=due_at,
+                time_of_day=reminder.time_of_day or time(0, 0),
+                timezone=ZoneInfo(timezone_name),
+                interval_days=reminder.interval_days or 1,
+                now=now,
+            )
     except OverflowError as error:
         raise BadRequestError(_INVALID_REMINDER) from error
     return TaskReminder(
@@ -193,6 +211,7 @@ def build_series_reminder(
     user_id: int,
     series_id: int,
     timezone_name: str,
+    next_run_at: datetime | None = None,
 ) -> TaskReminder:
     """
     Build a template reminder row for a series.
@@ -205,9 +224,11 @@ def build_series_reminder(
         user_id: Owner identifier.
         series_id: Series identifier.
         timezone_name: Series IANA timezone used for scheduled rules.
+        next_run_at: Optional phase anchor for a converted periodic scheduled
+            template. Defaults to ``None`` for explicit series creation.
 
     Returns:
-        TaskReminder: A template reminder with ``next_run_at=None``.
+        TaskReminder: The template reminder row.
     """
     return TaskReminder(
         user_id=user_id,
@@ -218,7 +239,7 @@ def build_series_reminder(
         interval_days=reminder.interval_days,
         time_of_day=reminder.time_of_day,
         timezone=timezone_name if reminder.kind is ReminderKind.SCHEDULED else None,
-        next_run_at=None,
+        next_run_at=next_run_at,
     )
 
 

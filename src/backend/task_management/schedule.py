@@ -24,6 +24,8 @@ def localize_wall_time(local_date: date, time_of_day: time, timezone: ZoneInfo) 
 
     Raises:
         ValueError: If ``time_of_day`` already carries timezone information.
+        OverflowError: If the resolved instant falls outside the supported
+            datetime range.
 
     Notes:
         - Ambiguous fall-back times use ``fold=0`` and therefore the first occurrence.
@@ -70,6 +72,10 @@ def _phase_on_or_after(anchor: date, target: date, interval_days: int) -> date:
         date: The anchor date when ``target`` is not later, otherwise the first
             anchor-aligned date at or after ``target``.
 
+    Raises:
+        OverflowError: If the aligned phase date exceeds the supported
+            calendar range.
+
     Notes:
         - Date arithmetic uses whole calendar days, so daylight-saving changes
           never shift the phase.
@@ -113,7 +119,10 @@ def series_due_times(
         list[datetime]: Aware UTC due instants in ascending order.
 
     Raises:
-        ValueError: If ``interval_days`` is less than one.
+        ValueError: If ``interval_days`` is less than one or ``time_of_day``
+            already carries timezone information.
+        OverflowError: If an occurrence falls outside the supported datetime
+            range.
 
     Notes:
         - Phase dates are ``starts_on`` plus whole multiples of
@@ -197,7 +206,10 @@ def next_occurrence_after_date(
         datetime: The next phase occurrence as an aware UTC datetime.
 
     Raises:
-        ValueError: If ``interval_days`` is less than one.
+        ValueError: If ``interval_days`` is less than one or ``time_of_day``
+            already carries timezone information.
+        OverflowError: If the next occurrence falls outside the supported
+            datetime range.
 
     Notes:
         - A future anchor is returned unchanged.
@@ -232,6 +244,11 @@ def next_daily_time(*, current: datetime, time_of_day: time, timezone: ZoneInfo)
 
     Returns:
         datetime: The next local day's occurrence as an aware UTC datetime.
+
+    Raises:
+        ValueError: If ``time_of_day`` already carries timezone information.
+        OverflowError: If the next occurrence falls outside the supported
+            datetime range.
     """
     local_date = current.astimezone(timezone).date() + timedelta(days=1)
     return localize_wall_time(local_date, time_of_day, timezone)
@@ -250,6 +267,10 @@ def before_due_time(*, due_at: datetime, offset_minutes: int) -> datetime:
 
     Returns:
         datetime: The reminder instant with the same timezone awareness as ``due_at``.
+
+    Raises:
+        OverflowError: If subtracting the offset leaves the supported datetime
+            range.
     """
     return due_at - timedelta(minutes=offset_minutes)
 
@@ -280,7 +301,10 @@ def first_scheduled_time(
         datetime: The first scheduled reminder instant as an aware UTC datetime.
 
     Raises:
-        ValueError: If ``interval_days`` is less than one.
+        ValueError: If ``interval_days`` is less than one or ``time_of_day``
+            already carries timezone information.
+        OverflowError: If a candidate falls outside the supported datetime
+            range.
 
     Notes:
         - The first candidate is the first local ``time_of_day`` at or after
@@ -300,6 +324,56 @@ def first_scheduled_time(
     local_now = now.astimezone(timezone)
     steps = max(0, (local_now.date() - candidate_date).days // interval_days)
     candidate_date += timedelta(days=steps * interval_days)
+    candidate = localize_wall_time(candidate_date, time_of_day, timezone)
+    while candidate <= now:
+        candidate_date += timedelta(days=interval_days)
+        candidate = localize_wall_time(candidate_date, time_of_day, timezone)
+    return candidate
+
+
+def first_phase_scheduled_time(
+    *,
+    starts_on: date,
+    time_of_day: time,
+    timezone: ZoneInfo,
+    interval_days: int,
+    now: datetime,
+) -> datetime:
+    """
+    Compute the first phase-anchored scheduled reminder instant after now.
+
+    Purpose:
+        Keep converted periodic reminder slots on series occurrence days when
+        the reminder wall time is earlier than the task due time.
+
+    Args:
+        starts_on: A series phase date used as the reminder schedule anchor.
+        time_of_day: Local wall-clock time of scheduled reminders.
+        timezone: IANA timezone used for the reminder schedule.
+        interval_days: Number of local days between phase occurrences.
+        now: Current absolute instant used as the lower bound.
+
+    Returns:
+        datetime: The first phase occurrence at ``time_of_day`` strictly after
+            ``now``, as an aware UTC datetime.
+
+    Raises:
+        ValueError: If ``interval_days`` is less than one or ``time_of_day``
+            already carries timezone information.
+        OverflowError: If a candidate falls outside the supported datetime
+            range.
+
+    Notes:
+        - Phase dates are ``starts_on`` plus whole multiples of
+          ``interval_days`` and never drift with daylight-saving transitions.
+        - Unlike ``first_scheduled_time``, a slot earlier on the anchor date is
+          valid and does not move the phase to the next day.
+    """
+    if interval_days < 1:
+        raise ValueError("interval_days must be at least 1")
+
+    local_now = now.astimezone(timezone)
+    candidate_date = _phase_on_or_after(starts_on, local_now.date(), interval_days)
     candidate = localize_wall_time(candidate_date, time_of_day, timezone)
     while candidate <= now:
         candidate_date += timedelta(days=interval_days)
@@ -330,7 +404,10 @@ def next_scheduled_time(
         datetime: The next scheduled instant as an aware UTC datetime.
 
     Raises:
-        ValueError: If ``interval_days`` is less than one.
+        ValueError: If ``interval_days`` is less than one or ``time_of_day``
+            already carries timezone information.
+        OverflowError: If the next occurrence falls outside the supported
+            datetime range.
     """
     if interval_days < 1:
         raise ValueError("interval_days must be at least 1")

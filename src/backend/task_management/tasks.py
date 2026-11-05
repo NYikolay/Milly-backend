@@ -144,8 +144,10 @@ class TaskService:
             - The date filter uses UTC bounds of the user's local day.
             - The repository is queried for ``limit + 1`` rows so the extra row
               only signals another page.
-            - Related labels, reminders, and projects are loaded with at most
-              three batch queries; an empty page issues no batch queries.
+            - Related labels, reminders, projects, and series are loaded with
+              at most four batch queries; the series query is skipped when no
+              task has a series reference, and an empty page issues no batch
+              queries.
             - Performs no writes and does not commit.
         """
         date_start: datetime | None = None
@@ -200,7 +202,8 @@ class TaskService:
             task_id: Task identifier.
 
         Returns:
-            TaskDetail: The matching task with labels, reminders, and project.
+            TaskDetail: The matching task with labels, reminders, project, and
+                recurrence.
 
         Raises:
             NotFoundError: If the task does not exist for this user.
@@ -348,9 +351,10 @@ class TaskService:
         Notes:
             - Other fields from the same update are applied before a conversion
               takes its series snapshot.
-            - Converting to a series clears a stale soft-deleted series
-              reference before changing ``due_at`` to avoid the unique-slot
-              conflict.
+            - Converting to a series, or changing ``due_at`` on a task whose
+              series is soft-deleted, clears the stale series reference before
+              the edit to avoid the unique-slot conflict; a field-only edit
+              keeps the historical link.
             - Disabling recurrence detaches first, physically removes future
               incomplete siblings, then shifts the current overdue instance by
               the captured series phase.
@@ -499,6 +503,11 @@ class TaskService:
 
         Notes:
             - Other fields are applied before the series snapshot is taken.
+            - A changed due time clears a stale soft-deleted series reference
+              before the edit, regardless of whether ``recurrence`` was
+              supplied, so the update cannot collide with the unique
+              ``(series_id, due_at)`` slot of a historical sibling. A
+              field-only edit keeps the historical link.
             - Regular conversion accepts only ``None`` or ``1`` and stores
               ``interval_days=1``; periodic conversion requires ``interval_days
               >= 2``.
@@ -508,6 +517,9 @@ class TaskService:
         """
         if recurrence is None and interval_days is not None:
             raise BadRequestError(_INVALID_RECURRENCE_INTERVAL)
+
+        if task.series_id is not None and due_at is not None and due_at != task.due_at:
+            task.series_id = None
 
         if recurrence is TaskRecurrence.ONE_OFF and task.series_id is not None:
             task.series_id = None
@@ -620,7 +632,9 @@ class TaskService:
 
         Raises:
             BadRequestError: If the title, due time, project, or a reminder rule
-                is invalid.
+                is invalid. When ``defer_reminder_rebuild`` is true, reminder
+                validation moves to the caller's overdue shift and this method
+                does not validate the supplied rules.
             NotFoundError: If the project or a label does not exist for this
                 user.
 
@@ -751,7 +765,8 @@ class TaskService:
             None: The deletion stays in the current unit of work.
 
         Raises:
-            NotFoundError: If the task does not exist for this user.
+            NotFoundError: If the task or its referenced series does not exist
+                for this user.
 
         Notes:
             - A one-off task, a task whose series is soft-deleted, a completed
@@ -1149,16 +1164,22 @@ class TaskService:
 
         Returns:
             TaskRecurrence: ``PERIODIC`` for periodic series, ``REGULAR`` for
-                daily series, and ``ONE_OFF`` without a series.
+                daily series, and ``ONE_OFF`` without a series or with an
+                unexpected stored frequency.
 
         Notes:
+            - The database check constraint limits frequencies to ``daily`` and
+              ``periodic``; unexpected values are classified defensively as
+              one-off instead of regular.
             - Performs no writes and does not commit.
         """
         if series is None:
             return TaskRecurrence.ONE_OFF
         if series.frequency == SeriesFrequency.PERIODIC.value:
             return TaskRecurrence.PERIODIC
-        return TaskRecurrence.REGULAR
+        if series.frequency == SeriesFrequency.DAILY.value:
+            return TaskRecurrence.REGULAR
+        return TaskRecurrence.ONE_OFF
 
     async def _require_task(
         self,

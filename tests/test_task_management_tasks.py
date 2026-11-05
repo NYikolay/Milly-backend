@@ -843,6 +843,7 @@ async def test_create_task_rejects_before_due_overflow() -> None:
 
 
 async def test_enable_regular_on_future_one_off_task_creates_series_without_moving_due() -> None:
+    """A future one-off task keeps its due time when converted to a daily series."""
     repository = FakeTaskManagementRepository()
     repository.user_timezones[USER_ID] = "Europe/Moscow"
     task = repository.insert_task(
@@ -870,6 +871,7 @@ async def test_enable_regular_on_future_one_off_task_creates_series_without_movi
 
 
 async def test_enable_periodic_on_overdue_one_off_task_shifts_to_next_phase_slot() -> None:
+    """An overdue one-off task shifts to the next periodic phase slot on conversion."""
     repository = FakeTaskManagementRepository()
     repository.user_timezones[USER_ID] = "Europe/Moscow"
     task = repository.insert_task(make_task(due_at=datetime(2026, 11, 1, 6, 0, tzinfo=UTC)))
@@ -893,6 +895,7 @@ async def test_enable_periodic_on_overdue_one_off_task_shifts_to_next_phase_slot
 
 async def test_enable_regular_on_completed_task_keeps_completion_and_series_starts_on_due_date(  # noqa: E501
 ) -> None:
+    """A completed task stays completed and its series phase starts on the due date."""
     repository = FakeTaskManagementRepository()
     task = repository.insert_task(
         make_task(
@@ -1178,6 +1181,35 @@ async def test_interval_only_on_one_off_or_daily_raises_bad_request() -> None:
     assert series.interval_days == 1
 
 
+@pytest.mark.parametrize(
+    ("recurrence", "interval_days"),
+    [
+        (TaskRecurrence.ONE_OFF, 1),
+        (TaskRecurrence.ONE_OFF, 3),
+        (TaskRecurrence.REGULAR, 3),
+    ],
+)
+async def test_toggle_rejects_incompatible_explicit_interval(
+    recurrence: TaskRecurrence,
+    interval_days: int,
+) -> None:
+    """Reject one-off intervals and daily intervals other than one at the service boundary."""
+    repository = FakeTaskManagementRepository()
+    task = repository.insert_task(make_task(due_at=fixed_now() + timedelta(days=1)))
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError):
+        await service.update(
+            USER_ID,
+            task.id,
+            recurrence=recurrence,
+            interval_days=interval_days,
+        )
+
+    assert task.series_id is None
+    assert repository.series == {}
+
+
 async def test_periodic_requires_interval_on_conversion() -> None:
     """Converting a one-off task to periodic requires an explicit interval."""
     repository = FakeTaskManagementRepository()
@@ -1256,6 +1288,41 @@ async def test_update_task_of_soft_deleted_series_treats_it_as_one_off() -> None
     assert task.title == "New"
     assert task.series_id == series.id
     assert series.deleted_at == fixed_now()
+
+
+async def test_update_due_at_on_soft_deleted_series_task_clears_stale_series() -> None:
+    """A changed due time detaches a soft-deleted-series task before the unique slot check."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            deleted_at=fixed_now(),
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    target_due_at = datetime(2026, 11, 6, 9, 0, tzinfo=UTC)
+    sibling = repository.insert_task(
+        make_task(task_id=1, series_id=series.id, due_at=target_due_at)
+    )
+    task = repository.insert_task(
+        make_task(
+            task_id=2,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 5, 9, 0, tzinfo=UTC),
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(USER_ID, task.id, due_at=target_due_at)
+
+    assert task.series_id is None
+    assert task.due_at == target_due_at
+    assert detail.recurrence is TaskRecurrence.ONE_OFF
+    assert series.deleted_at == fixed_now()
+    assert sibling.series_id == series.id
+    assert sibling.due_at == target_due_at
+    assert sibling.deleted_at is None
 
 
 async def test_disable_regular_on_task_of_soft_deleted_series_clears_series_id() -> None:
@@ -1441,6 +1508,7 @@ async def test_toggle_to_one_off_on_overdue_series_task_keeps_supplied_before_du
 
 
 async def test_delete_completed_series_task_deletes_only_that_task() -> None:
+    """Deleting a completed series instance leaves the series and siblings intact."""
     repository = FakeTaskManagementRepository()
     series = repository.insert_series(
         make_series(series_id=1, time_of_day=time(9, 0), starts_on=date(2026, 11, 1))
@@ -1466,6 +1534,7 @@ async def test_delete_completed_series_task_deletes_only_that_task() -> None:
 
 
 async def test_delete_overdue_series_task_deletes_only_that_task() -> None:
+    """Deleting an overdue series instance leaves the series and siblings intact."""
     repository = FakeTaskManagementRepository()
     series = repository.insert_series(
         make_series(series_id=1, time_of_day=time(9, 0), starts_on=date(2026, 11, 1))
@@ -1486,6 +1555,7 @@ async def test_delete_overdue_series_task_deletes_only_that_task() -> None:
 
 
 async def test_delete_task_of_soft_deleted_series_deletes_only_task() -> None:
+    """Deleting a task of a soft-deleted series leaves the historical series intact."""
     repository = FakeTaskManagementRepository()
     series = repository.insert_series(make_series(series_id=1, deleted_at=fixed_now()))
     task = repository.insert_task(
@@ -1512,6 +1582,7 @@ async def test_task_detail_recurrence_uses_series_frequency(
     interval_days: int,
     expected: TaskRecurrence,
 ) -> None:
+    """Classify one-off, daily, and periodic tasks from their stored series frequency."""
     repository = FakeTaskManagementRepository()
     series_id = None
     if frequency is not None:
@@ -1533,6 +1604,28 @@ async def test_task_detail_recurrence_uses_series_frequency(
     detail = await service.get(USER_ID, task.id)
 
     assert detail.recurrence is expected
+
+
+async def test_task_detail_classifies_unknown_series_frequency_as_one_off() -> None:
+    """Treat an unexpected stored frequency defensively as a one-off task."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            frequency="weekly",
+            interval_days=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    task = repository.insert_task(
+        make_task(series_id=series.id, due_at=fixed_now() + timedelta(days=1))
+    )
+    service = make_service(repository)
+
+    detail = await service.get(USER_ID, task.id)
+
+    assert detail.recurrence is TaskRecurrence.ONE_OFF
 
 
 async def test_task_detail_recurrence_survives_soft_deleted_series() -> None:
