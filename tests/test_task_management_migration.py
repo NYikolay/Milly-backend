@@ -4,6 +4,8 @@ import importlib.util
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 from backend.admin.views import ColorPaletteAdmin
 from backend.db.base import Base
 from backend.models.color_palette import ColorPalette
@@ -29,6 +31,54 @@ def _load_generation_index_migration() -> ModuleType:
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def _load_periodic_migration() -> ModuleType:
+    path = Path("alembic/versions/0005_periodic_task_series.py")
+    spec = importlib.util.spec_from_file_location("migration_0005", path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_periodic_migration_chain() -> None:
+    migration = _load_periodic_migration()
+    assert migration.revision == "0005_periodic_task_series"
+    assert migration.down_revision == "0004_task_series_generation_index"
+
+
+def test_periodic_migration_upgrade_and_downgrade_operations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migration = _load_periodic_migration()
+    calls: list[tuple[object, ...]] = []
+
+    class FakeOp:
+        def add_column(self, *args: object, **kwargs: object) -> None:
+            calls.append(("add_column", args, kwargs))
+
+        def drop_constraint(self, *args: object, **kwargs: object) -> None:
+            calls.append(("drop_constraint", args, kwargs))
+
+        def create_check_constraint(self, *args: object, **kwargs: object) -> None:
+            calls.append(("create_check_constraint", args, kwargs))
+
+        def drop_column(self, *args: object, **kwargs: object) -> None:
+            calls.append(("drop_column", args, kwargs))
+
+        def execute(self, *args: object, **kwargs: object) -> None:
+            calls.append(("execute", args, kwargs))
+
+    monkeypatch.setattr(migration, "op", FakeOp())
+    migration.upgrade()
+    assert any(call[0] == "add_column" for call in calls)
+    assert any(call[0] == "create_check_constraint" for call in calls)
+    calls.clear()
+    migration.downgrade()
+    assert any(call[0] == "drop_column" for call in calls)
+    assert any(call[0] == "execute" for call in calls)
 
 
 def test_generation_index_migration_chain_and_model_index() -> None:

@@ -13,6 +13,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Identity,
     Index,
+    SmallInteger,
     String,
     Text,
     Time,
@@ -29,19 +30,21 @@ from backend.task_management.enums import Priority, SeriesFrequency
 
 _PRIORITY_CHECK = f"priority IN ({', '.join(repr(item.value) for item in Priority)})"
 _FREQUENCY_CHECK = f"frequency IN ({', '.join(repr(item.value) for item in SeriesFrequency)})"
+_FREQUENCY_INTERVAL_CHECK = (
+    f"(frequency = {SeriesFrequency.DAILY.value!r} AND interval_days = 1)"
+    f" OR (frequency = {SeriesFrequency.PERIODIC.value!r} AND interval_days >= 2)"
+)
 
 
 class TaskSeries(Base):
-    """Recurring daily task template owned by a user."""
+    """Recurring daily or periodic task template owned by a user."""
 
     __tablename__ = "task_series"
     __table_args__ = (
         UniqueConstraint("id", "user_id", name="uq_task_series_id_user_id"),
-        CheckConstraint(
-            f"frequency = {SeriesFrequency.DAILY.value!r}",
-            name="frequency_daily",
-        ),
         CheckConstraint(_FREQUENCY_CHECK, name="frequency"),
+        CheckConstraint("interval_days >= 1", name="interval_days_positive"),
+        CheckConstraint(_FREQUENCY_INTERVAL_CHECK, name="frequency_interval"),
         CheckConstraint("ends_on IS NULL OR ends_on >= starts_on", name="ends_on_after_starts_on"),
         CheckConstraint(_PRIORITY_CHECK, name="priority"),
         ForeignKeyConstraint(
@@ -79,6 +82,12 @@ class TaskSeries(Base):
     frequency: Mapped[str] = mapped_column(
         String(16),
         server_default=text("'daily'"),
+        nullable=False,
+    )
+    interval_days: Mapped[int] = mapped_column(
+        SmallInteger,
+        server_default=text("1"),
+        default=1,
         nullable=False,
     )
     time_of_day: Mapped[time] = mapped_column(Time, nullable=False)

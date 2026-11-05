@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKeyConstraint,
     Identity,
+    SmallInteger,
     String,
     UniqueConstraint,
 )
@@ -110,6 +111,22 @@ def test_delivery_has_idempotency_key() -> None:
     assert ("reminder_id", "scheduled_for") in unique_columns
 
 
+def test_task_series_interval_days_column_and_checks() -> None:
+    table = Base.metadata.tables["task_series"]
+    assert isinstance(table.c.interval_days.type, SmallInteger)
+    assert table.c.interval_days.nullable is False
+    assert table.c.interval_days.server_default is not None
+    checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    assert "interval_days >= 1" in checks["ck_task_series_interval_days_positive"]
+    assert "frequency = 'daily'" in checks["ck_task_series_frequency_interval"]
+    assert "frequency = 'periodic'" in checks["ck_task_series_frequency_interval"]
+    assert "ck_task_series_frequency_daily" not in checks
+
+
 def test_check_constraints_are_declared() -> None:
     expected_names = {
         "color_palette": {
@@ -117,7 +134,9 @@ def test_check_constraints_are_declared() -> None:
             "ck_color_palette_hex_format",
         },
         "task_series": {
-            "ck_task_series_frequency_daily",
+            "ck_task_series_frequency",
+            "ck_task_series_interval_days_positive",
+            "ck_task_series_frequency_interval",
             "ck_task_series_ends_on_after_starts_on",
             "ck_task_series_priority",
         },
