@@ -1362,3 +1362,79 @@ async def test_toggle_applies_other_fields_before_conversion() -> None:
     assert series.priority == Priority.URGENT_IMPORTANT.value
     assert series.project_id == project.id
     assert (series.id, label.id) in repository.series_labels
+
+
+async def test_toggle_to_regular_on_overdue_task_keeps_supplied_before_due_reminder() -> None:
+    """A supplied before-due rule survives the overdue shift and series snapshot."""
+    repository = FakeTaskManagementRepository()
+    task = repository.insert_task(
+        make_task(
+            due_at=datetime(2026, 11, 3, 9, 0, tzinfo=UTC),
+            reminders_enabled=True,
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(
+        USER_ID,
+        task.id,
+        recurrence=TaskRecurrence.REGULAR,
+        reminders=(
+            ReminderInput(
+                kind=ReminderKind.BEFORE_DUE,
+                offset_minutes=30,
+            ),
+        ),
+    )
+
+    assert task.due_at == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
+    assert len(detail.reminders) == 1
+    assert detail.reminders[0].kind == ReminderKind.BEFORE_DUE.value
+    assert detail.reminders[0].offset_minutes == 30
+    assert detail.reminders[0].next_run_at == datetime(2026, 11, 5, 8, 30, tzinfo=UTC)
+    assert task.series_id is not None
+    templates = await repository.list_series_reminders(USER_ID, task.series_id)
+    assert len(templates) == 1
+    assert templates[0].kind == ReminderKind.BEFORE_DUE.value
+    assert templates[0].offset_minutes == 30
+
+
+async def test_toggle_to_one_off_on_overdue_series_task_keeps_supplied_before_due_reminder() -> (
+    None
+):
+    """A supplied before-due rule survives the detach overdue shift."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    task = repository.insert_task(
+        make_task(
+            series_id=series.id,
+            due_at=datetime(2026, 11, 4, 9, 0, tzinfo=UTC),
+            reminders_enabled=True,
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(
+        USER_ID,
+        task.id,
+        recurrence=TaskRecurrence.ONE_OFF,
+        reminders=(
+            ReminderInput(
+                kind=ReminderKind.BEFORE_DUE,
+                offset_minutes=30,
+            ),
+        ),
+    )
+
+    assert task.due_at == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
+    assert series.deleted_at == fixed_now()
+    assert len(detail.reminders) == 1
+    assert detail.reminders[0].kind == ReminderKind.BEFORE_DUE.value
+    assert detail.reminders[0].offset_minutes == 30
+    assert detail.reminders[0].next_run_at == datetime(2026, 11, 5, 8, 30, tzinfo=UTC)

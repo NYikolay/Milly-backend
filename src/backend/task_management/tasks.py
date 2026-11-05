@@ -386,6 +386,14 @@ class TaskService:
             series_interval_days = series.interval_days
             zone = ZoneInfo(series.timezone)
             await self._series_service.detach_task(user_id, task, series)
+            now = self._clock()
+            final_due_at = due_at if due_at is not None else task.due_at
+            will_shift = (
+                task.completed_at is None
+                and final_due_at.tzinfo is not None
+                and final_due_at.utcoffset() is not None
+                and final_due_at <= now
+            )
             await self._apply_task_update(
                 user_id,
                 task,
@@ -397,14 +405,17 @@ class TaskService:
                 label_ids=label_ids,
                 reminders_enabled=reminders_enabled,
                 reminders=reminders,
+                defer_reminder_rebuild=will_shift,
             )
-            await self._shift_overdue_task(
-                user_id,
-                task,
-                anchor=anchor,
-                interval_days=series_interval_days,
-                timezone=zone,
-            )
+            if will_shift:
+                await self._shift_overdue_task(
+                    user_id,
+                    task,
+                    anchor=anchor,
+                    interval_days=series_interval_days,
+                    timezone=zone,
+                    reminders=reminders,
+                )
             await self._repository.flush()
             return await self._detail(user_id, task)
 
@@ -512,6 +523,14 @@ class TaskService:
                 resolved_interval_days = interval_days
             if task.series_id is not None:
                 task.series_id = None
+            now = self._clock()
+            final_due_at = due_at if due_at is not None else task.due_at
+            will_shift = (
+                task.completed_at is None
+                and final_due_at.tzinfo is not None
+                and final_due_at.utcoffset() is not None
+                and final_due_at <= now
+            )
             await self._apply_task_update(
                 user_id,
                 task,
@@ -523,9 +542,9 @@ class TaskService:
                 label_ids=label_ids,
                 reminders_enabled=reminders_enabled,
                 reminders=reminders,
+                defer_reminder_rebuild=will_shift,
             )
-            now = self._clock()
-            if task.completed_at is None and task.due_at <= now:
+            if will_shift:
                 zone = await self._user_timezone(user_id)
                 await self._shift_overdue_task(
                     user_id,
@@ -533,6 +552,7 @@ class TaskService:
                     anchor=task.due_at.astimezone(zone).date(),
                     interval_days=resolved_interval_days,
                     timezone=zone,
+                    reminders=reminders,
                 )
             await self._series_service.create_from_task(
                 user_id,
@@ -571,6 +591,7 @@ class TaskService:
         label_ids: Sequence[int] | None,
         reminders_enabled: bool | None,
         reminders: Sequence[ReminderInput] | None,
+        defer_reminder_rebuild: bool = False,
     ) -> None:
         """
         Apply a one-off task update to the current instance.
@@ -590,6 +611,9 @@ class TaskService:
             label_ids: New label selection, or ``None`` when unchanged.
             reminders_enabled: New master toggle, or ``None`` when unchanged.
             reminders: New reminder rules, or ``None`` when unchanged.
+            defer_reminder_rebuild: Whether the caller shifts the due time
+                afterwards and will rebuild reminders from the final due.
+                Defaults to ``False``.
 
         Returns:
             None: The changes stay in the current unit of work.
@@ -605,6 +629,8 @@ class TaskService:
               the affected reminder rows from the current time.
             - Disabling the master toggle persists any supplied rules first,
               then cancels deliveries and clears slots.
+            - A deferred rebuild skips reminder row deletion so supplied or
+              previous rules survive until the overdue shift completes.
             - Does not flush or commit; the caller owns the transaction flush.
         """
         if title is not None:
@@ -635,7 +661,7 @@ class TaskService:
 
         rebuild_reminders = (
             due_changed or reminders is not None or (toggle_changed and reminders_enabled)
-        )
+        ) and not defer_reminder_rebuild
         if rebuild_reminders:
             await self._rebuild_task_reminders(
                 user_id,
@@ -892,6 +918,7 @@ class TaskService:
         anchor: date,
         interval_days: int,
         timezone: ZoneInfo,
+        reminders: Sequence[ReminderInput] | None = None,
     ) -> None:
         """
         Move an overdue incomplete task to the next phase-aligned slot.
@@ -906,6 +933,8 @@ class TaskService:
             anchor: First phase date used to align the next occurrence.
             interval_days: Number of local days between occurrences.
             timezone: Timezone used to derive the local date and time.
+            reminders: Reminder rules from the same update, or ``None`` to
+                rebuild from the task's previous rules. Defaults to ``None``.
 
         Returns:
             None: The changes stay in the current unit of work.
@@ -917,7 +946,9 @@ class TaskService:
             - No-op when the task is completed or its due time is still in the
               future.
             - Preserves the current local wall-clock time in ``timezone``.
-            - Rebuilds the task reminder slots from the new due time.
+            - Rebuilds the task reminder slots from the new due time, using the
+              supplied rules when present.
+            - Clears reminder slots again when the master toggle is disabled.
             - Does not commit.
         """
         now = self._clock()
@@ -931,7 +962,9 @@ class TaskService:
             timezone=timezone,
             now=now,
         )
-        await self._rebuild_task_reminders(user_id, task, reminders=None)
+        await self._rebuild_task_reminders(user_id, task, reminders=reminders)
+        if not task.reminders_enabled:
+            await self._repository.cancel_task_reminders(user_id, task.id)
 
     async def _rebuild_task_reminders(
         self,
