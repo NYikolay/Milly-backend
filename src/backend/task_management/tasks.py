@@ -736,11 +736,12 @@ class TaskService:
 
     async def delete(self, user_id: int, task_id: int) -> None:
         """
-        Delete a task or its recurring series.
+        Delete a task according to the recurrence-aware deletion matrix.
 
         Purpose:
-            Remove a one-off task or apply the series deletion rule for an
-            instance.
+            Remove a one-off, completed, or overdue task without touching its
+            series, while keeping the existing series-wide rule for an active
+            future instance.
 
         Args:
             user_id: Owner identifier.
@@ -753,18 +754,23 @@ class TaskService:
             NotFoundError: If the task does not exist for this user.
 
         Notes:
-            - A one-off task is soft-deleted and its deliveries are cancelled.
-            - A series instance delegates to ``SeriesService.delete``.
-            - For a series instance the series row is locked before the task
-              row; one-off tasks lock only the task row.
+            - A one-off task, a task whose series is soft-deleted, a completed
+              series task, and an overdue incomplete series task are
+              soft-deleted individually with their deliveries cancelled.
+            - An incomplete series task due after the current instant delegates
+              to ``SeriesService.delete``, which soft-deletes the series and all
+              future incomplete instances, including earlier future siblings.
+            - For a series task the series row is locked before the task row;
+              one-off tasks lock only the task row.
             - Does not commit.
         """
         task, series = await self._lock_update_target(user_id, task_id)
-        if series is not None:
+        now = self._clock()
+        if series is not None and task.completed_at is None and task.due_at > now:
             await self._series_service.delete(user_id, series.id)
             return
         await self._repository.cancel_task_reminders(user_id, task.id)
-        await self._repository.soft_delete_task(task, self._clock(), uuid4())
+        await self._repository.soft_delete_task(task, now, uuid4())
         await self._repository.flush()
 
     async def _lock_update_target(

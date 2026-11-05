@@ -1438,3 +1438,253 @@ async def test_toggle_to_one_off_on_overdue_series_task_keeps_supplied_before_du
     assert detail.reminders[0].kind == ReminderKind.BEFORE_DUE.value
     assert detail.reminders[0].offset_minutes == 30
     assert detail.reminders[0].next_run_at == datetime(2026, 11, 5, 8, 30, tzinfo=UTC)
+
+
+async def test_delete_completed_series_task_deletes_only_that_task() -> None:
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(series_id=1, time_of_day=time(9, 0), starts_on=date(2026, 11, 1))
+    )
+    completed = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=fixed_now() + timedelta(days=1),
+            completed_at=fixed_now(),
+        )
+    )
+    future = repository.insert_task(
+        make_task(task_id=2, series_id=series.id, due_at=fixed_now() + timedelta(days=2))
+    )
+    service = make_service(repository)
+
+    await service.delete(USER_ID, completed.id)
+
+    assert completed.deleted_at == fixed_now()
+    assert series.deleted_at is None
+    assert future.deleted_at is None
+
+
+async def test_delete_overdue_series_task_deletes_only_that_task() -> None:
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(series_id=1, time_of_day=time(9, 0), starts_on=date(2026, 11, 1))
+    )
+    overdue = repository.insert_task(
+        make_task(task_id=1, series_id=series.id, due_at=fixed_now() - timedelta(hours=1))
+    )
+    future = repository.insert_task(
+        make_task(task_id=2, series_id=series.id, due_at=fixed_now() + timedelta(days=1))
+    )
+    service = make_service(repository)
+
+    await service.delete(USER_ID, overdue.id)
+
+    assert overdue.deleted_at == fixed_now()
+    assert series.deleted_at is None
+    assert future.deleted_at is None
+
+
+async def test_delete_task_of_soft_deleted_series_deletes_only_task() -> None:
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(make_series(series_id=1, deleted_at=fixed_now()))
+    task = repository.insert_task(
+        make_task(task_id=1, series_id=series.id, due_at=fixed_now() + timedelta(days=1))
+    )
+    service = make_service(repository)
+
+    await service.delete(USER_ID, task.id)
+
+    assert task.deleted_at == fixed_now()
+    assert series.deleted_at == fixed_now()
+
+
+@pytest.mark.parametrize(
+    ("frequency", "interval_days", "expected"),
+    [
+        (None, None, TaskRecurrence.ONE_OFF),
+        ("daily", 1, TaskRecurrence.REGULAR),
+        ("periodic", 3, TaskRecurrence.PERIODIC),
+    ],
+)
+async def test_task_detail_recurrence_uses_series_frequency(
+    frequency: str | None,
+    interval_days: int,
+    expected: TaskRecurrence,
+) -> None:
+    repository = FakeTaskManagementRepository()
+    series_id = None
+    if frequency is not None:
+        series = repository.insert_series(
+            make_series(
+                series_id=1,
+                frequency=frequency,
+                interval_days=interval_days,
+                time_of_day=time(9, 0),
+                starts_on=date(2026, 11, 1),
+            )
+        )
+        series_id = series.id
+    task = repository.insert_task(
+        make_task(series_id=series_id, due_at=fixed_now() + timedelta(days=1))
+    )
+    service = make_service(repository)
+
+    detail = await service.get(USER_ID, task.id)
+
+    assert detail.recurrence is expected
+
+
+async def test_task_detail_recurrence_survives_soft_deleted_series() -> None:
+    """A task of a soft-deleted series still reports its historical recurrence."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            frequency="periodic",
+            interval_days=3,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+            deleted_at=fixed_now(),
+        )
+    )
+    task = repository.insert_task(
+        make_task(series_id=series.id, due_at=fixed_now() + timedelta(days=1))
+    )
+    service = make_service(repository)
+
+    detail = await service.get(USER_ID, task.id)
+
+    assert detail.recurrence is TaskRecurrence.PERIODIC
+
+
+async def test_list_tasks_returns_recurrence_for_mixed_page() -> None:
+    """A list page classifies one-off, active-series, and deleted-series tasks."""
+    repository = FakeTaskManagementRepository()
+    daily = repository.insert_series(
+        make_series(
+            series_id=1,
+            frequency="daily",
+            interval_days=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    periodic = repository.insert_series(
+        make_series(
+            series_id=2,
+            frequency="periodic",
+            interval_days=3,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    deleted = repository.insert_series(
+        make_series(
+            series_id=3,
+            frequency="periodic",
+            interval_days=5,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+            deleted_at=fixed_now(),
+        )
+    )
+    one_off = repository.insert_task(
+        make_task(task_id=1, due_at=fixed_now() + timedelta(minutes=1))
+    )
+    daily_task = repository.insert_task(
+        make_task(
+            task_id=2,
+            series_id=daily.id,
+            due_at=fixed_now() + timedelta(minutes=2),
+        )
+    )
+    periodic_task = repository.insert_task(
+        make_task(
+            task_id=3,
+            series_id=periodic.id,
+            due_at=fixed_now() + timedelta(minutes=3),
+        )
+    )
+    deleted_task = repository.insert_task(
+        make_task(
+            task_id=4,
+            series_id=deleted.id,
+            due_at=fixed_now() + timedelta(minutes=4),
+        )
+    )
+    service = make_service(repository)
+
+    page = await service.list(USER_ID, TaskFilters(), limit=DEFAULT_PAGE_SIZE)
+
+    assert [detail.task.id for detail in page.items] == [
+        one_off.id,
+        daily_task.id,
+        periodic_task.id,
+        deleted_task.id,
+    ]
+    assert [detail.recurrence for detail in page.items] == [
+        TaskRecurrence.ONE_OFF,
+        TaskRecurrence.REGULAR,
+        TaskRecurrence.PERIODIC,
+        TaskRecurrence.PERIODIC,
+    ]
+
+
+async def test_delete_active_future_series_task_still_deletes_series_and_all_future_instances(  # noqa: E501
+) -> None:
+    """Deleting an active future instance keeps the existing series-wide rule."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(series_id=1, time_of_day=time(9, 0), starts_on=date(2026, 11, 1))
+    )
+    earlier_future = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=fixed_now() + timedelta(days=1),
+        )
+    )
+    target = repository.insert_task(
+        make_task(
+            task_id=2,
+            series_id=series.id,
+            due_at=fixed_now() + timedelta(days=2),
+        )
+    )
+    service = make_service(repository)
+
+    await service.delete(USER_ID, target.id)
+
+    assert series.deleted_at == fixed_now()
+    assert earlier_future.deleted_at == fixed_now()
+    assert target.deleted_at == fixed_now()
+
+
+async def test_lock_update_target_treats_soft_deleted_series_as_one_off() -> None:
+    """Updating a task whose series is soft-deleted changes only that task."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+            deleted_at=fixed_now(),
+        )
+    )
+    task = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            title="Old",
+            due_at=fixed_now() + timedelta(days=1),
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(USER_ID, task.id, title="New")
+
+    assert detail.task is task
+    assert task.title == "New"
+    assert task.series_id == series.id
+    assert series.deleted_at == fixed_now()
