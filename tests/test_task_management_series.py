@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime, time, timedelta
 import pytest
 
 from backend.core.errors import BadRequestError, ErrorCode, NotFoundError
-from backend.task_management.enums import Priority, ReminderKind
+from backend.task_management.enums import Priority, ReminderKind, SeriesFrequency
 from backend.task_management.labels import LabelService
 from backend.task_management.palette import PaletteService
 from backend.task_management.projects import ProjectService
@@ -921,3 +921,288 @@ async def test_update_series_rejects_dates_outside_supported_range(
 
     assert series.starts_on == date(2026, 11, 4)
     assert series.ends_on is None
+
+
+async def test_create_periodic_series_stores_interval_and_generates_phase_slots() -> None:
+    repository = FakeTaskManagementRepository()
+    service = make_service(repository)
+
+    series = await service.create(
+        USER_ID,
+        title="Periodic",
+        description=None,
+        priority=Priority.NEITHER,
+        frequency=SeriesFrequency.PERIODIC,
+        interval_days=3,
+        time_of_day=time(9, 0),
+        timezone="Europe/Moscow",
+        starts_on=date(2026, 11, 1),
+        ends_on=None,
+        project_id=None,
+        label_ids=(),
+        reminders_enabled=False,
+        reminders=(),
+    )
+
+    assert series.frequency == "periodic"
+    assert series.interval_days == 3
+    due_times = sorted(task.due_at for task in repository.tasks.values())
+    assert due_times[0] == datetime(2026, 11, 7, 6, 0, tzinfo=UTC)
+    assert due_times[1] == datetime(2026, 11, 10, 6, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("frequency", "interval_days"),
+    [
+        (SeriesFrequency.DAILY, 3),
+        (SeriesFrequency.PERIODIC, None),
+        (SeriesFrequency.PERIODIC, 1),
+    ],
+)
+async def test_create_series_rejects_invalid_frequency_interval(
+    frequency: SeriesFrequency,
+    interval_days: int | None,
+) -> None:
+    service = make_service(FakeTaskManagementRepository())
+    with pytest.raises(BadRequestError):
+        await service.create(
+            USER_ID,
+            title="Invalid",
+            description=None,
+            priority=Priority.NEITHER,
+            frequency=frequency,
+            interval_days=interval_days,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+            starts_on=date(2026, 11, 4),
+            ends_on=None,
+            project_id=None,
+            label_ids=(),
+            reminders_enabled=False,
+            reminders=(),
+        )
+
+
+async def test_update_periodic_interval_regenerates_future_instances() -> None:
+    """Changing a periodic interval replaces future phase slots."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            frequency="periodic",
+            interval_days=3,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    past = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 4, 9, 0, tzinfo=UTC),
+        )
+    )
+    future = repository.insert_task(
+        make_task(
+            task_id=2,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 7, 9, 0, tzinfo=UTC),
+        )
+    )
+    completed = repository.insert_task(
+        make_task(
+            task_id=3,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 10, 9, 0, tzinfo=UTC),
+            completed_at=fixed_now(),
+        )
+    )
+    service = make_service(repository)
+
+    updated = await service.update(USER_ID, series.id, interval_days=4)
+
+    assert updated.frequency == "periodic"
+    assert updated.interval_days == 4
+    assert past.deleted_at is None
+    assert completed.deleted_at is None
+    assert future.deleted_at == fixed_now()
+    generated = sorted(
+        (
+            task
+            for task in repository.tasks.values()
+            if task.series_id == series.id and task.id not in {past.id, future.id, completed.id}
+        ),
+        key=lambda task: task.due_at,
+    )
+    assert generated
+    assert generated[0].due_at == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
+    assert all((task.due_at.date() - date(2026, 11, 1)).days % 4 == 0 for task in generated)
+
+
+async def test_update_daily_to_periodic_regenerates_future_instances() -> None:
+    """Converting a daily series to periodic replaces future daily slots."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    future = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 5, 9, 0, tzinfo=UTC),
+        )
+    )
+    service = make_service(repository)
+
+    updated = await service.update(
+        USER_ID,
+        series.id,
+        frequency=SeriesFrequency.PERIODIC,
+        interval_days=3,
+    )
+
+    assert updated.frequency == "periodic"
+    assert updated.interval_days == 3
+    assert future.deleted_at == fixed_now()
+    generated = sorted(
+        (
+            task
+            for task in repository.tasks.values()
+            if task.series_id == series.id and task.id != future.id
+        ),
+        key=lambda task: task.due_at,
+    )
+    assert generated
+    assert generated[0].due_at == datetime(2026, 11, 7, 9, 0, tzinfo=UTC)
+
+
+async def test_update_periodic_to_daily_normalizes_interval() -> None:
+    """Converting a periodic series to daily resets the interval to one."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            frequency="periodic",
+            interval_days=3,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    future = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 7, 9, 0, tzinfo=UTC),
+        )
+    )
+    service = make_service(repository)
+
+    updated = await service.update(USER_ID, series.id, frequency=SeriesFrequency.DAILY)
+
+    assert updated.frequency == "daily"
+    assert updated.interval_days == 1
+    assert future.deleted_at == fixed_now()
+    generated = sorted(
+        (
+            task
+            for task in repository.tasks.values()
+            if task.series_id == series.id and task.id != future.id
+        ),
+        key=lambda task: task.due_at,
+    )
+    assert generated
+    assert generated[0].due_at == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
+
+
+async def test_update_interval_only_rejects_daily_series_with_new_interval() -> None:
+    """A daily series cannot adopt a periodic interval without the frequency."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError):
+        await service.update(USER_ID, series.id, interval_days=3)
+
+    assert series.frequency == "daily"
+    assert series.interval_days == 1
+
+
+async def test_update_interval_only_allows_daily_no_op() -> None:
+    """Passing the existing daily interval keeps the schedule untouched."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    future = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 5, 9, 0, tzinfo=UTC),
+        )
+    )
+    service = make_service(repository)
+
+    updated = await service.update(USER_ID, series.id, interval_days=1)
+
+    assert updated.frequency == "daily"
+    assert updated.interval_days == 1
+    assert future.deleted_at is None
+    assert list(repository.tasks) == [future.id]
+
+
+async def test_update_interval_only_keeps_periodic_frequency() -> None:
+    """An interval-only update preserves the periodic frequency."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            frequency="periodic",
+            interval_days=3,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    service = make_service(repository)
+
+    updated = await service.update(USER_ID, series.id, interval_days=5)
+
+    assert updated.frequency == "periodic"
+    assert updated.interval_days == 5
+
+
+async def test_generate_series_uses_stored_interval() -> None:
+    """Repeated generation runs keep periodic instances on the stored phase."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            frequency="periodic",
+            interval_days=3,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    service = make_service(repository)
+
+    await service.generate(fixed_now())
+    await service.generate(fixed_now() + timedelta(days=30))
+    await service.generate(fixed_now() + timedelta(days=60))
+
+    tasks = [task for task in repository.tasks.values() if task.series_id == series.id]
+    assert tasks
+    assert all((task.due_at.date() - date(2026, 11, 1)).days % 3 == 0 for task in tasks)
+    assert len({task.due_at for task in tasks}) == len(tasks)

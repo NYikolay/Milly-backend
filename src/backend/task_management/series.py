@@ -35,6 +35,7 @@ _INVALID_TIMEZONE = "Invalid timezone"
 _INVALID_RANGE = "Series end date must not be before the start date"
 _PROJECT_ARCHIVED = "Project is archived"
 _TIME_OF_DAY_AWARE = "Time of day must be timezone-naive"
+_INVALID_FREQUENCY_INTERVAL = "Series frequency and interval are incompatible"
 
 logger = structlog.get_logger(__name__)
 
@@ -179,6 +180,8 @@ class SeriesService:
         title: str,
         description: str | None,
         priority: Priority,
+        frequency: SeriesFrequency = SeriesFrequency.DAILY,
+        interval_days: int | None = None,
         time_of_day: time,
         timezone: str,
         starts_on: date,
@@ -189,7 +192,7 @@ class SeriesService:
         reminders: Sequence[ReminderInput],
     ) -> TaskSeries:
         """
-        Create a daily series and generate its first instances.
+        Create a daily or periodic series and generate its first instances.
 
         Purpose:
             Persist the series template, labels, and template reminders, then
@@ -201,6 +204,10 @@ class SeriesService:
             title: Series title; surrounding whitespace is removed.
             description: Optional description snapshot.
             priority: Priority snapshot for generated instances.
+            frequency: Daily or periodic occurrence rhythm. Defaults to daily.
+            interval_days: Number of days between periodic occurrences; daily
+                series accept only ``None`` or ``1`` and store ``1``. Defaults
+                to ``None``.
             time_of_day: Local wall-clock occurrence time.
             timezone: IANA timezone of the series.
             starts_on: First local date on which the series may occur.
@@ -216,11 +223,14 @@ class SeriesService:
         Raises:
             BadRequestError: If the title is empty, the timezone is invalid,
                 ``time_of_day`` is timezone-aware, the dates are outside the
-                supported range or reversed, or a reminder rule is invalid.
+                supported range or reversed, the frequency/interval pair is
+                invalid, or a reminder rule is invalid.
             NotFoundError: If the project or a label does not exist for this
                 user.
 
         Notes:
+            - Periodic series require ``interval_days >= 2``; their phase is
+              anchored to ``starts_on``.
             - Flushes through the repository but does not commit.
             - Callers should reject archived projects before creating series.
         """
@@ -228,6 +238,10 @@ class SeriesService:
         self._validate_time_of_day(time_of_day)
         zone = self._timezone(timezone)
         self._validate_range(starts_on, ends_on)
+        resolved_frequency, resolved_interval_days = self._resolve_schedule(
+            frequency=frequency,
+            interval_days=interval_days,
+        )
         await self._validate_project(user_id, project_id)
         owned_label_ids = await self._validate_labels(user_id, label_ids)
         validated_reminders = validate_reminder_inputs(reminders)
@@ -237,7 +251,8 @@ class SeriesService:
             title=normalized_title,
             description=description,
             priority=priority.value,
-            frequency=SeriesFrequency.DAILY.value,
+            frequency=resolved_frequency.value,
+            interval_days=resolved_interval_days,
             time_of_day=time_of_day,
             timezone=zone.key,
             starts_on=starts_on,
@@ -269,6 +284,8 @@ class SeriesService:
         title: str | None = None,
         description: str | None | UnsetType = UNSET,
         priority: Priority | None = None,
+        frequency: SeriesFrequency | None = None,
+        interval_days: int | None = None,
         time_of_day: time | None = None,
         timezone: str | None = None,
         starts_on: date | None = None,
@@ -292,6 +309,10 @@ class SeriesService:
             description: New description; omit to keep and pass ``None`` to
                 clear it.
             priority: New priority snapshot.
+            frequency: New frequency; ``None`` keeps the current frequency.
+            interval_days: New number of days between periodic occurrences;
+                ``None`` keeps the current interval for periodic series while
+                daily series normalize to ``1``.
             time_of_day: New local occurrence time.
             timezone: New IANA timezone.
             starts_on: New first local date.
@@ -311,11 +332,15 @@ class SeriesService:
                 this user.
             BadRequestError: If the title is empty, the timezone is invalid,
                 ``time_of_day`` is timezone-aware, the dates are outside the
-                supported range or reversed, or a reminder rule is invalid.
+                supported range or reversed, the frequency/interval pair is
+                invalid, or a reminder rule is invalid.
 
         Notes:
             - A schedule change soft-deletes old future incomplete instances
               and regenerates replacements from the current time.
+            - Changing the frequency or interval also counts as a schedule
+              change; daily series store ``interval_days=1`` and periodic
+              series require ``interval_days>=2``.
             - A timezone-only edit retargets template scheduled reminders to
               the new series zone before regeneration.
             - Regeneration refuses archived or deleted projects.
@@ -324,6 +349,12 @@ class SeriesService:
             - Locks the series row and its task rows, and does not commit.
         """
         series = await self._require_series(user_id, series_id, for_update=True)
+        resolved_frequency, resolved_interval_days = self._resolve_schedule(
+            frequency=frequency,
+            interval_days=interval_days,
+            current_frequency=series.frequency,
+            current_interval_days=series.interval_days,
+        )
         if time_of_day is not None:
             self._validate_time_of_day(time_of_day)
         previous_reminders_enabled = series.reminders_enabled
@@ -339,6 +370,8 @@ class SeriesService:
         )
         validated_reminders = validate_reminder_inputs(reminders) if reminders is not None else None
         timezone_changed = zone.key != series.timezone
+        frequency_changed = resolved_frequency.value != series.frequency
+        interval_changed = resolved_interval_days != series.interval_days
         toggle_changed = (
             reminders_enabled is not None and reminders_enabled != previous_reminders_enabled
         )
@@ -347,9 +380,13 @@ class SeriesService:
             or timezone_changed
             or new_starts_on != series.starts_on
             or new_ends_on != series.ends_on
+            or frequency_changed
+            or interval_changed
         )
 
         series.title = normalized_title
+        series.frequency = resolved_frequency.value
+        series.interval_days = resolved_interval_days
         if not isinstance(description, UnsetType):
             series.description = description
         if priority is not None:
@@ -556,6 +593,8 @@ class SeriesService:
         Notes:
             - Refuses to materialize instances when the series project is
               archived or deleted.
+            - Uses the stored ``interval_days`` so periodic occurrences stay
+              anchored to the series phase.
             - Copies snapshot fields, the series label set, and template
               reminders into every new instance.
             - Writes tasks, label rows, and instance reminders as three bulk
@@ -579,6 +618,7 @@ class SeriesService:
                 time_of_day=series.time_of_day,
                 timezone=zone,
                 now=now,
+                interval_days=series.interval_days,
                 generated_through=series.generated_through,
             )
         except OverflowError as error:
@@ -980,3 +1020,55 @@ class SeriesService:
             raise BadRequestError(_INVALID_RANGE) from error
         if ends_on is not None and ends_on < starts_on:
             raise BadRequestError(_INVALID_RANGE)
+
+    def _resolve_schedule(
+        self,
+        *,
+        frequency: SeriesFrequency | None,
+        interval_days: int | None,
+        current_frequency: str | None = None,
+        current_interval_days: int | None = None,
+    ) -> tuple[SeriesFrequency, int]:
+        """
+        Resolve and validate a series frequency and interval request.
+
+        Purpose:
+            Enforce the daily/periodic invariant shared by series creation,
+            conversion, and interval-only edits before persistence.
+
+        Args:
+            frequency: Requested frequency; ``None`` reuses ``current_frequency``
+                for updates or defaults to daily for creation.
+            interval_days: Requested interval; ``None`` reuses the current
+                interval for periodic series and normalizes daily series to ``1``.
+            current_frequency: Persisted frequency used when ``frequency`` is
+                omitted. Defaults to ``None``.
+            current_interval_days: Persisted interval used when ``interval_days``
+                is omitted. Defaults to ``None``.
+
+        Returns:
+            tuple[SeriesFrequency, int]: The normalized frequency and interval.
+
+        Raises:
+            BadRequestError: If a daily series requests an interval other than
+                ``1`` or a periodic series requests fewer than two days.
+
+        Notes:
+            - Daily series always store ``interval_days=1``.
+            - Periodic series always store ``interval_days>=2``.
+            - A conversion to periodic requires the new interval to be provided
+              or the existing series to already be periodic.
+            - Performs no writes.
+        """
+        target = frequency
+        if target is None and current_frequency is not None:
+            target = SeriesFrequency(current_frequency)
+        target = target or SeriesFrequency.DAILY
+        if target is SeriesFrequency.DAILY:
+            if interval_days is not None and interval_days != 1:
+                raise BadRequestError(_INVALID_FREQUENCY_INTERVAL)
+            return SeriesFrequency.DAILY, 1
+        resolved_interval = interval_days if interval_days is not None else current_interval_days
+        if resolved_interval is None or resolved_interval < 2:
+            raise BadRequestError(_INVALID_FREQUENCY_INTERVAL)
+        return SeriesFrequency.PERIODIC, resolved_interval
