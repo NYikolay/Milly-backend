@@ -822,7 +822,7 @@ git commit -m "feat: convert tasks to series and detach series"
   - `TaskFilters.recurrence: Literal["all", "regular", "periodic", "one_off"]`.
   - `TaskService.update(..., recurrence: TaskRecurrence | None = None, interval_days: int | None = None)`.
   - `TaskService._apply_task_update(...) -> None`.
-  - `TaskService._shift_overdue_task(..., anchor: date, interval_days: int, timezone: ZoneInfo) -> None`.
+  - `TaskService._shift_overdue_task(..., anchor: date, interval_days: int, timezone: ZoneInfo, reminders: Sequence[ReminderInput] | None = None) -> None`.
 
 - [ ] **Step 1: Write the failing toggle tests**
 
@@ -961,7 +961,9 @@ Expected: FAIL because `update` does not accept `recurrence`/`interval_days`.
   - derive `time_of_day` from current due in the supplied zone;
   - call `next_occurrence_after_date`;
   - set `task.due_at`;
-  - call `_rebuild_task_reminders(user_id, task, reminders=None)`.
+  - call `_rebuild_task_reminders(user_id, task, reminders=reminders)`, where
+    the optional `reminders` argument carries the rules from the same PATCH;
+    when omitted, persisted task rules are reused.
 - Update `_update_series_task` to pass `frequency`/`interval_days` to `SeriesService.update`.
 - Update all docstrings.
 

@@ -1,7 +1,7 @@
 # Переключатель регулярности задач: дизайн
 
 **Дата:** 2026-11-04
-**Статус:** проект, реализация не начата
+**Статус:** реализовано
 **Связанные документы:**
 - `docs/superpowers/specs/2026-11-03-task-management-database-design.md`
 - `docs/superpowers/plans/2026-11-04-task-recurrence-toggle.md`
@@ -573,13 +573,16 @@ async def _shift_overdue_task(
     anchor: date,
     interval_days: int,
     timezone: ZoneInfo,
+    reminders: Sequence[ReminderInput] | None = None,
 ) -> None:
 ```
 
 - no-op, если задача завершена или `due_at > now`;
 - `time_of_day` берётся из текущего `task.due_at` в переданной зоне;
 - `new_due = next_occurrence_after_date(...)`;
-- после смены `due_at` напоминания задачи перестраиваются от нового времени;
+- после смены `due_at` напоминания задачи перестраиваются от нового времени
+  по правилам из `reminders`, если они переданы в том же `PATCH`, иначе по
+  сохранённым правилам задачи;
 - для one_off → series: `anchor` — локальная дата итогового `due_at`,
   `timezone` — авторская зона;
 - для series → one_off: `anchor = series.starts_on`,
