@@ -27,6 +27,8 @@ def upgrade() -> None:
     Notes:
         - The column is backfilled with ``1`` through its server default.
         - The daily-only check is replaced by the frequency/interval pair.
+        - Constraint names omit the ``ck_`` prefix so the configured naming
+          convention renders the final ``ck_task_series_*`` identifiers.
     """
     op.add_column(
         "task_series",
@@ -38,12 +40,12 @@ def upgrade() -> None:
         ),
     )
     op.drop_constraint(
-        "ck_task_series_frequency_daily",
+        "frequency_daily",
         "task_series",
         type_="check",
     )
     op.drop_constraint(
-        "ck_task_series_frequency",
+        "frequency",
         "task_series",
         type_="check",
     )
@@ -76,22 +78,24 @@ def downgrade() -> None:
     Notes:
         - Destructive: periodic rows are normalized to daily with interval
           ``1`` because the previous schema cannot represent periodic series.
+        - Constraint names omit the ``ck_`` prefix so the configured naming
+          convention renders the final ``ck_task_series_*`` identifiers.
     """
     op.execute(
         "UPDATE task_series SET frequency = 'daily', interval_days = 1 WHERE frequency = 'periodic'"
     )
     op.drop_constraint(
-        "ck_task_series_frequency_interval",
+        "frequency_interval",
         "task_series",
         type_="check",
     )
     op.drop_constraint(
-        "ck_task_series_interval_days_positive",
+        "interval_days_positive",
         "task_series",
         type_="check",
     )
     op.drop_constraint(
-        "ck_task_series_frequency",
+        "frequency",
         "task_series",
         type_="check",
     )

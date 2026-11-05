@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 
 from backend.admin.views import ColorPaletteAdmin
 from backend.db.base import Base
@@ -79,6 +83,68 @@ def test_periodic_migration_upgrade_and_downgrade_operations(
     migration.downgrade()
     assert any(call[0] == "drop_column" for call in calls)
     assert any(call[0] == "execute" for call in calls)
+
+
+def _render_migration_sql(
+    migration: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    run: Callable[[], None],
+) -> list[str]:
+    """Render one migration step offline and return the emitted SQL statements."""
+    output = io.StringIO()
+    context = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={
+            "target_metadata": Base.metadata,
+            "as_sql": True,
+            "output_buffer": output,
+        },
+    )
+    monkeypatch.setattr(migration, "op", Operations(context))
+    run()
+    return [statement.strip() for statement in output.getvalue().split(";") if statement.strip()]
+
+
+def test_periodic_migration_renders_exact_sql(monkeypatch: pytest.MonkeyPatch) -> None:
+    migration = _load_periodic_migration()
+
+    upgrade_statements = _render_migration_sql(migration, monkeypatch, migration.upgrade)
+    assert upgrade_statements == [
+        "ALTER TABLE task_series ADD COLUMN interval_days SMALLINT DEFAULT 1 NOT NULL",
+        "ALTER TABLE task_series DROP CONSTRAINT ck_task_series_frequency_daily",
+        "ALTER TABLE task_series DROP CONSTRAINT ck_task_series_frequency",
+        (
+            "ALTER TABLE task_series ADD CONSTRAINT ck_task_series_frequency"
+            " CHECK (frequency IN ('daily', 'periodic'))"
+        ),
+        (
+            "ALTER TABLE task_series ADD CONSTRAINT ck_task_series_interval_days_positive"
+            " CHECK (interval_days >= 1)"
+        ),
+        (
+            "ALTER TABLE task_series ADD CONSTRAINT ck_task_series_frequency_interval"
+            " CHECK ((frequency = 'daily' AND interval_days = 1)"
+            " OR (frequency = 'periodic' AND interval_days >= 2))"
+        ),
+    ]
+
+    downgrade_statements = _render_migration_sql(migration, monkeypatch, migration.downgrade)
+    assert downgrade_statements == [
+        "UPDATE task_series SET frequency = 'daily', interval_days = 1"
+        " WHERE frequency = 'periodic'",
+        "ALTER TABLE task_series DROP CONSTRAINT ck_task_series_frequency_interval",
+        "ALTER TABLE task_series DROP CONSTRAINT ck_task_series_interval_days_positive",
+        "ALTER TABLE task_series DROP CONSTRAINT ck_task_series_frequency",
+        "ALTER TABLE task_series DROP COLUMN interval_days",
+        (
+            "ALTER TABLE task_series ADD CONSTRAINT ck_task_series_frequency_daily"
+            " CHECK (frequency = 'daily')"
+        ),
+        (
+            "ALTER TABLE task_series ADD CONSTRAINT ck_task_series_frequency"
+            " CHECK (frequency IN ('daily'))"
+        ),
+    ]
 
 
 def test_generation_index_migration_chain_and_model_index() -> None:
