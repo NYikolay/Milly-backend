@@ -14,7 +14,7 @@ from backend.models.task import Task
 from backend.models.task_reminder import TaskReminder
 from backend.models.task_series import TaskSeries
 from backend.task_management.date_bounds import require_supported_datetime
-from backend.task_management.enums import Priority
+from backend.task_management.enums import Priority, SeriesFrequency, TaskRecurrence
 from backend.task_management.ports import TaskManagementRepository
 from backend.task_management.reminders import (
     ReminderInput,
@@ -23,7 +23,10 @@ from backend.task_management.reminders import (
     reminder_input_from_row,
     validate_reminder_inputs,
 )
-from backend.task_management.schedule import localize_wall_time
+from backend.task_management.schedule import (
+    localize_wall_time,
+    next_occurrence_after_date,
+)
 from backend.task_management.series import UNSET, SeriesService, UnsetType
 
 _TASK_NOT_FOUND = "Task not found"
@@ -33,6 +36,7 @@ _INVALID_DUE_AT = "Task due time must include a timezone"
 _INVALID_TIMEZONE = "Invalid timezone"
 _INVALID_DATE_RANGE = "Date range is out of bounds"
 _PROJECT_ARCHIVED = "Project is archived"
+_INVALID_RECURRENCE_INTERVAL = "Task recurrence and interval are incompatible"
 
 
 @dataclass(frozen=True)
@@ -43,19 +47,20 @@ class TaskFilters:
     project_ids: tuple[int, ...] = ()
     priorities: tuple[Priority, ...] = ()
     status: Literal["all", "open", "completed", "overdue"] = "all"
-    recurrence: Literal["all", "regular", "one_off"] = "all"
+    recurrence: Literal["all", "regular", "periodic", "one_off"] = "all"
     query: str | None = None
     include_archived_projects: bool = False
 
 
 @dataclass(frozen=True)
 class TaskDetail:
-    """A task with its labels, reminders, and owning project."""
+    """A task with its labels, reminders, owning project, and recurrence."""
 
     task: Task
     labels: Sequence[Label]
     reminders: Sequence[TaskReminder]
     project: Project | None
+    recurrence: TaskRecurrence = TaskRecurrence.ONE_OFF
 
 
 @dataclass(frozen=True)
@@ -299,13 +304,16 @@ class TaskService:
         label_ids: Sequence[int] | None = None,
         reminders_enabled: bool | None = None,
         reminders: Sequence[ReminderInput] | None = None,
+        recurrence: TaskRecurrence | None = None,
+        interval_days: int | None = None,
     ) -> TaskDetail:
         """
-        Update a task or its recurring series.
+        Update a task, its recurrence mode, or its recurring series.
 
         Purpose:
-            Apply snapshot, label, due-time, and reminder changes; a task that
-            belongs to a series is edited through the series rule.
+            Apply snapshot, label, due-time, reminder, and recurrence changes;
+            a task toggled between one-off and series modes keeps its history
+            while an overdue current instance moves to the next phase slot.
 
         Args:
             user_id: Owner identifier.
@@ -321,33 +329,66 @@ class TaskService:
             label_ids: Complete new label selection.
             reminders_enabled: New master reminder toggle.
             reminders: Complete new reminder rules.
+            recurrence: Target recurrence mode; ``None`` keeps the current
+                mode and treats ``interval_days`` as an interval-only edit.
+            interval_days: Number of days between periodic occurrences; daily
+                series accept only ``None`` or ``1``. Defaults to ``None``.
 
         Returns:
-            TaskDetail: The updated task detail.
+            TaskDetail: The updated task detail with its recurrence mode.
 
         Raises:
             NotFoundError: If the task, project, label, or series does not
                 exist for this user.
             BadRequestError: If the title is empty, the due time is naive or
-                outside the supported range, the project is archived, or a
-                reminder rule is invalid.
+                outside the supported range, the project is archived, a
+                reminder rule is invalid, or the recurrence/interval pair is
+                incompatible.
 
         Notes:
-            - For a series instance only future incomplete instances change.
-            - Due-time, reminder, or re-enabled master-toggle changes rebuild
-              the affected reminder rows from the current time.
-            - Disabling the master toggle persists any supplied rules first,
-              then cancels deliveries and clears slots.
+            - Other fields from the same update are applied before a conversion
+              takes its series snapshot.
+            - Converting to a series clears a stale soft-deleted series
+              reference before changing ``due_at`` to avoid the unique-slot
+              conflict.
+            - Disabling recurrence detaches first, physically removes future
+              incomplete siblings, then shifts the current overdue instance by
+              the captured series phase.
+            - An overdue incomplete current instance moves strictly after the
+              current local day while preserving its local time.
+            - An active series instance is edited through the series rule; a
+              soft-deleted series is treated as a one-off task.
             - For a series instance the series row is locked before the task
               row; one-off tasks lock only the task row.
             - Does not commit.
         """
+        self._validate_recurrence_interval(recurrence, interval_days)
         task, series = await self._lock_update_target(user_id, task_id)
-        if series is not None:
-            return await self._update_series_task(
+
+        if series is None:
+            return await self._update_detached_task(
                 user_id,
                 task,
-                series,
+                title=title,
+                description=description,
+                priority=priority,
+                due_at=due_at,
+                project_id=project_id,
+                label_ids=label_ids,
+                reminders_enabled=reminders_enabled,
+                reminders=reminders,
+                recurrence=recurrence,
+                interval_days=interval_days,
+            )
+
+        if recurrence is TaskRecurrence.ONE_OFF:
+            anchor = series.starts_on
+            series_interval_days = series.interval_days
+            zone = ZoneInfo(series.timezone)
+            await self._series_service.detach_task(user_id, task, series)
+            await self._apply_task_update(
+                user_id,
+                task,
                 title=title,
                 description=description,
                 priority=priority,
@@ -357,7 +398,215 @@ class TaskService:
                 reminders_enabled=reminders_enabled,
                 reminders=reminders,
             )
+            await self._shift_overdue_task(
+                user_id,
+                task,
+                anchor=anchor,
+                interval_days=series_interval_days,
+                timezone=zone,
+            )
+            await self._repository.flush()
+            return await self._detail(user_id, task)
 
+        if (
+            recurrence is None
+            and interval_days is not None
+            and series.frequency != SeriesFrequency.PERIODIC.value
+        ):
+            raise BadRequestError(_INVALID_RECURRENCE_INTERVAL)
+        frequency: SeriesFrequency | None = None
+        resolved_interval_days = interval_days
+        if recurrence is TaskRecurrence.REGULAR:
+            frequency = SeriesFrequency.DAILY
+            resolved_interval_days = 1
+        elif recurrence is TaskRecurrence.PERIODIC:
+            frequency = SeriesFrequency.PERIODIC
+        return await self._update_series_task(
+            user_id,
+            task,
+            series,
+            title=title,
+            description=description,
+            priority=priority,
+            due_at=due_at,
+            project_id=project_id,
+            label_ids=label_ids,
+            reminders_enabled=reminders_enabled,
+            reminders=reminders,
+            frequency=frequency,
+            interval_days=resolved_interval_days,
+        )
+
+    async def _update_detached_task(
+        self,
+        user_id: int,
+        task: Task,
+        *,
+        title: str | None,
+        description: str | None | UnsetType,
+        priority: Priority | None,
+        due_at: datetime | None,
+        project_id: int | None | UnsetType,
+        label_ids: Sequence[int] | None,
+        reminders_enabled: bool | None,
+        reminders: Sequence[ReminderInput] | None,
+        recurrence: TaskRecurrence | None,
+        interval_days: int | None,
+    ) -> TaskDetail:
+        """
+        Update a task without an active series, including one-off conversions.
+
+        Purpose:
+            Apply the one-off update and, when requested, convert the task into
+            a daily or periodic series with a phase-preserving overdue shift.
+
+        Args:
+            user_id: Owner identifier.
+            task: Task without an active series; a stale soft-deleted series
+                reference is cleared before conversion or an explicit
+                ``one_off`` toggle.
+            title: New title, or ``None`` when unchanged.
+            description: New description sentinel or value.
+            priority: New priority, or ``None`` when unchanged.
+            due_at: New due instant, or ``None`` when unchanged.
+            project_id: New project sentinel or value.
+            label_ids: New label selection, or ``None`` when unchanged.
+            reminders_enabled: New master toggle, or ``None`` when unchanged.
+            reminders: New reminder rules, or ``None`` when unchanged.
+            recurrence: Target recurrence mode, or ``None`` when unchanged.
+            interval_days: Requested periodic interval, or ``None`` when
+                unchanged.
+
+        Returns:
+            TaskDetail: The updated task detail with its recurrence mode.
+
+        Raises:
+            BadRequestError: If an updated field is invalid or the
+                recurrence/interval pair is incompatible.
+            NotFoundError: If the project or a label does not exist for this
+                user.
+
+        Notes:
+            - Other fields are applied before the series snapshot is taken.
+            - Regular conversion accepts only ``None`` or ``1`` and stores
+              ``interval_days=1``; periodic conversion requires ``interval_days
+              >= 2``.
+            - The overdue shift uses the user's timezone and the final due local
+              date as the anchor.
+            - Flushes through the repository but does not commit.
+        """
+        if recurrence is None and interval_days is not None:
+            raise BadRequestError(_INVALID_RECURRENCE_INTERVAL)
+
+        if recurrence is TaskRecurrence.ONE_OFF and task.series_id is not None:
+            task.series_id = None
+
+        if recurrence in (TaskRecurrence.REGULAR, TaskRecurrence.PERIODIC):
+            if recurrence is TaskRecurrence.REGULAR:
+                frequency = SeriesFrequency.DAILY
+                resolved_interval_days = 1
+            else:
+                if interval_days is None:
+                    raise BadRequestError(_INVALID_RECURRENCE_INTERVAL)
+                frequency = SeriesFrequency.PERIODIC
+                resolved_interval_days = interval_days
+            if task.series_id is not None:
+                task.series_id = None
+            await self._apply_task_update(
+                user_id,
+                task,
+                title=title,
+                description=description,
+                priority=priority,
+                due_at=due_at,
+                project_id=project_id,
+                label_ids=label_ids,
+                reminders_enabled=reminders_enabled,
+                reminders=reminders,
+            )
+            now = self._clock()
+            if task.completed_at is None and task.due_at <= now:
+                zone = await self._user_timezone(user_id)
+                await self._shift_overdue_task(
+                    user_id,
+                    task,
+                    anchor=task.due_at.astimezone(zone).date(),
+                    interval_days=resolved_interval_days,
+                    timezone=zone,
+                )
+            await self._series_service.create_from_task(
+                user_id,
+                task,
+                frequency=frequency,
+                interval_days=resolved_interval_days,
+            )
+            await self._repository.flush()
+            return await self._detail(user_id, task)
+
+        await self._apply_task_update(
+            user_id,
+            task,
+            title=title,
+            description=description,
+            priority=priority,
+            due_at=due_at,
+            project_id=project_id,
+            label_ids=label_ids,
+            reminders_enabled=reminders_enabled,
+            reminders=reminders,
+        )
+        await self._repository.flush()
+        return await self._detail(user_id, task)
+
+    async def _apply_task_update(
+        self,
+        user_id: int,
+        task: Task,
+        *,
+        title: str | None,
+        description: str | None | UnsetType,
+        priority: Priority | None,
+        due_at: datetime | None,
+        project_id: int | None | UnsetType,
+        label_ids: Sequence[int] | None,
+        reminders_enabled: bool | None,
+        reminders: Sequence[ReminderInput] | None,
+    ) -> None:
+        """
+        Apply a one-off task update to the current instance.
+
+        Purpose:
+            Share field validation, label replacement, and reminder rebuilding
+            between plain edits and recurrence conversions.
+
+        Args:
+            user_id: Owner identifier.
+            task: Task to update in place.
+            title: New title, or ``None`` when unchanged.
+            description: New description sentinel or value.
+            priority: New priority, or ``None`` when unchanged.
+            due_at: New due instant, or ``None`` when unchanged.
+            project_id: New project sentinel or value.
+            label_ids: New label selection, or ``None`` when unchanged.
+            reminders_enabled: New master toggle, or ``None`` when unchanged.
+            reminders: New reminder rules, or ``None`` when unchanged.
+
+        Returns:
+            None: The changes stay in the current unit of work.
+
+        Raises:
+            BadRequestError: If the title, due time, project, or a reminder rule
+                is invalid.
+            NotFoundError: If the project or a label does not exist for this
+                user.
+
+        Notes:
+            - Due-time, reminder, or re-enabled master-toggle changes rebuild
+              the affected reminder rows from the current time.
+            - Disabling the master toggle persists any supplied rules first,
+              then cancels deliveries and clears slots.
+            - Does not flush or commit; the caller owns the transaction flush.
+        """
         if title is not None:
             task.title = self._normalize_title(title)
         if not isinstance(description, UnsetType):
@@ -395,8 +644,6 @@ class TaskService:
             )
         if toggle_changed and not reminders_enabled:
             await self._repository.cancel_task_reminders(user_id, task.id)
-        await self._repository.flush()
-        return await self._detail(user_id, task)
 
     async def complete(self, user_id: int, task_id: int) -> TaskDetail:
         """
@@ -513,15 +760,19 @@ class TaskService:
 
         Returns:
             tuple[Task, TaskSeries | None]: The locked task and its locked
-                series when the task belongs to one.
+                active series, or ``None`` when the task is one-off or its
+                series is soft-deleted.
 
         Raises:
-            NotFoundError: If the task or its series does not exist for this
-                user.
+            NotFoundError: If the task or a referenced series does not exist
+                for this user.
 
         Notes:
             - Reads the task without a lock to discover its series, locks the
-              series row, then locks the task row.
+              series row even when soft-deleted, then locks the task row.
+            - A soft-deleted series is returned as ``None`` so callers treat the
+              task as one-off while its history keeps the series reference.
+            - A missing series (integrity violation) still raises not-found.
             - One-off tasks lock only the task row.
             - Does not commit.
         """
@@ -534,9 +785,12 @@ class TaskService:
                 user_id,
                 initial.series_id,
                 for_update=True,
+                include_deleted=True,
             )
             if series is None:
                 raise NotFoundError("Series not found")
+            if series.deleted_at is not None:
+                series = None
         task = await self._repository.get_task(user_id, task_id, for_update=True)
         if task is None:
             raise NotFoundError(_TASK_NOT_FOUND)
@@ -556,12 +810,15 @@ class TaskService:
         label_ids: Sequence[int] | None,
         reminders_enabled: bool | None,
         reminders: Sequence[ReminderInput] | None,
+        frequency: SeriesFrequency | None = None,
+        interval_days: int | None = None,
     ) -> TaskDetail:
         """
         Apply a task-card edit through the series rule.
 
         Purpose:
-            Keep series semantics intact when the user edits any instance.
+            Keep series semantics intact when the user edits any instance,
+            including changing its frequency or periodic interval.
 
         Args:
             user_id: Owner identifier.
@@ -575,17 +832,24 @@ class TaskService:
             label_ids: New label selection, or ``None`` when unchanged.
             reminders_enabled: New master toggle, or ``None`` when unchanged.
             reminders: New reminder rules, or ``None`` when unchanged.
+            frequency: New series frequency, or ``None`` to keep it. Defaults
+                to ``None``.
+            interval_days: New number of days between periodic occurrences, or
+                ``None`` to keep the current interval. Defaults to ``None``.
 
         Returns:
             TaskDetail: The updated representative instance detail.
 
         Raises:
             NotFoundError: If the series does not exist for this user.
-            BadRequestError: If an updated field is invalid.
+            BadRequestError: If an updated field or the frequency/interval pair
+                is invalid.
 
         Notes:
             - A changed due time moves the series ``time_of_day`` in the series
               timezone; individual detached instances are not supported.
+            - A frequency or interval change regenerates future instances
+              through the series service.
             - The series row is locked before the instance row by the caller.
             - Does not commit.
         """
@@ -602,6 +866,8 @@ class TaskService:
             title=title,
             description=description,
             priority=priority,
+            frequency=frequency,
+            interval_days=interval_days,
             time_of_day=time_of_day,
             project_id=project_id,
             label_ids=label_ids,
@@ -617,6 +883,55 @@ class TaskService:
             )
             refreshed = future_tasks[0] if future_tasks else task
         return await self._detail(user_id, refreshed)
+
+    async def _shift_overdue_task(
+        self,
+        user_id: int,
+        task: Task,
+        *,
+        anchor: date,
+        interval_days: int,
+        timezone: ZoneInfo,
+    ) -> None:
+        """
+        Move an overdue incomplete task to the next phase-aligned slot.
+
+        Purpose:
+            Keep an overdue task actionable after a recurrence toggle without
+            losing the original local time or series phase.
+
+        Args:
+            user_id: Owner identifier.
+            task: Task to shift in place.
+            anchor: First phase date used to align the next occurrence.
+            interval_days: Number of local days between occurrences.
+            timezone: Timezone used to derive the local date and time.
+
+        Returns:
+            None: The changes stay in the current unit of work.
+
+        Raises:
+            BadRequestError: If rebuilding the task reminders fails validation.
+
+        Notes:
+            - No-op when the task is completed or its due time is still in the
+              future.
+            - Preserves the current local wall-clock time in ``timezone``.
+            - Rebuilds the task reminder slots from the new due time.
+            - Does not commit.
+        """
+        now = self._clock()
+        if task.completed_at is not None or task.due_at > now:
+            return
+        time_of_day = task.due_at.astimezone(timezone).timetz().replace(tzinfo=None)
+        task.due_at = next_occurrence_after_date(
+            anchor=anchor,
+            interval_days=interval_days,
+            time_of_day=time_of_day,
+            timezone=timezone,
+            now=now,
+        )
+        await self._rebuild_task_reminders(user_id, task, reminders=None)
 
     async def _rebuild_task_reminders(
         self,
@@ -673,7 +988,7 @@ class TaskService:
 
     async def _detail(self, user_id: int, task: Task) -> TaskDetail:
         """
-        Load the labels, reminders, and project of a task.
+        Load the labels, reminders, project, and recurrence of a task.
 
         Purpose:
             Build the shared task-detail response shape.
@@ -683,11 +998,13 @@ class TaskService:
             task: Task to enrich.
 
         Returns:
-            TaskDetail: The task with its related data.
+            TaskDetail: The task with its related data and recurrence mode.
 
         Notes:
             - Missing or archived projects still resolve as ``None`` only when
               the repository hides them; existing projects are returned.
+            - The series is loaded including soft-deleted rows so history keeps
+              its ``regular``/``periodic`` classification.
             - Performs no writes and does not commit.
         """
         labels = await self._repository.list_task_labels(user_id, task.id)
@@ -697,11 +1014,21 @@ class TaskService:
             if task.project_id is not None
             else None
         )
+        series = (
+            await self._repository.get_series(
+                user_id,
+                task.series_id,
+                include_deleted=True,
+            )
+            if task.series_id is not None
+            else None
+        )
         return TaskDetail(
             task=task,
             labels=labels,
             reminders=reminders,
             project=project,
+            recurrence=self._classify_recurrence(series),
         )
 
     async def _details(
@@ -713,20 +1040,24 @@ class TaskService:
         Load related data for a page of tasks with batch queries.
 
         Purpose:
-            Avoid one label, reminder, and project query per task when building
-            a task list response.
+            Avoid one label, reminder, project, or series query per task when
+            building a task list response.
 
         Args:
             user_id: Owner identifier.
             tasks: Tasks belonging to the page.
 
         Returns:
-            Sequence[TaskDetail]: The tasks with labels, reminders, and
-                projects attached in the same order as ``tasks``.
+            Sequence[TaskDetail]: The tasks with labels, reminders, projects,
+                and recurrence modes attached in the same order as ``tasks``.
 
         Notes:
             - Returns immediately without issuing batch queries for an empty
               page.
+            - The series batch query is skipped when no task has a series
+              reference.
+            - Series are loaded including soft-deleted rows so history keeps its
+              ``regular``/``periodic`` classification.
             - Performs no writes and does not commit.
         """
         if not tasks:
@@ -735,12 +1066,22 @@ class TaskService:
         project_ids = tuple(
             sorted({task.project_id for task in tasks if task.project_id is not None})
         )
+        series_ids = tuple(sorted({task.series_id for task in tasks if task.series_id is not None}))
         labels_by_task = await self._repository.list_task_labels_for_tasks(user_id, task_ids)
         reminders_by_task = await self._repository.list_task_reminders_for_tasks(
             user_id,
             task_ids,
         )
         projects_by_id = await self._repository.get_projects_by_ids(user_id, project_ids)
+        series_by_id = (
+            await self._repository.get_series_by_ids(
+                user_id,
+                series_ids,
+                include_deleted=True,
+            )
+            if series_ids
+            else {}
+        )
         return [
             TaskDetail(
                 task=task,
@@ -749,9 +1090,36 @@ class TaskService:
                 project=(
                     projects_by_id.get(task.project_id) if task.project_id is not None else None
                 ),
+                recurrence=self._classify_recurrence(
+                    series_by_id.get(task.series_id) if task.series_id is not None else None
+                ),
             )
             for task in tasks
         ]
+
+    def _classify_recurrence(self, series: TaskSeries | None) -> TaskRecurrence:
+        """
+        Classify a task recurrence mode from its optional series.
+
+        Purpose:
+            Map the stored series frequency to the client-facing recurrence
+            value while treating missing series as one-off.
+
+        Args:
+            series: Owning series including soft-deleted rows, or ``None``.
+
+        Returns:
+            TaskRecurrence: ``PERIODIC`` for periodic series, ``REGULAR`` for
+                daily series, and ``ONE_OFF`` without a series.
+
+        Notes:
+            - Performs no writes and does not commit.
+        """
+        if series is None:
+            return TaskRecurrence.ONE_OFF
+        if series.frequency == SeriesFrequency.PERIODIC.value:
+            return TaskRecurrence.PERIODIC
+        return TaskRecurrence.REGULAR
 
     async def _require_task(
         self,
@@ -908,3 +1276,39 @@ class TaskService:
             require_supported_datetime(due_at)
         except ValueError as error:
             raise BadRequestError(_INVALID_DUE_AT) from error
+
+    def _validate_recurrence_interval(
+        self,
+        recurrence: TaskRecurrence | None,
+        interval_days: int | None,
+    ) -> None:
+        """
+        Validate a recurrence mode and interval pair before any write.
+
+        Purpose:
+            Reject impossible combinations early so a toggle never leaves
+            partially applied fields in the current unit of work.
+
+        Args:
+            recurrence: Requested recurrence mode, or ``None`` when unchanged.
+            interval_days: Requested days between periodic occurrences, or
+                ``None`` when omitted.
+
+        Returns:
+            None: The pair is valid.
+
+        Raises:
+            BadRequestError: If ``one_off`` carries an interval, ``regular``
+                carries an interval other than ``1``, or periodic carries an
+                interval below ``2``.
+        """
+        if recurrence is TaskRecurrence.ONE_OFF and interval_days is not None:
+            raise BadRequestError(_INVALID_RECURRENCE_INTERVAL)
+        if recurrence is TaskRecurrence.REGULAR and interval_days not in (None, 1):
+            raise BadRequestError(_INVALID_RECURRENCE_INTERVAL)
+        if (
+            recurrence is TaskRecurrence.PERIODIC
+            and interval_days is not None
+            and interval_days < 2
+        ):
+            raise BadRequestError(_INVALID_RECURRENCE_INTERVAL)

@@ -6,7 +6,7 @@ import pytest
 
 from backend.api.pagination import DEFAULT_PAGE_SIZE
 from backend.core.errors import BadRequestError, ErrorCode, NotFoundError
-from backend.task_management.enums import Priority, ReminderKind
+from backend.task_management.enums import Priority, ReminderKind, TaskRecurrence
 from backend.task_management.labels import LabelService
 from backend.task_management.palette import PaletteService
 from backend.task_management.projects import ProjectService
@@ -840,3 +840,525 @@ async def test_create_task_rejects_before_due_overflow() -> None:
                 ),
             ),
         )
+
+
+async def test_enable_regular_on_future_one_off_task_creates_series_without_moving_due() -> None:
+    repository = FakeTaskManagementRepository()
+    repository.user_timezones[USER_ID] = "Europe/Moscow"
+    task = repository.insert_task(
+        make_task(
+            due_at=fixed_now() + timedelta(days=1),
+            title="Old",
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(
+        USER_ID,
+        task.id,
+        title="New",
+        recurrence=TaskRecurrence.REGULAR,
+    )
+
+    assert detail.task.title == "New"
+    assert detail.task.series_id is not None
+    assert detail.recurrence is TaskRecurrence.REGULAR
+    assert detail.task.due_at == fixed_now() + timedelta(days=1)
+    series = repository.series[detail.task.series_id]
+    assert series.frequency == "daily"
+    assert series.interval_days == 1
+
+
+async def test_enable_periodic_on_overdue_one_off_task_shifts_to_next_phase_slot() -> None:
+    repository = FakeTaskManagementRepository()
+    repository.user_timezones[USER_ID] = "Europe/Moscow"
+    task = repository.insert_task(make_task(due_at=datetime(2026, 11, 1, 6, 0, tzinfo=UTC)))
+    service = make_service(repository)
+
+    detail = await service.update(
+        USER_ID,
+        task.id,
+        recurrence=TaskRecurrence.PERIODIC,
+        interval_days=3,
+    )
+
+    assert detail.task.due_at == datetime(2026, 11, 7, 6, 0, tzinfo=UTC)
+    assert detail.task.series_id is not None
+    series = repository.series[detail.task.series_id]
+    assert series.starts_on == date(2026, 11, 7)
+    assert series.interval_days == 3
+    assert detail.task.due_at in {item.due_at for item in repository.tasks.values()}
+    assert sum(1 for item in repository.tasks.values() if item.due_at == detail.task.due_at) == 1
+
+
+async def test_enable_regular_on_completed_task_keeps_completion_and_series_starts_on_due_date(  # noqa: E501
+) -> None:
+    repository = FakeTaskManagementRepository()
+    task = repository.insert_task(
+        make_task(
+            due_at=fixed_now() - timedelta(days=2),
+            completed_at=fixed_now() - timedelta(days=1),
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(
+        USER_ID,
+        task.id,
+        recurrence=TaskRecurrence.REGULAR,
+    )
+
+    assert detail.recurrence is TaskRecurrence.REGULAR
+    assert detail.task.completed_at == fixed_now() - timedelta(days=1)
+    assert detail.task.due_at == fixed_now() - timedelta(days=2)
+
+
+async def test_disable_regular_on_future_series_task_detaches_only_current_instance() -> None:
+    """Disabling regularity keeps the current instance and removes future siblings."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    past = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 4, 9, 0, tzinfo=UTC),
+        )
+    )
+    current = repository.insert_task(
+        make_task(
+            task_id=2,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 5, 9, 0, tzinfo=UTC),
+        )
+    )
+    future = repository.insert_task(
+        make_task(
+            task_id=3,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 6, 9, 0, tzinfo=UTC),
+        )
+    )
+    completed = repository.insert_task(
+        make_task(
+            task_id=4,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 7, 9, 0, tzinfo=UTC),
+            completed_at=fixed_now(),
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(USER_ID, current.id, recurrence=TaskRecurrence.ONE_OFF)
+
+    assert future.id not in repository.tasks
+    assert current.id in repository.tasks
+    assert current.series_id is None
+    assert current.due_at == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
+    assert past.id in repository.tasks
+    assert completed.id in repository.tasks
+    assert series.deleted_at == fixed_now()
+    assert detail.recurrence is TaskRecurrence.ONE_OFF
+
+
+async def test_disable_regular_on_overdue_series_task_shifts_current_and_keeps_history() -> None:
+    """Disabling regularity shifts only the current overdue task by series phase."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    overdue_history = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 2, 9, 0, tzinfo=UTC),
+        )
+    )
+    completed = repository.insert_task(
+        make_task(
+            task_id=2,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 3, 9, 0, tzinfo=UTC),
+            completed_at=datetime(2026, 11, 3, 10, 0, tzinfo=UTC),
+        )
+    )
+    current = repository.insert_task(
+        make_task(
+            task_id=3,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 4, 9, 0, tzinfo=UTC),
+        )
+    )
+    future = repository.insert_task(
+        make_task(
+            task_id=4,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 5, 9, 0, tzinfo=UTC),
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(USER_ID, current.id, recurrence=TaskRecurrence.ONE_OFF)
+
+    assert current.due_at == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
+    assert current.series_id is None
+    assert overdue_history.due_at == datetime(2026, 11, 2, 9, 0, tzinfo=UTC)
+    assert overdue_history.id in repository.tasks
+    assert completed.due_at == datetime(2026, 11, 3, 9, 0, tzinfo=UTC)
+    assert completed.id in repository.tasks
+    assert future.id not in repository.tasks
+    assert series.deleted_at == fixed_now()
+    assert detail.recurrence is TaskRecurrence.ONE_OFF
+
+
+async def test_disable_overdue_series_task_can_reuse_a_removed_future_slot() -> None:
+    """Detach removes the future sibling before the overdue task moves there."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    current = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 3, 9, 0, tzinfo=UTC),
+        )
+    )
+    future = repository.insert_task(
+        make_task(
+            task_id=2,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 5, 9, 0, tzinfo=UTC),
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(USER_ID, current.id, recurrence=TaskRecurrence.ONE_OFF)
+
+    assert future.id not in repository.tasks
+    assert current.due_at == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
+    assert sum(1 for item in repository.tasks.values() if item.due_at == current.due_at) == 1
+    assert detail.recurrence is TaskRecurrence.ONE_OFF
+
+
+async def test_disable_regular_on_completed_series_task_keeps_due() -> None:
+    """Disabling regularity on a completed task leaves its due time untouched."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    completed = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=fixed_now() + timedelta(days=1),
+            completed_at=fixed_now() - timedelta(hours=1),
+        )
+    )
+    future = repository.insert_task(
+        make_task(
+            task_id=2,
+            series_id=series.id,
+            due_at=fixed_now() + timedelta(days=2),
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(USER_ID, completed.id, recurrence=TaskRecurrence.ONE_OFF)
+
+    assert completed.due_at == fixed_now() + timedelta(days=1)
+    assert completed.completed_at == fixed_now() - timedelta(hours=1)
+    assert completed.series_id is None
+    assert future.id not in repository.tasks
+    assert series.deleted_at == fixed_now()
+    assert detail.recurrence is TaskRecurrence.ONE_OFF
+
+
+async def test_update_periodic_series_interval_without_recurrence() -> None:
+    """An interval-only edit updates and regenerates an existing periodic series."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            frequency="periodic",
+            interval_days=3,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    past = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 4, 9, 0, tzinfo=UTC),
+        )
+    )
+    future = repository.insert_task(
+        make_task(
+            task_id=2,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 7, 9, 0, tzinfo=UTC),
+        )
+    )
+    completed = repository.insert_task(
+        make_task(
+            task_id=3,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 10, 9, 0, tzinfo=UTC),
+            completed_at=fixed_now(),
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(USER_ID, future.id, interval_days=5)
+
+    assert series.frequency == "periodic"
+    assert series.interval_days == 5
+    assert past.deleted_at is None
+    assert completed.deleted_at is None
+    assert future.deleted_at == fixed_now()
+    generated = sorted(
+        (
+            task
+            for task in repository.tasks.values()
+            if task.series_id == series.id and task.id not in {past.id, future.id, completed.id}
+        ),
+        key=lambda task: task.due_at,
+    )
+    assert generated
+    assert generated[0].due_at == datetime(2026, 11, 6, 9, 0, tzinfo=UTC)
+    assert all((task.due_at.date() - date(2026, 11, 1)).days % 5 == 0 for task in generated)
+    assert detail.recurrence is TaskRecurrence.PERIODIC
+
+
+async def test_interval_only_on_one_off_or_daily_raises_bad_request() -> None:
+    """An interval without recurrence requires an existing periodic series."""
+    repository = FakeTaskManagementRepository()
+    one_off = repository.insert_task(make_task(task_id=1, due_at=fixed_now() + timedelta(days=1)))
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    daily_task = repository.insert_task(
+        make_task(
+            task_id=2,
+            series_id=series.id,
+            due_at=fixed_now() + timedelta(days=1),
+        )
+    )
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError):
+        await service.update(USER_ID, one_off.id, interval_days=5)
+    with pytest.raises(BadRequestError):
+        await service.update(USER_ID, daily_task.id, interval_days=5)
+
+    assert one_off.series_id is None
+    assert series.frequency == "daily"
+    assert series.interval_days == 1
+
+
+async def test_periodic_requires_interval_on_conversion() -> None:
+    """Converting a one-off task to periodic requires an explicit interval."""
+    repository = FakeTaskManagementRepository()
+    task = repository.insert_task(make_task(due_at=fixed_now() + timedelta(days=1)))
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError):
+        await service.update(USER_ID, task.id, recurrence=TaskRecurrence.PERIODIC)
+
+    assert task.series_id is None
+    assert repository.series == {}
+
+
+async def test_enable_regular_on_task_with_archived_project_raises_bad_request() -> None:
+    """Conversion validates the project like series creation."""
+    repository = FakeTaskManagementRepository()
+    project = repository.insert_project(make_project(archived_at=fixed_now()))
+    task = repository.insert_task(
+        make_task(
+            due_at=fixed_now() + timedelta(days=1),
+            project_id=project.id,
+        )
+    )
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError):
+        await service.update(USER_ID, task.id, recurrence=TaskRecurrence.REGULAR)
+
+    assert task.series_id is None
+    assert repository.series == {}
+
+
+async def test_enable_regular_on_task_with_deleted_project_raises_not_found() -> None:
+    """Conversion rejects a project that no longer exists."""
+    repository = FakeTaskManagementRepository()
+    project = repository.insert_project(make_project(deleted_at=fixed_now()))
+    task = repository.insert_task(
+        make_task(
+            due_at=fixed_now() + timedelta(days=1),
+            project_id=project.id,
+        )
+    )
+    service = make_service(repository)
+
+    with pytest.raises(NotFoundError):
+        await service.update(USER_ID, task.id, recurrence=TaskRecurrence.REGULAR)
+
+    assert task.series_id is None
+    assert repository.series == {}
+
+
+async def test_update_task_of_soft_deleted_series_treats_it_as_one_off() -> None:
+    """Editing a task of a soft-deleted series works like editing a one-off task."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            deleted_at=fixed_now(),
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    task = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            title="Old",
+            due_at=fixed_now() + timedelta(days=1),
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(USER_ID, task.id, title="New")
+
+    assert detail.task is task
+    assert task.title == "New"
+    assert task.series_id == series.id
+    assert series.deleted_at == fixed_now()
+
+
+async def test_disable_regular_on_task_of_soft_deleted_series_clears_series_id() -> None:
+    """An explicit one-off toggle clears a stale soft-deleted series reference."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            deleted_at=fixed_now(),
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    task = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=fixed_now() + timedelta(days=1),
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(USER_ID, task.id, recurrence=TaskRecurrence.ONE_OFF)
+
+    assert task.series_id is None
+    assert series.deleted_at == fixed_now()
+    assert detail.recurrence is TaskRecurrence.ONE_OFF
+
+
+async def test_reenable_regular_on_task_of_soft_deleted_series_creates_new_series() -> None:
+    """Re-enabling regularity replaces a stale soft-deleted series reference."""
+    repository = FakeTaskManagementRepository()
+    old_series = repository.insert_series(
+        make_series(
+            series_id=1,
+            deleted_at=fixed_now(),
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    history = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=old_series.id,
+            due_at=datetime(2026, 11, 2, 9, 0, tzinfo=UTC),
+        )
+    )
+    task = repository.insert_task(
+        make_task(
+            task_id=2,
+            series_id=old_series.id,
+            due_at=fixed_now() + timedelta(days=1),
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(USER_ID, task.id, recurrence=TaskRecurrence.REGULAR)
+
+    assert detail.recurrence is TaskRecurrence.REGULAR
+    assert task.series_id is not None
+    assert task.series_id != old_series.id
+    new_series = repository.series[task.series_id]
+    assert new_series.deleted_at is None
+    assert new_series.frequency == "daily"
+    assert old_series.deleted_at == fixed_now()
+    assert history.series_id == old_series.id
+    assert history.id in repository.tasks
+
+
+async def test_toggle_applies_other_fields_before_conversion() -> None:
+    """Fields from the same PATCH are applied before the series snapshot is taken."""
+    repository = FakeTaskManagementRepository()
+    project = repository.insert_project(make_project())
+    label = repository.insert_label(make_label())
+    task = repository.insert_task(
+        make_task(
+            task_id=1,
+            title="Old",
+            due_at=fixed_now() + timedelta(days=1),
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(
+        USER_ID,
+        task.id,
+        title="New",
+        description="New description",
+        priority=Priority.URGENT_IMPORTANT,
+        project_id=project.id,
+        label_ids=(label.id,),
+        recurrence=TaskRecurrence.REGULAR,
+    )
+
+    assert detail.task.title == "New"
+    assert detail.task.description == "New description"
+    assert detail.task.priority == Priority.URGENT_IMPORTANT.value
+    assert detail.task.project_id == project.id
+    assert detail.labels == [label]
+    assert task.series_id is not None
+    series = repository.series[task.series_id]
+    assert series.title == "New"
+    assert series.description == "New description"
+    assert series.priority == Priority.URGENT_IMPORTANT.value
+    assert series.project_id == project.id
+    assert (series.id, label.id) in repository.series_labels
