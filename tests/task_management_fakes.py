@@ -13,7 +13,7 @@ from backend.models.task import Task
 from backend.models.task_label import TaskLabel
 from backend.models.task_reminder import TaskReminder
 from backend.models.task_series import TaskSeries
-from backend.task_management.enums import DeliveryStatus, ReminderKind
+from backend.task_management.enums import DeliveryStatus, ReminderKind, SeriesFrequency
 from backend.task_management.reminders import rebuild_reminder_slot
 from backend.task_management.schedule import HORIZON_DAYS
 
@@ -166,6 +166,15 @@ class FakeTaskManagementRepository:
             return True
         project = self.projects.get(project_id)
         return project is not None and project.deleted_at is None and project.archived_at is None
+
+    def _series_frequency(self, series_id: int | None) -> str | None:
+        """Return the frequency of an optional series reference."""
+        if series_id is None:
+            return None
+        series = self.series.get(series_id)
+        if series is None:
+            return None
+        return series.frequency
 
     def _cancel_deliveries(self, reminder_ids: set[int]) -> None:
         """Cancel active deliveries for the selected reminders."""
@@ -504,7 +513,17 @@ class FakeTaskManagementRepository:
         elif status == "overdue":
             tasks = [task for task in tasks if task.completed_at is None and task.due_at < now]
         if recurrence == "regular":
-            tasks = [task for task in tasks if task.series_id is not None]
+            tasks = [
+                task
+                for task in tasks
+                if self._series_frequency(task.series_id) == SeriesFrequency.DAILY.value
+            ]
+        elif recurrence == "periodic":
+            tasks = [
+                task
+                for task in tasks
+                if self._series_frequency(task.series_id) == SeriesFrequency.PERIODIC.value
+            ]
         elif recurrence == "one_off":
             tasks = [task for task in tasks if task.series_id is None]
         if query:
@@ -558,6 +577,29 @@ class FakeTaskManagementRepository:
         """Soft-delete a task."""
         task.deleted_at = deleted_at
         task.deletion_batch_id = batch_id
+
+    async def hard_delete_tasks(self, task_ids: Sequence[int], user_id: int) -> None:
+        """Physically delete owned tasks with their labels, reminders, and deliveries."""
+        owned_task_ids = {
+            task_id
+            for task_id in task_ids
+            if task_id in self.tasks and self.tasks[task_id].user_id == user_id
+        }
+        self.task_labels = {pair for pair in self.task_labels if pair[0] not in owned_task_ids}
+        reminder_ids = {
+            reminder.id
+            for reminder in self.reminders.values()
+            if reminder.task_id in owned_task_ids
+        }
+        for reminder_id in reminder_ids:
+            self.reminders.pop(reminder_id, None)
+        self.deliveries = {
+            delivery_id: delivery
+            for delivery_id, delivery in self.deliveries.items()
+            if delivery.reminder_id not in reminder_ids
+        }
+        for task_id in owned_task_ids:
+            self.tasks.pop(task_id, None)
 
     async def add_task_labels(
         self,
@@ -787,12 +829,34 @@ class FakeTaskManagementRepository:
         series_id: int,
         *,
         for_update: bool = False,
+        include_deleted: bool = False,
     ) -> TaskSeries | None:
-        """Return a non-deleted series owned by a user."""
+        """Return a series owned by a user, including soft-deleted rows on demand."""
         series = self.series.get(series_id)
-        if series is None or series.user_id != user_id or series.deleted_at is not None:
+        if series is None or series.user_id != user_id:
+            return None
+        if not include_deleted and series.deleted_at is not None:
             return None
         return series
+
+    async def get_series_by_ids(
+        self,
+        user_id: int,
+        series_ids: Sequence[int],
+        *,
+        include_deleted: bool = False,
+    ) -> dict[int, TaskSeries]:
+        """Return owned series keyed by identifier, including soft-deleted rows on demand."""
+        result: dict[int, TaskSeries] = {}
+        for series_id in series_ids:
+            series = await self.get_series(
+                user_id,
+                series_id,
+                include_deleted=include_deleted,
+            )
+            if series is not None:
+                result[series_id] = series
+        return result
 
     async def add_series(self, series: TaskSeries) -> TaskSeries:
         """Persist a series."""
@@ -1168,6 +1232,8 @@ def make_series(
     title: str = "Daily",
     description: str | None = None,
     priority: str = "neither",
+    frequency: str = "daily",
+    interval_days: int = 1,
     time_of_day: Any = None,
     timezone: str = "UTC",
     starts_on: Any = None,
@@ -1184,7 +1250,8 @@ def make_series(
         title=title,
         description=description,
         priority=priority,
-        frequency="daily",
+        frequency=frequency,
+        interval_days=interval_days,
         time_of_day=time_of_day,
         timezone=timezone,
         starts_on=starts_on,

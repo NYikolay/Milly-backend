@@ -1098,3 +1098,85 @@ async def test_get_labels_by_ids_filters_by_owner_and_ids() -> None:
     assert "labels.user_id = 7" in sql
     assert "labels.deleted_at IS NULL" in sql
     assert "labels.id IN (1, 2)" in sql
+
+
+async def test_list_tasks_regular_joins_daily_series_without_deleted_filter() -> None:
+    """Regular recurrence joins the series table and filters daily series only."""
+    session = RecordingSession()
+    repository = make_repository(session)
+    await repository.list_tasks(
+        USER_ID,
+        date_start=None,
+        date_end=None,
+        project_ids=(),
+        priorities=(),
+        status="all",
+        recurrence="regular",
+        query=None,
+        include_archived_projects=False,
+        now=NOW,
+        limit=50,
+        after_due_at=None,
+        after_task_id=None,
+    )
+    sql = compile_statement(session.statements[-1])
+    assert "JOIN task_series" in sql
+    assert "task_series.frequency = 'daily'" in sql
+    assert "task_series.deleted_at IS NULL" not in sql
+
+
+async def test_list_tasks_periodic_joins_periodic_series() -> None:
+    """Periodic recurrence joins the series table and filters periodic series only."""
+    session = RecordingSession()
+    repository = make_repository(session)
+    await repository.list_tasks(
+        USER_ID,
+        date_start=None,
+        date_end=None,
+        project_ids=(),
+        priorities=(),
+        status="all",
+        recurrence="periodic",
+        query=None,
+        include_archived_projects=False,
+        now=NOW,
+        limit=50,
+        after_due_at=None,
+        after_task_id=None,
+    )
+    sql = compile_statement(session.statements[-1])
+    assert "JOIN task_series" in sql
+    assert "task_series.frequency = 'periodic'" in sql
+
+
+async def test_get_series_can_include_deleted_rows() -> None:
+    """Series lookup skips the deleted filter when deleted rows are requested."""
+    session = RecordingSession(results=[RecordingResult(scalar=None)])
+    repository = make_repository(session)
+    await repository.get_series(USER_ID, 3, include_deleted=True)
+    sql = compile_statement(session.statements[-1])
+    assert "task_series.id = 3" in sql
+    assert "task_series.user_id = 7" in sql
+    assert "task_series.deleted_at IS NULL" not in sql
+
+
+async def test_get_series_by_ids_is_tenant_scoped_and_optional_deleted() -> None:
+    """Batch series lookup is tenant-scoped and can include soft-deleted rows."""
+    session = RecordingSession()
+    repository = make_repository(session)
+    await repository.get_series_by_ids(USER_ID, (1, 2), include_deleted=True)
+    sql = compile_statement(session.statements[-1])
+    assert "task_series.user_id = 7" in sql
+    assert "task_series.id IN (1, 2)" in sql
+    assert "task_series.deleted_at IS NULL" not in sql
+
+
+async def test_hard_delete_tasks_is_user_scoped_and_physical() -> None:
+    """Hard deletion issues one owner-scoped DELETE for the requested tasks."""
+    session = RecordingSession()
+    repository = make_repository(session)
+    await repository.hard_delete_tasks((4, 5), USER_ID)
+    sql = compile_statement(session.statements[-1])
+    assert sql.startswith("DELETE FROM tasks")
+    assert "tasks.id IN (4, 5)" in sql
+    assert "tasks.user_id = 7" in sql

@@ -620,7 +620,9 @@ class TaskManagementRepository(Protocol):
             project_ids: Restrict to these project identifiers when non-empty.
             priorities: Restrict to these priority values when non-empty.
             status: One of ``all``, ``open``, ``completed``, or ``overdue``.
-            recurrence: One of ``all``, ``regular``, or ``one_off``.
+            recurrence: One of ``all``, ``regular``, ``periodic``, or
+                ``one_off``; ``regular`` matches daily series and ``periodic``
+                matches interval series.
             query: Case-insensitive title/description substring.
             include_archived_projects: Whether tasks in archived projects are
                 included.
@@ -636,6 +638,8 @@ class TaskManagementRepository(Protocol):
         Notes:
             - The cursor predicate is applied only when both cursor values are
               provided.
+            - Soft-deleted series still determine the recurrence of their
+              generated tasks.
             - Performs no writes and does not commit.
         """
         ...
@@ -801,6 +805,31 @@ class TaskManagementRepository(Protocol):
             None: The change stays in the current unit of work.
 
         Notes:
+            - Flushes but does not commit.
+        """
+        ...
+
+    async def hard_delete_tasks(self, task_ids: Sequence[int], user_id: int) -> None:
+        """
+        Physically delete owned tasks and their dependent rows.
+
+        Purpose:
+            Remove generated instances that no longer belong to a series edit
+            while relying on foreign-key cascades for labels, reminders, and
+            deliveries.
+
+        Args:
+            task_ids: Task identifiers to delete.
+            user_id: Owner identifier; tasks of other users are unaffected.
+
+        Returns:
+            None: The rows are removed from the current unit of work.
+
+        Notes:
+            - Empty input is a no-op and does not flush.
+            - Deletes tasks physically, unlike ``soft_delete_task``.
+            - Dependent task labels, reminders, and deliveries are removed by
+              database cascades.
             - Flushes but does not commit.
         """
         ...
@@ -1157,23 +1186,56 @@ class TaskManagementRepository(Protocol):
         series_id: int,
         *,
         for_update: bool = False,
+        include_deleted: bool = False,
     ) -> TaskSeries | None:
         """
-        Load a non-deleted series owned by a user.
+        Load a series owned by a user.
 
         Purpose:
-            Resolve a series for reads and serialize mutations when requested.
+            Resolve a series for reads and serialize mutations when requested,
+            optionally including soft-deleted rows for recurrence inspection.
 
         Args:
             user_id: Owner identifier.
             series_id: Series identifier.
             for_update: Whether to lock the row until the transaction ends.
+            include_deleted: Whether soft-deleted series are returned.
 
         Returns:
             TaskSeries | None: The matching series, or ``None`` including when
-                it belongs to another user or is soft-deleted.
+                it belongs to another user or is soft-deleted while deletion is
+                not requested.
 
         Notes:
+            - Performs no writes and does not commit.
+        """
+        ...
+
+    async def get_series_by_ids(
+        self,
+        user_id: int,
+        series_ids: Sequence[int],
+        *,
+        include_deleted: bool = False,
+    ) -> dict[int, TaskSeries]:
+        """
+        Load multiple series owned by a user, keyed by identifier.
+
+        Purpose:
+            Resolve series data for a page without one query per task, optionally
+            including soft-deleted rows.
+
+        Args:
+            user_id: Owner identifier.
+            series_ids: Series identifiers to load.
+            include_deleted: Whether soft-deleted series are returned.
+
+        Returns:
+            dict[int, TaskSeries]: Owned series keyed by identifier; missing or
+                cross-user series are absent.
+
+        Notes:
+            - Returns an empty mapping without a query for an empty input.
             - Performs no writes and does not commit.
         """
         ...
