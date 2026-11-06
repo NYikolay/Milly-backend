@@ -16,6 +16,9 @@ from starlette.requests import Request
 from backend.core.errors import ConflictError
 from backend.models.auth_session import AuthSession
 from backend.models.color_palette import ColorPalette
+from backend.models.project import Project
+from backend.models.task import Task
+from backend.models.task_series import TaskSeries
 from backend.models.telegram_profile import TelegramProfile
 from backend.models.user import User
 
@@ -233,3 +236,115 @@ class AuthSessionAdmin(ModelView, model=AuthSession):
     column_default_sort = (AuthSession.id, True)
     form_include_pk = True
     form_excluded_columns = [AuthSession.id]
+
+
+class TaskAdmin(ModelView, model=Task):
+    """Admin view for one-off and series-generated tasks."""
+
+    column_list = [
+        Task.id,
+        Task.user_id,
+        Task.series_id,
+        Task.project_id,
+        Task.title,
+        Task.priority,
+        Task.due_at,
+        Task.completed_at,
+        Task.reminders_enabled,
+        Task.deleted_at,
+        Task.created_at,
+    ]
+    column_searchable_list = [Task.id, Task.user_id, Task.title]
+    column_sortable_list = [
+        Task.id,
+        Task.priority,
+        Task.due_at,
+        Task.completed_at,
+        Task.created_at,
+    ]
+    column_filters = [
+        BooleanFilter(Task.reminders_enabled),
+        AllUniqueStringValuesFilter(Task.priority),
+        ForeignKeyFilter(
+            Task.user_id,
+            User.id,
+            foreign_model=User,
+            title="User",
+        ),
+        ForeignKeyFilter(
+            Task.project_id,
+            Project.id,
+            foreign_model=Project,
+            title="Project",
+        ),
+        ForeignKeyFilter(
+            Task.series_id,
+            TaskSeries.id,
+            foreign_model=TaskSeries,
+            title="Series",
+        ),
+        OperationColumnFilter(Task.due_at),
+        OperationColumnFilter(Task.created_at),
+    ]
+    column_default_sort = (Task.id, True)
+    form_include_pk = True
+    form_excluded_columns = [Task.id]
+
+
+class TaskSeriesAdmin(ModelView, model=TaskSeries):
+    """Admin view for recurring task series templates."""
+
+    column_list = [
+        TaskSeries.id,
+        TaskSeries.user_id,
+        TaskSeries.project_id,
+        TaskSeries.title,
+        TaskSeries.priority,
+        TaskSeries.frequency,
+        TaskSeries.interval_days,
+        TaskSeries.time_of_day,
+        TaskSeries.timezone,
+        TaskSeries.starts_on,
+        TaskSeries.ends_on,
+        TaskSeries.generated_through,
+        TaskSeries.reminders_enabled,
+        TaskSeries.deleted_at,
+        TaskSeries.created_at,
+    ]
+    column_searchable_list = [
+        TaskSeries.id,
+        TaskSeries.user_id,
+        TaskSeries.title,
+        TaskSeries.timezone,
+    ]
+    column_sortable_list = [
+        TaskSeries.id,
+        TaskSeries.priority,
+        TaskSeries.frequency,
+        TaskSeries.starts_on,
+        TaskSeries.ends_on,
+        TaskSeries.generated_through,
+        TaskSeries.created_at,
+    ]
+    column_filters = [
+        BooleanFilter(TaskSeries.reminders_enabled),
+        AllUniqueStringValuesFilter(TaskSeries.priority),
+        AllUniqueStringValuesFilter(TaskSeries.frequency),
+        ForeignKeyFilter(
+            TaskSeries.user_id,
+            User.id,
+            foreign_model=User,
+            title="User",
+        ),
+        ForeignKeyFilter(
+            TaskSeries.project_id,
+            Project.id,
+            foreign_model=Project,
+            title="Project",
+        ),
+        OperationColumnFilter(TaskSeries.starts_on),
+        OperationColumnFilter(TaskSeries.generated_through),
+    ]
+    column_default_sort = (TaskSeries.id, True)
+    form_include_pk = True
+    form_excluded_columns = [TaskSeries.id]

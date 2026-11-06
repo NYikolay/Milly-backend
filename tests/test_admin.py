@@ -114,8 +114,8 @@ def test_create_app_exposes_database_before_lifespan(app: FastAPI) -> None:
     assert app.state.db is not None
 
 
-def test_admin_registers_four_model_views(admin_app: FastAPI) -> None:
-    """Expose the four model views on the mounted admin."""
+def test_admin_registers_six_model_views(admin_app: FastAPI) -> None:
+    """Expose the six model views on the mounted admin."""
     admin = admin_app.state.admin
     assert admin is not None
     assert [view.identity for view in admin.views] == [
@@ -123,6 +123,8 @@ def test_admin_registers_four_model_views(admin_app: FastAPI) -> None:
         "user",
         "telegram-profile",
         "auth-session",
+        "task",
+        "task-series",
     ]
 
 

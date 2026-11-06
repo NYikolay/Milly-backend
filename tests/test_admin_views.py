@@ -18,12 +18,16 @@ from starlette.applications import Starlette
 from backend.admin.views import (
     AuthSessionAdmin,
     ColorPaletteAdmin,
+    TaskAdmin,
+    TaskSeriesAdmin,
     TelegramProfileAdmin,
     UserAdmin,
 )
 from backend.core.errors import ConflictError
 from backend.models.auth_session import AuthSession
 from backend.models.color_palette import ColorPalette
+from backend.models.task import Task
+from backend.models.task_series import TaskSeries
 from backend.models.telegram_profile import TelegramProfile
 from backend.models.user import User
 
@@ -34,16 +38,22 @@ def test_views_are_bound_to_models() -> None:
     assert TelegramProfileAdmin.model is TelegramProfile
     assert AuthSessionAdmin.model is AuthSession
     assert ColorPaletteAdmin.model is ColorPalette
+    assert TaskAdmin.model is Task
+    assert TaskSeriesAdmin.model is TaskSeries
     assert [
         ColorPaletteAdmin.identity,
         UserAdmin.identity,
         TelegramProfileAdmin.identity,
         AuthSessionAdmin.identity,
+        TaskAdmin.identity,
+        TaskSeriesAdmin.identity,
     ] == [
         "color-palette",
         "user",
         "telegram-profile",
         "auth-session",
+        "task",
+        "task-series",
     ]
 
 
@@ -153,6 +163,81 @@ def test_palette_view_exposes_columns_search_sort_and_filters() -> None:
     assert any(isinstance(item, OperationColumnFilter) for item in ColorPaletteAdmin.column_filters)
 
 
+def test_task_view_exposes_columns_search_sort_and_filters() -> None:
+    """Expose task columns, search, sorting, and filters."""
+    assert _column_keys(TaskAdmin.column_list) == [
+        "id",
+        "user_id",
+        "series_id",
+        "project_id",
+        "title",
+        "priority",
+        "due_at",
+        "completed_at",
+        "reminders_enabled",
+        "deleted_at",
+        "created_at",
+    ]
+    assert _column_keys(TaskAdmin.column_searchable_list) == ["id", "user_id", "title"]
+    assert _column_keys(TaskAdmin.column_sortable_list) == [
+        "id",
+        "priority",
+        "due_at",
+        "completed_at",
+        "created_at",
+    ]
+    assert TaskAdmin.column_default_sort[0].key == "id"
+    assert TaskAdmin.column_default_sort[1] is True
+    assert _column_keys(TaskAdmin.form_excluded_columns) == ["id"]
+    filters = TaskAdmin.column_filters
+    assert any(isinstance(item, BooleanFilter) for item in filters)
+    assert any(isinstance(item, AllUniqueStringValuesFilter) for item in filters)
+    assert sum(isinstance(item, ForeignKeyFilter) for item in filters) == 3
+
+
+def test_task_series_view_exposes_columns_search_sort_and_filters() -> None:
+    """Expose task-series columns, search, sorting, and filters."""
+    assert _column_keys(TaskSeriesAdmin.column_list) == [
+        "id",
+        "user_id",
+        "project_id",
+        "title",
+        "priority",
+        "frequency",
+        "interval_days",
+        "time_of_day",
+        "timezone",
+        "starts_on",
+        "ends_on",
+        "generated_through",
+        "reminders_enabled",
+        "deleted_at",
+        "created_at",
+    ]
+    assert _column_keys(TaskSeriesAdmin.column_searchable_list) == [
+        "id",
+        "user_id",
+        "title",
+        "timezone",
+    ]
+    assert _column_keys(TaskSeriesAdmin.column_sortable_list) == [
+        "id",
+        "priority",
+        "frequency",
+        "starts_on",
+        "ends_on",
+        "generated_through",
+        "created_at",
+    ]
+    assert TaskSeriesAdmin.column_default_sort[0].key == "id"
+    assert TaskSeriesAdmin.column_default_sort[1] is True
+    assert _column_keys(TaskSeriesAdmin.form_excluded_columns) == ["id"]
+    filters = TaskSeriesAdmin.column_filters
+    assert any(isinstance(item, BooleanFilter) for item in filters)
+    assert any(isinstance(item, AllUniqueStringValuesFilter) for item in filters)
+    assert sum(isinstance(item, ForeignKeyFilter) for item in filters) == 2
+
+
 async def test_palette_change_rejects_slug_change() -> None:
     """Reject changing the stable slug after creation."""
     view, _ = _palette_view(10)
@@ -259,20 +344,26 @@ def test_views_include_primary_keys_in_forms() -> None:
     assert UserAdmin.form_include_pk is True
     assert TelegramProfileAdmin.form_include_pk is True
     assert AuthSessionAdmin.form_include_pk is True
+    assert TaskAdmin.form_include_pk is True
+    assert TaskSeriesAdmin.form_include_pk is True
 
 
 def test_views_register_on_admin() -> None:
-    """Register all four views with stable identities."""
+    """Register all six views with stable identities."""
     admin = Admin(app=Starlette(), engine=None)
     admin.add_view(ColorPaletteAdmin)
     admin.add_view(UserAdmin)
     admin.add_view(TelegramProfileAdmin)
     admin.add_view(AuthSessionAdmin)
+    admin.add_view(TaskAdmin)
+    admin.add_view(TaskSeriesAdmin)
     assert [view.identity for view in admin.views] == [
         "color-palette",
         "user",
         "telegram-profile",
         "auth-session",
+        "task",
+        "task-series",
     ]
 
 
@@ -283,6 +374,8 @@ async def test_forms_include_foreign_keys_without_primary_keys() -> None:
     admin.add_view(UserAdmin)
     admin.add_view(TelegramProfileAdmin)
     admin.add_view(AuthSessionAdmin)
+    admin.add_view(TaskAdmin)
+    admin.add_view(TaskSeriesAdmin)
 
     palette_view = next(view for view in admin.views if view.identity == "color-palette")
     assert isinstance(palette_view, ModelView)
@@ -314,6 +407,23 @@ async def test_forms_include_foreign_keys_without_primary_keys() -> None:
     user_fields = user_form()._fields
     assert "id" not in user_fields
     assert "telegram_profile" not in user_fields
+
+    task_view = next(view for view in admin.views if view.identity == "task")
+    assert isinstance(task_view, ModelView)
+    task_form = await task_view.scaffold_form()
+    task_fields = task_form()._fields
+    assert "user_id" in task_fields
+    assert "project_id" in task_fields
+    assert "series_id" in task_fields
+    assert "id" not in task_fields
+
+    series_view = next(view for view in admin.views if view.identity == "task-series")
+    assert isinstance(series_view, ModelView)
+    series_form = await series_view.scaffold_form()
+    series_fields = series_form()._fields
+    assert "user_id" in series_fields
+    assert "project_id" in series_fields
+    assert "id" not in series_fields
 
 
 async def test_palette_delete_translates_reference_integrity_error(
