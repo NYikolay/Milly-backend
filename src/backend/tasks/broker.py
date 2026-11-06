@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from nats.js.api import ConsumerConfig, RetentionPolicy, StorageType, StreamConfig
-from taskiq import AsyncBroker, AsyncResultBackend, TaskiqScheduler
+from taskiq import AckableMessage, AsyncBroker, AsyncResultBackend, TaskiqScheduler
 from taskiq.schedule_sources import LabelScheduleSource
 from taskiq.serializers import JSONSerializer
 from taskiq_nats import PullBasedJetStreamBroker
@@ -11,6 +12,36 @@ from taskiq_redis import RedisAsyncResultBackend
 
 from backend.core.config import Settings, get_settings
 from backend.tasks.middleware import TaskLoggingMiddleware
+
+
+class ResilientPullBasedJetStreamBroker(PullBasedJetStreamBroker):
+    """Pull-based JetStream broker that survives fetch timeout races."""
+
+    async def listen(self) -> AsyncGenerator[AckableMessage]:
+        """
+        Yield messages while ignoring pull-fetch timeouts.
+
+        Purpose:
+            Keep the worker alive when nats-py raises a built-in
+            ``asyncio.TimeoutError`` from a pull fetch instead of the
+            ``nats.errors.TimeoutError`` that taskiq-nats catches.
+
+        Returns:
+            AsyncGenerator[AckableMessage, None]: Messages delivered by the
+                underlying pull subscription.
+
+        Notes:
+            - ``nats.errors.TimeoutError`` and ``asyncio.TimeoutError`` both
+              inherit from the built-in ``TimeoutError``.
+            - Cancellation is not a ``TimeoutError`` and still stops the
+              generator.
+        """
+        while True:
+            try:
+                async for message in super().listen():
+                    yield message
+            except TimeoutError:
+                continue
 
 
 def create_broker(settings: Settings) -> AsyncBroker:
@@ -29,6 +60,9 @@ def create_broker(settings: Settings) -> AsyncBroker:
 
     Notes:
         - Constructing the broker is lazy; connections are opened on startup.
+        - Pull-fetch timeout races are absorbed by
+          ``ResilientPullBasedJetStreamBroker`` so the worker listener keeps
+          running.
     """
     result_backend: AsyncResultBackend[Any] = RedisAsyncResultBackend(
         redis_url=settings.redis_url,
@@ -37,7 +71,7 @@ def create_broker(settings: Settings) -> AsyncBroker:
         serializer=JSONSerializer(),
     )
     task_broker: AsyncBroker = (
-        PullBasedJetStreamBroker(
+        ResilientPullBasedJetStreamBroker(
             servers=settings.nats_url,
             subject=settings.nats_subject,
             stream_name=settings.nats_stream,
