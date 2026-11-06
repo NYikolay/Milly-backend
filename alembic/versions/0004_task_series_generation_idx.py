@@ -1,6 +1,6 @@
 """task series generation index
 
-Revision ID: 0004_task_series_generation_index
+Revision ID: 0004_task_series_generation_idx
 Revises: 0003_task_management
 Create Date: 2026-11-04
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0004_task_series_generation_index"
+revision: str = "0004_task_series_generation_idx"
 down_revision: str | None = "0003_task_management"
 branch_labels: str | None = None
 depends_on: str | None = None

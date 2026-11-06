@@ -17,7 +17,7 @@
 - `regular` stores `frequency = 'daily'`, `interval_days = 1`.
 - `periodic` stores `frequency = 'periodic'`, `interval_days >= 2`.
 - `one_off` stores `tasks.series_id IS NULL`.
-- The new migration is `0005_periodic_task_series`; `0004_task_series_generation_index` already exists and must remain unchanged.
+- The new migration is `0005_periodic_task_series`; `0004_task_series_generation_idx` already exists and must remain unchanged.
 - `task_series.interval_days` is `SMALLINT NOT NULL DEFAULT 1`.
 - Check constraints: `frequency IN ('daily','periodic')`, `interval_days >= 1`, and `(daily AND interval_days = 1) OR (periodic AND interval_days >= 2)`.
 - All due times remain aware UTC instants; local date/time arithmetic uses `zoneinfo`.
@@ -219,7 +219,7 @@ git commit -m "feat: add phase-aware periodic scheduling"
 - Produces:
   - `TaskSeries.interval_days: Mapped[int]` (`SmallInteger`, non-null, server default `1`, Python default `1`).
   - ORM constraints `ck_task_series_frequency`, `ck_task_series_interval_days_positive`, `ck_task_series_frequency_interval`.
-  - Alembic revision `0005_periodic_task_series`, `down_revision = "0004_task_series_generation_index"`.
+  - Alembic revision `0005_periodic_task_series`, `down_revision = "0004_task_series_generation_idx"`.
 
 - [ ] **Step 1: Write the failing model and migration tests**
 
@@ -270,7 +270,7 @@ def _load_periodic_migration() -> ModuleType:
 def test_periodic_migration_chain() -> None:
     migration = _load_periodic_migration()
     assert migration.revision == "0005_periodic_task_series"
-    assert migration.down_revision == "0004_task_series_generation_index"
+    assert migration.down_revision == "0004_task_series_generation_idx"
 
 
 def test_periodic_migration_upgrade_and_downgrade_operations(monkeypatch) -> None:

@@ -246,9 +246,9 @@ CHECK (
 ### 4.3. Миграция
 
 **Отличие от исходного задания:** в репозитории уже существует ревизия
-`0004_task_series_generation_index`, поэтому новая миграция —
+`0004_task_series_generation_idx`, поэтому новая миграция —
 `alembic/versions/0005_periodic_task_series.py` с
-`down_revision = "0004_task_series_generation_index"`. Создавать вторую
+`down_revision = "0004_task_series_generation_idx"`. Создавать вторую
 ревизию с номером `0004` нельзя: это сломает цепочку Alembic.
 
 `upgrade()`:
@@ -689,7 +689,7 @@ recurrence: TaskRecurrence
 9. **Batch-метод `get_series_by_ids`** добавлен сверх исходного списка, чтобы
    список задач не делал N+1 запрос к сериям.
 10. **Миграция — `0005`**, потому что `0004` уже занята
-    (`0004_task_series_generation_index`).
+    (`0004_task_series_generation_idx`).
 11. **Detach не отменяет instance-напоминания у оставшихся просроченных
     экземпляров истории.** Это буквальное следование требованию: отменяются
     только шаблонные напоминания. Если продукт захочет полностью «заморозить»
@@ -698,7 +698,7 @@ recurrence: TaskRecurrence
 ### 9.1. Отличия от исходного задания
 
 - **Номер миграции:** `0005_periodic_task_series`, а не `0004`: ревизия
-  `0004_task_series_generation_index` уже существует.
+  `0004_task_series_generation_idx` уже существует.
 - **`get_series_by_ids`:** добавлен batch-метод, чтобы список задач не делал
   N+1 запрос при вычислении `recurrence`.
 - **Явный `recurrence=one_off` у задачи со soft-deleted серией:** очищает

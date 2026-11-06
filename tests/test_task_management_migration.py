@@ -28,7 +28,7 @@ def _load_migration() -> ModuleType:
 
 def _load_generation_index_migration() -> ModuleType:
     """Load the series generation index migration module from disk."""
-    path = Path("alembic/versions/0004_task_series_generation_index.py")
+    path = Path("alembic/versions/0004_task_series_generation_idx.py")
     spec = importlib.util.spec_from_file_location("migration_0004", path)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
@@ -52,7 +52,7 @@ def test_periodic_migration_chain() -> None:
     """Chain the periodic migration after the series generation index."""
     migration = _load_periodic_migration()
     assert migration.revision == "0005_periodic_task_series"
-    assert migration.down_revision == "0004_task_series_generation_index"
+    assert migration.down_revision == "0004_task_series_generation_idx"
 
 
 def test_periodic_migration_upgrade_and_downgrade_operations(
@@ -161,7 +161,7 @@ def test_periodic_migration_renders_exact_sql(monkeypatch: pytest.MonkeyPatch) -
 def test_generation_index_migration_chain_and_model_index() -> None:
     """Chain the index migration and mirror its predicate in the ORM metadata."""
     migration = _load_generation_index_migration()
-    assert migration.revision == "0004_task_series_generation_index"
+    assert migration.revision == "0004_task_series_generation_idx"
     assert migration.down_revision == "0003_task_management"
 
     table = Base.metadata.tables["task_series"]
@@ -170,6 +170,19 @@ def test_generation_index_migration_chain_and_model_index() -> None:
     )
     assert [column.name for column in index.columns] == ["generated_through"]
     assert index.dialect_options["postgresql"]["where"] is not None
+
+
+def test_migration_revision_ids_fit_alembic_version_column() -> None:
+    """Keep every revision identifier within Alembic's VARCHAR(32) version column."""
+    for path in sorted(Path("alembic/versions").glob("*.py")):
+        spec = importlib.util.spec_from_file_location(f"migration_{path.stem}", path)
+        assert spec is not None
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        assert len(module.revision) <= 32, f"{path.name}: {module.revision}"
+        if module.down_revision is not None:
+            assert len(module.down_revision) <= 32, f"{path.name}: {module.down_revision}"
 
 
 def test_migration_revision_chain() -> None:

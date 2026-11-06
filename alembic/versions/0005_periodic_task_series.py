@@ -1,7 +1,7 @@
 """periodic task series
 
 Revision ID: 0005_periodic_task_series
-Revises: 0004_task_series_generation_index
+Revises: 0004_task_series_generation_idx
 Create Date: 2026-11-04
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0005_periodic_task_series"
-down_revision: str | None = "0004_task_series_generation_index"
+down_revision: str | None = "0004_task_series_generation_idx"
 branch_labels: str | None = None
 depends_on: str | None = None
 
