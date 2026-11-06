@@ -1924,3 +1924,36 @@ async def test_today_progress_rejects_invalid_user_timezone() -> None:
         await service.today_progress(USER_ID)
 
     assert error.value.code is ErrorCode.BAD_REQUEST
+
+
+@pytest.mark.parametrize(
+    ("timezone_name", "clock", "due_at"),
+    [
+        (
+            "Europe/Berlin",
+            datetime(2026, 11, 5, 23, 30, tzinfo=UTC),
+            datetime(2026, 11, 5, 23, 30, tzinfo=UTC),
+        ),
+        (
+            "America/New_York",
+            datetime(2026, 11, 5, 3, 0, tzinfo=UTC),
+            datetime(2026, 11, 4, 23, 0, tzinfo=UTC),
+        ),
+    ],
+)
+async def test_today_progress_uses_local_date_near_utc_midnight(
+    timezone_name: str,
+    clock: datetime,
+    due_at: datetime,
+) -> None:
+    """The user's local date, not the UTC date, selects today's tasks."""
+    repository = FakeTaskManagementRepository()
+    repository.user_timezones[USER_ID] = timezone_name
+    repository.insert_task(make_task(task_id=1, due_at=due_at))
+    service = TaskService(
+        repository,
+        make_series_service(repository),
+        clock=lambda: clock,
+    )
+
+    assert await service.today_progress(USER_ID) == (1, 0)

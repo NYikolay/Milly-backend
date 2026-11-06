@@ -1335,7 +1335,7 @@ class TaskService:
                 exclusive end instant of the local day, expressed in UTC.
 
         Raises:
-            BadRequestError: If the next local midnight overflows the supported
+            BadRequestError: If either local midnight overflows the supported
                 calendar range.
 
         Notes:
