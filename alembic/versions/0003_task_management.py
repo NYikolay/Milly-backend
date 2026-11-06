@@ -60,7 +60,7 @@ def upgrade() -> None:
         sa.Column("id", sa.BigInteger(), sa.Identity(), nullable=False),
         sa.Column("slug", sa.String(length=32), nullable=False),
         sa.Column("name", sa.String(length=64), nullable=False),
-        sa.Column("hex", sa.CHAR(length=7), nullable=False),
+        sa.Column("hex", sa.String(length=7), nullable=False),
         sa.Column("sort_order", sa.SmallInteger(), nullable=False),
         sa.Column("is_active", sa.Boolean(), server_default=sa.true(), nullable=False),
         sa.Column(
@@ -95,7 +95,7 @@ def upgrade() -> None:
         "color_palette",
         sa.column("slug", sa.String),
         sa.column("name", sa.String),
-        sa.column("hex", sa.CHAR),
+        sa.column("hex", sa.String),
         sa.column("sort_order", sa.SmallInteger),
     )
     op.bulk_insert(palette_table, list(SEED_COLORS))

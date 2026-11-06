@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from sqlalchemy import (
-    CHAR,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -38,7 +37,7 @@ class ColorPalette(Base):
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     slug: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(64), nullable=False)
-    hex: Mapped[str] = mapped_column(CHAR(7), nullable=False)
+    hex: Mapped[str] = mapped_column(String(7), nullable=False)
     sort_order: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     is_active: Mapped[bool] = mapped_column(
         Boolean,

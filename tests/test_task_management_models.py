@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from sqlalchemy import (
-    CHAR,
     BigInteger,
     CheckConstraint,
     DateTime,
@@ -55,7 +54,7 @@ def test_task_management_primary_keys_use_identity() -> None:
 
 def test_color_palette_columns_and_indexes() -> None:
     table = Base.metadata.tables["color_palette"]
-    assert isinstance(table.c.hex.type, CHAR)
+    assert isinstance(table.c.hex.type, String)
     assert table.c.hex.type.length == 7
     assert table.c.slug.unique is True
     index_names = {index.name for index in table.indexes}

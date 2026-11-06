@@ -196,7 +196,7 @@ timezone VARCHAR(64) NOT NULL DEFAULT 'UTC'
 id                  BIGINT PK (identity)
 slug                VARCHAR(32) NOT NULL UNIQUE
 name                VARCHAR(64) NOT NULL
-hex                 CHAR(7) NOT NULL
+hex                 VARCHAR(7) NOT NULL
 sort_order          SMALLINT NOT NULL
 is_active           BOOLEAN NOT NULL DEFAULT true
 created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
