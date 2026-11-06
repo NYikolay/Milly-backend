@@ -129,6 +129,8 @@ class FakeTaskService:
         self.get_error: Exception | None = None
         self.update_error: Exception | None = None
         self.delete_error: Exception | None = None
+        self.today_progress_result: tuple[int, int] = (0, 0)
+        self.today_progress_calls: list[int] = []
 
     def add_detail(self, detail: TaskDetail) -> None:
         """Store a prepared task detail."""
@@ -220,6 +222,11 @@ class FakeTaskService:
             raise NotFoundError("Task not found")
         detail.task.completed_at = None
         return detail
+
+    async def today_progress(self, user_id: int) -> tuple[int, int]:
+        """Record the user and return prepared today progress counts."""
+        self.today_progress_calls.append(user_id)
+        return self.today_progress_result
 
     async def delete(self, user_id: int, task_id: int) -> None:
         """Record deletion or raise the configured error."""
@@ -522,6 +529,20 @@ async def test_task_list_equal_due_at_uses_id_tiebreaker(
     ids = [item["id"] for item in (await task_client.get("/api/v1/tasks")).json()["items"]]
 
     assert ids == [1, 2, 3]
+
+
+async def test_read_today_progress_returns_counts(
+    task_client: AsyncClient,
+    fake_task_service: FakeTaskService,
+) -> None:
+    """Return total, completed, and remaining tasks due today."""
+    fake_task_service.today_progress_result = (5, 2)
+
+    response = await task_client.get("/api/v1/tasks/today/progress")
+
+    assert response.status_code == 200
+    assert response.json() == {"total": 5, "completed": 2, "remaining": 3}
+    assert fake_task_service.today_progress_calls == [1]
 
 
 async def test_read_task_returns_detail(

@@ -22,6 +22,7 @@ from backend.api.task_schemas import (
     TaskListResponse,
     TaskResponse,
     TaskUpdate,
+    TodayProgressResponse,
 )
 from backend.core.errors import BadRequestError, ErrorCode
 from backend.task_management.enums import Priority
@@ -233,6 +234,48 @@ async def list_tasks(
     return TaskListResponse(
         items=[_task_response(detail) for detail in page.items],
         next_cursor=next_cursor,
+    )
+
+
+@router.get(
+    "/today/progress",
+    response_model=TodayProgressResponse,
+    responses=document_errors(_ERRORS),
+)
+async def read_today_progress(
+    claims: CurrentAccessDep,
+    service: TaskServiceDep,
+) -> TodayProgressResponse:
+    """
+    Return the authenticated user's task progress for today.
+
+    Purpose:
+        Summarize how many tasks are due in the user's local day and how many
+        of them are already completed.
+
+    Args:
+        claims: Verified access-token claims.
+        service: Task service resolving today's counts.
+
+    Returns:
+        TodayProgressResponse: Total, completed, and remaining tasks due today.
+
+    Raises:
+        UnauthorizedError (HTTP 401): If the bearer token is missing or
+            invalid.
+        BadRequestError (HTTP 400): If the stored user timezone is invalid.
+
+    Notes:
+        - "Today" is the user's local calendar day ``[00:00, next 00:00)``
+          converted to UTC; an unset timezone defaults to UTC.
+        - ``remaining`` is computed as ``total - completed``.
+        - Performs no writes and does not commit.
+    """
+    total, completed = await service.today_progress(claims.user_id)
+    return TodayProgressResponse(
+        total=total,
+        completed=completed,
+        remaining=total - completed,
     )
 
 

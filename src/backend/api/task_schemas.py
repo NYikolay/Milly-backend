@@ -626,6 +626,14 @@ class TaskListResponse(BaseModel):
     next_cursor: str | None = None
 
 
+class TodayProgressResponse(BaseModel):
+    """Task counts for the user's local day."""
+
+    total: int
+    completed: int
+    remaining: int
+
+
 class TaskFiltersQuery(BaseModel):
     """Query parameters accepted by the task list endpoint."""
 
