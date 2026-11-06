@@ -5,6 +5,9 @@ Production-скелет backend-сервиса Milly: FastAPI, асинхрон�
 фоновых задач, Redis как result backend и structlog для логирования.
 Приложение и инфраструктура запускаются через Docker Compose.
 
+Подробное руководство по API для frontend-агента — в `docs/api.md`;
+машиночитаемая схема — `GET /openapi.json` при включённых docs.
+
 ## Структура
 
 ```text
@@ -306,6 +309,7 @@ PATCH /api/v1/auth/me/timezone
 | Метод | Путь | Назначение |
 | --- | --- | --- |
 | `GET` | `/api/v1/tasks` | список задач с фильтрами |
+| `GET` | `/api/v1/tasks/today/progress` | количество задач на сегодня и выполненных |
 | `POST` | `/api/v1/tasks` | создать разовую задачу (`201`) |
 | `GET` | `/api/v1/tasks/{task_id}` | одна задача |
 | `PATCH` | `/api/v1/tasks/{task_id}` | частично обновить |
@@ -450,8 +454,8 @@ SQLAdmin доступна по `/admin` и включается, когда од
 - Cookie подписывается `AUTH_JWT_SECRET`; смена `ADMIN_PASSWORD`
   инвалидирует старые сессии.
 - Доступны CRUD, поиск, сортировка и базовые фильтры для `ColorPalette`,
-  `User`, `TelegramProfile` и `AuthSession`. `refresh_token_hash` не
-  показывается в списке и деталях.
+  `User`, `TelegramProfile`, `AuthSession`, `Task` и `TaskSeries`.
+  `refresh_token_hash` не показывается в списке и деталях.
 - Вьюха `ColorPalette` не даёт менять `slug`, оставить ноль активных цветов
   или удалить цвет, на который ссылаются проект или метка; последний случай
   перехватывает `IntegrityError` и показывается как конфликт. Эти правила
@@ -533,7 +537,10 @@ taskiq scheduler backend.tasks.worker:scheduler backend.tasks.generation backend
 пределах окна worker'а. Worker ждёт завершения задач 300 с
 (`--wait-tasks-timeout`), а `stop_grace_period` контейнера — 330 с. DLQ нет:
 после `NATS_MAX_DELIVER` (5) сообщение остаётся в stream до истечения
-`NATS_STREAM_MAX_AGE` (7 дней).
+`NATS_STREAM_MAX_AGE` (7 дней). Слушатель использует
+`ResilientPullBasedJetStreamBroker`: таймаут `fetch()` в `nats-py` (включая
+встроенный `asyncio.TimeoutError`) не роняет процесс воркера, а повторяет
+опрос.
 
 ## Тесты и проверки
 
