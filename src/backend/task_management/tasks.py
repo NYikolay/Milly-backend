@@ -154,16 +154,7 @@ class TaskService:
         date_end: datetime | None = None
         if filters.date is not None:
             zone = await self._user_timezone(user_id)
-            try:
-                date_start = localize_wall_time(filters.date, time(0, 0), zone)
-                next_local_date = filters.date + timedelta(days=1)
-                date_end = localize_wall_time(
-                    next_local_date,
-                    time(0, 0),
-                    zone,
-                )
-            except OverflowError as error:
-                raise BadRequestError(_INVALID_DATE_RANGE) from error
+            date_start, date_end = self._local_day_bounds(zone, filters.date)
         tasks = await self._repository.list_tasks(
             user_id,
             date_start=date_start,
@@ -189,6 +180,36 @@ class TaskService:
             items=await self._details(user_id, page_tasks),
             next_cursor=next_cursor,
         )
+
+    async def today_progress(self, user_id: int) -> tuple[int, int]:
+        """
+        Count the user's tasks due today and how many are completed.
+
+        Purpose:
+            Build the dashboard "today" progress summary from the user's local
+            calendar day.
+
+        Args:
+            user_id: Owner identifier.
+
+        Returns:
+            tuple[int, int]: Total non-deleted tasks due within the user's local
+                day and the subset with a completion timestamp.
+
+        Raises:
+            BadRequestError: If the stored user timezone is invalid or the day
+                bounds overflow the supported calendar range.
+
+        Notes:
+            - The current instant comes from the service clock and is converted
+              to the user's timezone to derive the local date.
+            - Local day bounds are converted to UTC before the repository query.
+            - Performs no writes and does not commit.
+        """
+        zone = await self._user_timezone(user_id)
+        local_date = self._clock().astimezone(zone).date()
+        start, end = self._local_day_bounds(zone, local_date)
+        return await self._repository.today_progress(user_id, start, end)
 
     async def get(self, user_id: int, task_id: int) -> TaskDetail:
         """
@@ -1292,6 +1313,42 @@ class TaskService:
             return ZoneInfo(name or "UTC")
         except (ZoneInfoNotFoundError, ValueError) as error:
             raise BadRequestError(_INVALID_TIMEZONE) from error
+
+    def _local_day_bounds(
+        self,
+        zone: ZoneInfo,
+        local_date: date,
+    ) -> tuple[datetime, datetime]:
+        """
+        Convert a local calendar date into UTC day bounds.
+
+        Purpose:
+            Share the user's local-day window between task listing and the
+            "today" progress summary.
+
+        Args:
+            zone: User's timezone used to localize midnight.
+            local_date: Local calendar date.
+
+        Returns:
+            tuple[datetime, datetime]: The inclusive start instant and the
+                exclusive end instant of the local day, expressed in UTC.
+
+        Raises:
+            BadRequestError: If the next local midnight overflows the supported
+                calendar range.
+
+        Notes:
+            - Both bounds resolve local midnight in ``zone``, so daylight-saving
+              transitions keep a 23- or 25-hour local day.
+            - Performs no writes and does not commit.
+        """
+        try:
+            start = localize_wall_time(local_date, time(0, 0), zone)
+            end = localize_wall_time(local_date + timedelta(days=1), time(0, 0), zone)
+        except OverflowError as error:
+            raise BadRequestError(_INVALID_DATE_RANGE) from error
+        return start, end
 
     def _normalize_title(self, title: str) -> str:
         """

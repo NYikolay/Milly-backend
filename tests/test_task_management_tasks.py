@@ -1868,3 +1868,59 @@ async def test_list_empty_page_issues_no_batch_queries() -> None:
     assert page.items == []
     assert repository.batch_calls == []
     assert repository.series_batch_calls == []
+
+
+async def test_today_progress_uses_local_day_bounds_and_completed_state() -> None:
+    """Today progress uses the user's local day and completion timestamps."""
+    repository = FakeTaskManagementRepository()
+    repository.user_timezones[USER_ID] = "Europe/Berlin"
+    repository.insert_task(
+        make_task(
+            task_id=1,
+            due_at=datetime(2026, 11, 3, 23, 0, tzinfo=UTC),
+            completed_at=datetime(2026, 11, 3, 12, 0, tzinfo=UTC),
+        )
+    )
+    repository.insert_task(make_task(task_id=2, due_at=datetime(2026, 11, 4, 22, 59, tzinfo=UTC)))
+    repository.insert_task(make_task(task_id=3, due_at=datetime(2026, 11, 4, 23, 0, tzinfo=UTC)))
+    repository.insert_task(
+        make_task(
+            task_id=4,
+            due_at=datetime(2026, 11, 4, 12, 0, tzinfo=UTC),
+            deleted_at=datetime(2026, 11, 4, 13, 0, tzinfo=UTC),
+        )
+    )
+    service = make_service(repository)
+
+    result = await service.today_progress(USER_ID)
+
+    assert result == (2, 1)
+
+
+async def test_today_progress_defaults_to_utc_when_timezone_unset() -> None:
+    """An unset user timezone falls back to UTC day bounds."""
+    repository = FakeTaskManagementRepository()
+    repository.insert_task(
+        make_task(
+            task_id=1,
+            due_at=datetime(2026, 11, 4, 0, 0, tzinfo=UTC),
+            completed_at=datetime(2026, 11, 4, 8, 0, tzinfo=UTC),
+        )
+    )
+    repository.insert_task(make_task(task_id=2, due_at=datetime(2026, 11, 4, 23, 59, tzinfo=UTC)))
+    repository.insert_task(make_task(task_id=3, due_at=datetime(2026, 11, 5, 0, 0, tzinfo=UTC)))
+    service = make_service(repository)
+
+    assert await service.today_progress(USER_ID) == (2, 1)
+
+
+async def test_today_progress_rejects_invalid_user_timezone() -> None:
+    """An invalid stored timezone is a bad request."""
+    repository = FakeTaskManagementRepository()
+    repository.user_timezones[USER_ID] = "Invalid/Zone"
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError) as error:
+        await service.today_progress(USER_ID)
+
+    assert error.value.code is ErrorCode.BAD_REQUEST
