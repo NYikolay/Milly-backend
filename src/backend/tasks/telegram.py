@@ -122,9 +122,16 @@ def _post_message(token: str, chat_id: int, text: str) -> dict[str, Any]:
         RuntimeError: If the request fails or the response is not a JSON object.
 
     Notes:
+        - The message is always sent with Telegram ``HTML`` parse mode.
         - The raised error intentionally omits the token, text, and HTTP details.
     """
-    payload = urlencode({"chat_id": str(chat_id), "text": text}).encode("utf-8")
+    payload = urlencode(
+        {
+            "chat_id": str(chat_id),
+            "text": text,
+            "parse_mode": "HTML",
+        }
+    ).encode("utf-8")
     request = Request(
         _API_URL.format(token=token),
         data=payload,

@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from html import escape
+from math import ceil
 from time import monotonic as _monotonic_clock
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -12,7 +14,7 @@ import structlog
 from backend.core.errors import BadRequestError
 from backend.models.reminder_delivery import ReminderDelivery
 from backend.models.task_reminder import TaskReminder
-from backend.task_management.enums import DeliveryStatus, ReminderKind
+from backend.task_management.enums import DeliveryStatus, Priority, ReminderKind
 from backend.task_management.ports import TaskManagementRepository
 from backend.task_management.schedule import (
     before_due_time,
@@ -26,7 +28,27 @@ _DUPLICATE_REMINDER = "Duplicate reminder kind"
 _MAX_ATTEMPTS = 5
 _LOCK_LEASE = timedelta(minutes=5)
 _BACKOFF_BASE = timedelta(seconds=60)
-_SENDER_TEXT = "Напоминание: {title}"
+_MESSAGE_HEADER = "⏰ Напоминание о задаче"
+_DESCRIPTION_LIMIT = 200
+_MONTHS = (
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+)
+_PRIORITY_LINES = {
+    Priority.URGENT_IMPORTANT.value: "🔴 Срочные и важные",
+    Priority.IMPORTANT_NOT_URGENT.value: "🟡 Важные, но не срочные",
+    Priority.URGENT_NOT_IMPORTANT.value: "🟠 Срочные, но не важные",
+}
 _MISSING_TELEGRAM = "Telegram profile is missing"
 _DISPATCH_BATCH_SIZE = 100
 _DISPATCH_TIMEOUT_SECONDS = 240.0
@@ -46,7 +68,7 @@ class ReminderSender(Protocol):
 
         Args:
             chat_id: Telegram chat identifier from the user's profile.
-            text: Message text.
+            text: Telegram HTML message text.
 
         Returns:
             int | None: Telegram message identifier when available.
@@ -55,6 +77,218 @@ class ReminderSender(Protocol):
             Exception: Implementation-specific delivery failures.
         """
         ...
+
+
+@dataclass(frozen=True)
+class ReminderContent:
+    """Resolved task or series data used to render a reminder message."""
+
+    title: str
+    description: str | None
+    priority: str
+    due_at: datetime | None
+    project_name: str | None
+
+
+def build_reminder_text(
+    content: ReminderContent,
+    *,
+    kind: ReminderKind,
+    offset_minutes: int | None,
+    now: datetime,
+    timezone_name: str | None,
+) -> str:
+    """
+    Render the Telegram HTML message for a due reminder.
+
+    Purpose:
+        Turn resolved task data into one readable card with an optional
+        description, due information, priority, and project.
+
+    Args:
+        content: Resolved owner data for the reminder.
+        kind: Reminder rule kind that produced the delivery.
+        offset_minutes: Configured before-due offset when ``kind`` is
+            ``ReminderKind.BEFORE_DUE``.
+        now: Current instant used for relative day labels and countdowns.
+        timezone_name: IANA timezone used to render the due instant. Falls back
+            to UTC when empty.
+
+    Returns:
+        str: Telegram HTML message text with user data escaped.
+
+    Notes:
+        - Missing optional fields are omitted instead of leaving blank lines.
+        - Long descriptions are truncated to the display limit with an ellipsis.
+        - The countdown uses the actual time left when the due instant is known.
+    """
+    title_block = f"📝 <b>{escape(content.title, quote=False)}</b>"
+    if content.description:
+        title_block += f"\n{_format_description(content.description)}"
+
+    meta: list[str] = []
+    countdown = _countdown_minutes(content.due_at, now=now, offset_minutes=offset_minutes)
+    if kind is ReminderKind.BEFORE_DUE:
+        meta.append(
+            "⏳ Дедлайн наступил"
+            if countdown == 0
+            else f"⏳ До дедлайна {_format_duration(countdown)}"
+        )
+    elif content.due_at is not None:
+        meta.append(f"📅 {_format_due(content.due_at, now=now, timezone_name=timezone_name)}")
+    priority_line = _PRIORITY_LINES.get(content.priority)
+    if priority_line is not None:
+        meta.append(priority_line)
+    if content.project_name is not None:
+        meta.append(f"📁 {escape(content.project_name, quote=False)}")
+
+    if not meta:
+        return f"{_MESSAGE_HEADER}\n\n{title_block}"
+    return f"{_MESSAGE_HEADER}\n\n{title_block}\n\n" + "\n".join(meta)
+
+
+def _format_description(description: str) -> str:
+    """
+    Escape and truncate a task description for the reminder message.
+
+    Purpose:
+        Keep the card compact and safe for Telegram HTML parsing.
+
+    Args:
+        description: Raw task or series description.
+
+    Returns:
+        str: Escaped description of at most ``_DESCRIPTION_LIMIT`` characters
+            plus a trailing ellipsis when truncated.
+
+    Notes:
+        - The ellipsis is added after truncating the raw text, so escaped HTML
+          entities never split in half.
+    """
+    text = description
+    if len(text) > _DESCRIPTION_LIMIT:
+        text = text[:_DESCRIPTION_LIMIT].rstrip() + "…"
+    return escape(text, quote=False)
+
+
+def _countdown_minutes(
+    due_at: datetime | None,
+    *,
+    now: datetime,
+    offset_minutes: int | None,
+) -> int:
+    """
+    Return whole minutes left until the due instant.
+
+    Purpose:
+        Render an accurate before-due countdown even when delivery runs late.
+
+    Args:
+        due_at: Task due instant when known.
+        now: Current instant used as the reference point.
+        offset_minutes: Configured offset used when no due instant is known.
+
+    Returns:
+        int: Remaining whole minutes, rounded up, never below zero.
+
+    Notes:
+        - A configured offset is the fallback for series reminders without a
+          due instant.
+    """
+    if due_at is not None:
+        return max(0, ceil((due_at - now).total_seconds() / 60))
+    return max(0, offset_minutes or 0)
+
+
+def _format_duration(total_minutes: int) -> str:
+    """
+    Format a minute count as Russian days, hours, and minutes.
+
+    Purpose:
+        Keep the countdown natural for values from one minute to many days.
+
+    Args:
+        total_minutes: Positive number of minutes.
+
+    Returns:
+        str: Human-readable duration such as ``1 день 2 часа``.
+
+    Notes:
+        - Zero parts are omitted; only nonzero units are shown.
+    """
+    days, remainder = divmod(total_minutes, 1440)
+    hours, minutes = divmod(remainder, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(_plural(days, "день", "дня", "дней"))
+    if hours:
+        parts.append(_plural(hours, "час", "часа", "часов"))
+    if minutes:
+        parts.append(_plural(minutes, "минута", "минуты", "минут"))
+    return " ".join(parts)
+
+
+def _plural(value: int, one: str, few: str, many: str) -> str:
+    """
+    Attach the correct Russian plural form to a number.
+
+    Purpose:
+        Render durations without awkward forms like ``2 день``.
+
+    Args:
+        value: Nonzero quantity.
+        one: Form for 1, 21, 31, and similar.
+        few: Form for 2-4, 22-24, and similar.
+        many: Form for 0, 5-20, and similar.
+
+    Returns:
+        str: Quantity followed by the selected form.
+    """
+    if 11 <= value % 100 <= 14:
+        form = many
+    elif value % 10 == 1:
+        form = one
+    elif 2 <= value % 10 <= 4:
+        form = few
+    else:
+        form = many
+    return f"{value} {form}"
+
+
+def _format_due(due_at: datetime, *, now: datetime, timezone_name: str | None) -> str:
+    """
+    Format a due instant as a relative Russian date and time.
+
+    Purpose:
+        Show ``Сегодня``/``Завтра`` when useful and a day with month otherwise.
+
+    Args:
+        due_at: Timezone-aware due instant.
+        now: Current instant used for relative day labels.
+        timezone_name: IANA timezone for rendering. Falls back to UTC when
+            empty.
+
+    Returns:
+        str: Rendered date such as ``Завтра в 18:00``.
+
+    Notes:
+        - The year is appended only when it differs from the current year.
+    """
+    tzinfo = ZoneInfo(timezone_name) if timezone_name else UTC
+    local_due = due_at.astimezone(tzinfo)
+    local_now = now.astimezone(tzinfo)
+    days_ahead = (local_due.date() - local_now.date()).days
+    if days_ahead == 0:
+        label = "Сегодня"
+    elif days_ahead == 1:
+        label = "Завтра"
+    elif days_ahead == -1:
+        label = "Вчера"
+    else:
+        label = f"{local_due.day} {_MONTHS[local_due.month - 1]}"
+        if local_due.year != local_now.year:
+            label = f"{label} {local_due.year}"
+    return f"{label} в {local_due:%H:%M}"
 
 
 @dataclass(frozen=True)
@@ -411,6 +645,7 @@ class ReminderDispatcher:
               run once ``_DISPATCH_TIMEOUT_SECONDS`` has elapsed.
             - Already sent ``(reminder_id, scheduled_for)`` keys are skipped.
             - Cancelled deliveries for a current slot are reactivated.
+            - Messages are rendered as HTML cards with escaped user data.
             - Each claimed reminder is rechecked for an active master toggle,
               non-deleted owner, and active project before sending.
             - A missing Telegram profile fails the delivery without sending.
@@ -454,8 +689,8 @@ class ReminderDispatcher:
                     await self._repository.commit()
                     continue
 
-                title = await self._dispatchable_title(reminder)
-                if title is None:
+                content = await self._dispatchable_content(reminder)
+                if content is None:
                     if delivery is None:
                         delivery = await self._repository.add_delivery(
                             _new_delivery(
@@ -522,7 +757,13 @@ class ReminderDispatcher:
                 try:
                     message_id = await self._sender.send(
                         chat_id,
-                        _SENDER_TEXT.format(title=title),
+                        build_reminder_text(
+                            content,
+                            kind=ReminderKind(reminder.kind),
+                            offset_minutes=reminder.offset_minutes,
+                            now=now,
+                            timezone_name=reminder.timezone,
+                        ),
                     )
                 except Exception as error:
                     await self._record_failure(
@@ -549,21 +790,27 @@ class ReminderDispatcher:
                 )
         return sent
 
-    async def _dispatchable_title(self, reminder: TaskReminder) -> str | None:
+    async def _dispatchable_content(self, reminder: TaskReminder) -> ReminderContent | None:
         """
-        Resolve the owner title when a claimed reminder may still be delivered.
+        Resolve the owner data when a claimed reminder may still be delivered.
 
         Purpose:
             Recheck the task or series, the parent series toggle, and the
             project after the row lock so a concurrent completion, toggle,
-            archive, or deletion cannot send a stale reminder.
+            archive, or deletion cannot send a stale reminder, then collect the
+            fields used to render the message.
 
         Args:
             reminder: Reminder claimed for delivery.
 
         Returns:
-            str | None: The owner title, or ``None`` when delivery must be
-                cancelled.
+            ReminderContent | None: Resolved owner data, or ``None`` when
+                delivery must be cancelled.
+
+        Notes:
+            - The project name is loaded only after the active check passes.
+            - Series content carries no due instant because template reminders
+              have no schedule of their own.
         """
         if reminder.task_id is not None:
             task = await self._repository.get_task(reminder.user_id, reminder.task_id)
@@ -581,7 +828,13 @@ class ReminderDispatcher:
                 )
                 if series is None or not series.reminders_enabled:
                     return None
-            return task.title
+            return ReminderContent(
+                title=task.title,
+                description=task.description,
+                priority=task.priority,
+                due_at=task.due_at,
+                project_name=await self._project_name(reminder.user_id, task.project_id),
+            )
         if reminder.series_id is not None:
             series = await self._repository.get_series(reminder.user_id, reminder.series_id)
             if series is None or not series.reminders_enabled:
@@ -591,8 +844,38 @@ class ReminderDispatcher:
                 series.project_id,
             ):
                 return None
-            return series.title
+            return ReminderContent(
+                title=series.title,
+                description=series.description,
+                priority=series.priority,
+                due_at=None,
+                project_name=await self._project_name(reminder.user_id, series.project_id),
+            )
         return None
+
+    async def _project_name(self, user_id: int, project_id: int | None) -> str | None:
+        """
+        Load the project name used in a reminder message.
+
+        Purpose:
+            Show the project in the reminder card without failing delivery when
+            the project disappeared between the active check and this read.
+
+        Args:
+            user_id: Owner identifier.
+            project_id: Project reference from the task or series, when set.
+
+        Returns:
+            str | None: The project name, or ``None`` for reminders without a
+                project or with a missing row.
+
+        Notes:
+            - Performs no writes and does not commit.
+        """
+        if project_id is None:
+            return None
+        project = await self._repository.get_project(user_id, project_id)
+        return project.name if project is not None else None
 
     async def _record_failure(
         self,

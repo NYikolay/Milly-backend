@@ -121,7 +121,11 @@ async def test_telegram_sender_posts_and_returns_message_id(
     assert captured["url"] == "https://api.telegram.org/bot123:secret/sendMessage"
     assert captured["timeout"] is not None
     data = cast(bytes, captured["data"]).decode("utf-8")
-    assert parse_qs(data) == {"chat_id": ["7"], "text": ["Reminder text"]}
+    assert parse_qs(data) == {
+        "chat_id": ["7"],
+        "text": ["Reminder text"],
+        "parse_mode": ["HTML"],
+    }
 
 
 async def test_telegram_sender_failure_message_is_safe(

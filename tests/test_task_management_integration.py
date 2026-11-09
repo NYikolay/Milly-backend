@@ -26,7 +26,15 @@ TELEGRAM_ID = 7007
 SECOND_REMINDER_AT = datetime(2026, 11, 6, 8, 30, tzinfo=UTC)
 THIRD_REMINDER_AT = datetime(2026, 11, 7, 8, 30, tzinfo=UTC)
 POST_HORIZON_NOW = fixed_now() + timedelta(days=HORIZON_DAYS + 1)
-REMINDER_TEXT = "Напоминание: Daily review"
+REMINDER_TEXT = (
+    "⏰ Напоминание о задаче\n"
+    "\n"
+    "📝 <b>Daily review</b>\n"
+    "Review the day\n"
+    "\n"
+    "⏳ До дедлайна 30 минут\n"
+    "📁 Work"
+)
 
 
 def make_services(
