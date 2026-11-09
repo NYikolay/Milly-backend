@@ -2139,6 +2139,48 @@ class SqlAlchemyTaskManagementRepository:
         )
         return result.scalars().all()
 
+    async def series_due_slot_exists(
+        self,
+        series_id: int,
+        user_id: int,
+        due_at: datetime,
+        *,
+        exclude_task_id: int | None = None,
+    ) -> bool:
+        """
+        Check whether a series already owns a non-deleted task at a due instant.
+
+        Purpose:
+            Preserve the historical series link on completed-instance edits while
+            avoiding a unique ``(series_id, due_at)`` slot collision.
+
+        Args:
+            series_id: Series identifier.
+            user_id: Owner identifier.
+            due_at: Candidate timezone-aware due instant.
+            exclude_task_id: Task to ignore during the comparison, usually the
+                task being edited.
+
+        Returns:
+            bool: ``True`` when another non-deleted task of the series occupies
+                the slot.
+
+        Notes:
+            - Includes completed tasks because the partial unique index covers
+              every non-deleted row.
+            - Performs no writes and does not commit.
+        """
+        statement = select(Task.id).where(
+            Task.series_id == series_id,
+            Task.user_id == user_id,
+            Task.deleted_at.is_(None),
+            Task.due_at == due_at,
+        )
+        if exclude_task_id is not None:
+            statement = statement.where(Task.id != exclude_task_id)
+        result = await self._session.execute(statement.limit(1))
+        return result.scalar_one_or_none() is not None
+
     async def list_future_series_tasks(
         self,
         series_id: int,

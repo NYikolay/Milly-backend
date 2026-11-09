@@ -954,6 +954,24 @@ class FakeTaskManagementRepository:
             key=lambda task: (task.due_at, task.id),
         )
 
+    async def series_due_slot_exists(
+        self,
+        series_id: int,
+        user_id: int,
+        due_at: datetime,
+        *,
+        exclude_task_id: int | None = None,
+    ) -> bool:
+        """Return whether another non-deleted task occupies a series due slot."""
+        return any(
+            task.series_id == series_id
+            and task.user_id == user_id
+            and task.deleted_at is None
+            and task.due_at == due_at
+            and task.id != exclude_task_id
+            for task in self.tasks.values()
+        )
+
     async def list_future_series_tasks(
         self,
         series_id: int,

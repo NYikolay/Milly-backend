@@ -376,10 +376,12 @@ class TaskService:
         Notes:
             - Other fields from the same update are applied before a conversion
               takes its series snapshot.
-            - Converting to a series, or changing ``due_at`` on a task whose
-              series is soft-deleted, clears the stale series reference before
-              the edit to avoid the unique-slot conflict; a field-only edit
-              keeps the historical link.
+            - Converting to a series, or changing ``due_at`` on an incomplete
+              task whose series is soft-deleted, clears the stale series
+              reference before the edit to avoid the unique-slot conflict.
+              A completed task keeps its historical link when the new slot is
+              free; a slot collision clears it. A field-only edit keeps the
+              historical link.
             - Disabling recurrence detaches first, physically removes future
               incomplete siblings, then shifts the current overdue instance by
               the captured series phase.
@@ -528,11 +530,16 @@ class TaskService:
 
         Notes:
             - Other fields are applied before the series snapshot is taken.
-            - A changed due time clears a stale soft-deleted series reference
-              before the edit, regardless of whether ``recurrence`` was
-              supplied, so the update cannot collide with the unique
-              ``(series_id, due_at)`` slot of a historical sibling. A
-              field-only edit keeps the historical link.
+            - A changed due time on an incomplete task clears a stale
+              soft-deleted series reference before the edit, so the update
+              cannot collide with the unique ``(series_id, due_at)`` slot of a
+              historical sibling.
+            - A completed task of a soft-deleted series keeps its historical
+              ``series_id`` on a due-time change without explicit
+              ``recurrence`` when no other non-deleted task of the series
+              occupies the new slot; a slot collision clears the reference.
+            - An explicit ``recurrence`` clears the stale reference as before,
+              and a field-only edit keeps the historical link.
             - Regular conversion accepts only ``None`` or ``1`` and stores
               ``interval_days=1``; periodic conversion requires ``interval_days
               >= 2``.
@@ -543,7 +550,21 @@ class TaskService:
         if recurrence is None and interval_days is not None:
             raise BadRequestError(_INVALID_RECURRENCE_INTERVAL)
 
-        if task.series_id is not None and due_at is not None and due_at != task.due_at:
+        if (
+            recurrence is None
+            and task.series_id is not None
+            and due_at is not None
+            and due_at != task.due_at
+            and (
+                task.completed_at is None
+                or await self._repository.series_due_slot_exists(
+                    task.series_id,
+                    user_id,
+                    due_at,
+                    exclude_task_id=task.id,
+                )
+            )
+        ):
             task.series_id = None
 
         if recurrence is TaskRecurrence.ONE_OFF and task.series_id is not None:
@@ -741,12 +762,14 @@ class TaskService:
 
     async def uncomplete(self, user_id: int, task_id: int) -> TaskDetail:
         """
-        Reopen a task and rebuild its reminders from the current time.
+        Reopen a task, rebuild its reminders, and restore a deleted series.
 
         Purpose:
             Restore delivery after accidental or reversed completion without
             backfilling missed slots, while rejecting a completed task whose
             local due date has already passed and that has no active series.
+            A completed task of a soft-deleted series gets a new active series
+            with the same schedule.
 
         Args:
             user_id: Owner identifier.
@@ -756,8 +779,9 @@ class TaskService:
             TaskDetail: The reopened task detail.
 
         Raises:
-            BadRequestError: If the task was completed, has no active series,
-                and its due date is before the current local date.
+            BadRequestError: If the task was completed, has no active series
+                (one-off or soft-deleted), and its due date is before the
+                current local date.
             NotFoundError: If the task does not exist for this user or its
                 referenced series does not exist.
 
@@ -769,16 +793,27 @@ class TaskService:
             - Active-series instances bypass the date guard because their date
               cannot be edited independently; one-off tasks and tasks of a
               soft-deleted series must have their date changed first.
+            - A completed task of a soft-deleted series is reattached through
+              ``SeriesService.create_from_task`` to a new series that copies
+              the old ``frequency`` and ``interval_days``; the new series has
+              ``ends_on`` set to ``None``, does not duplicate the current due
+              slot, and generates future instances by the normal series rules.
+              The old soft-deleted series row remains deleted as history.
             - A before-due moment already in the past stays disabled.
-            - A task that is already active skips the date guard.
+            - A task that was not completed skips the date guard and series
+              recreation.
             - For a series task the series row is locked before the task row;
               one-off tasks lock only the task row.
             - Does not commit.
         """
-        task, series = await self._lock_update_target(user_id, task_id)
+        task, series = await self._lock_update_target(
+            user_id,
+            task_id,
+            include_deleted_series=True,
+        )
         now = self._clock()
         was_completed = task.completed_at is not None
-        if was_completed and series is None:
+        if was_completed and (series is None or series.deleted_at is not None):
             zone = await self._user_timezone(user_id)
             if task.due_at.astimezone(zone).date() < now.astimezone(zone).date():
                 raise BadRequestError(
@@ -790,6 +825,13 @@ class TaskService:
             await self._repository.update_reminder_next_run_at(
                 reminder,
                 rebuild_reminder_slot(reminder, due_at=task.due_at, now=now),
+            )
+        if was_completed and series is not None and series.deleted_at is not None:
+            await self._series_service.create_from_task(
+                user_id,
+                task,
+                frequency=SeriesFrequency(series.frequency),
+                interval_days=series.interval_days,
             )
         await self._repository.flush()
         return await self._detail(user_id, task)
@@ -843,23 +885,28 @@ class TaskService:
         self,
         user_id: int,
         task_id: int,
+        *,
+        include_deleted_series: bool = False,
     ) -> tuple[Task, TaskSeries | None]:
         """
         Lock the update targets in the canonical series-before-task order.
 
         Purpose:
             Avoid a deadlock between series-wide updates that lock the series
-            row before its instances and instance edits or deletes that would
-            otherwise lock the task row first.
+            row before its instances and instance edits, deletes, or reopenings
+            that would otherwise lock the task row first.
 
         Args:
             user_id: Owner identifier.
             task_id: Task identifier.
+            include_deleted_series: When ``True``, return a soft-deleted series
+                instead of collapsing it to ``None``, so the caller can recreate
+                its schedule. Defaults to ``False``.
 
         Returns:
             tuple[Task, TaskSeries | None]: The locked task and its locked
-                active series, or ``None`` when the task is one-off or its
-                series is soft-deleted.
+                series, or ``None`` when the task is one-off or its soft-deleted
+                series is omitted by ``include_deleted_series``.
 
         Raises:
             NotFoundError: If the task or a referenced series does not exist
@@ -868,8 +915,9 @@ class TaskService:
         Notes:
             - Reads the task without a lock to discover its series, locks the
               series row even when soft-deleted, then locks the task row.
-            - A soft-deleted series is returned as ``None`` so callers treat the
-              task as one-off while its history keeps the series reference.
+            - By default a soft-deleted series is returned as ``None`` so
+              callers treat the task as one-off while its history keeps the
+              series reference.
             - A missing series (integrity violation) still raises not-found.
             - One-off tasks lock only the task row.
             - Does not commit.
@@ -887,7 +935,7 @@ class TaskService:
             )
             if series is None:
                 raise NotFoundError("Series not found")
-            if series.deleted_at is not None:
+            if series.deleted_at is not None and not include_deleted_series:
                 series = None
         task = await self._repository.get_task(user_id, task_id, for_update=True)
         if task is None:

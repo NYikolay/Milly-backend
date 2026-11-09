@@ -472,6 +472,80 @@ async def test_uncomplete_allows_past_date_for_active_series_task() -> None:
     assert series.deleted_at is None
 
 
+@pytest.mark.parametrize(
+    ("frequency", "interval_days", "expected"),
+    [
+        ("daily", 1, TaskRecurrence.REGULAR),
+        ("periodic", 3, TaskRecurrence.PERIODIC),
+    ],
+)
+async def test_uncomplete_recreates_deleted_series_from_saved_schedule(
+    frequency: str,
+    interval_days: int,
+    expected: TaskRecurrence,
+) -> None:
+    """Reopening a completed task restores its deleted series schedule."""
+    repository = FakeTaskManagementRepository()
+    old_series = repository.insert_series(
+        make_series(
+            series_id=1,
+            frequency=frequency,
+            interval_days=interval_days,
+            deleted_at=fixed_now(),
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    task = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=old_series.id,
+            due_at=fixed_now() + timedelta(days=1),
+            completed_at=fixed_now(),
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.uncomplete(USER_ID, task.id)
+
+    assert task.completed_at is None
+    assert task.series_id is not None
+    assert task.series_id != old_series.id
+    new_series = repository.series[task.series_id]
+    assert new_series.deleted_at is None
+    assert new_series.frequency == frequency
+    assert new_series.interval_days == interval_days
+    assert detail.recurrence is expected
+    assert any(
+        item.series_id == new_series.id and item.id != task.id for item in repository.tasks.values()
+    )
+    assert old_series.deleted_at == fixed_now()
+
+
+async def test_uncomplete_does_not_recreate_active_series() -> None:
+    """An active series is reused instead of creating a second one."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(series_id=1, time_of_day=time(9, 0), starts_on=date(2026, 11, 1))
+    )
+    task = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=fixed_now() - timedelta(days=1),
+            completed_at=fixed_now(),
+        )
+    )
+    service = make_service(repository)
+    series_count = len(repository.series)
+
+    await service.uncomplete(USER_ID, task.id)
+
+    assert task.series_id == series.id
+    assert len(repository.series) == series_count
+    assert series.deleted_at is None
+
+
 async def test_uncomplete_compares_local_dates_not_utc_dates() -> None:
     """A task due yesterday in UTC may still be today in the user's timezone."""
     repository = FakeTaskManagementRepository()
@@ -1428,6 +1502,68 @@ async def test_update_due_at_on_soft_deleted_series_task_clears_stale_series() -
     assert sibling.series_id == series.id
     assert sibling.due_at == target_due_at
     assert sibling.deleted_at is None
+
+
+async def test_update_due_at_on_completed_soft_deleted_series_task_keeps_link() -> None:
+    """A completed task keeps its historical series link on a free due slot."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            deleted_at=fixed_now(),
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    task = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 5, 9, 0, tzinfo=UTC),
+            completed_at=fixed_now(),
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(
+        USER_ID,
+        task.id,
+        due_at=datetime(2026, 11, 6, 9, 0, tzinfo=UTC),
+    )
+
+    assert task.series_id == series.id
+    assert detail.recurrence is TaskRecurrence.REGULAR
+
+
+async def test_update_due_at_on_completed_soft_deleted_series_task_clears_link_on_collision() -> (
+    None
+):
+    """A completed task drops its historical link when the new slot is occupied."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            deleted_at=fixed_now(),
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    target_due_at = datetime(2026, 11, 6, 9, 0, tzinfo=UTC)
+    repository.insert_task(make_task(task_id=1, series_id=series.id, due_at=target_due_at))
+    task = repository.insert_task(
+        make_task(
+            task_id=2,
+            series_id=series.id,
+            due_at=datetime(2026, 11, 5, 9, 0, tzinfo=UTC),
+            completed_at=fixed_now(),
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.update(USER_ID, task.id, due_at=target_due_at)
+
+    assert task.series_id is None
+    assert detail.recurrence is TaskRecurrence.ONE_OFF
 
 
 async def test_disable_regular_on_task_of_soft_deleted_series_clears_series_id() -> None:

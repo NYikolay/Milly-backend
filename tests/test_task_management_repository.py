@@ -1180,3 +1180,25 @@ async def test_hard_delete_tasks_is_user_scoped_and_physical() -> None:
     assert sql.startswith("DELETE FROM tasks")
     assert "tasks.id IN (4, 5)" in sql
     assert "tasks.user_id = 7" in sql
+
+
+async def test_series_due_slot_exists_is_owner_scoped_and_excludes_task() -> None:
+    """The slot lookup is owner-scoped and ignores the edited task."""
+    session = RecordingSession(results=[RecordingResult(scalar=1)])
+    repository = make_repository(session)
+
+    exists = await repository.series_due_slot_exists(
+        3,
+        USER_ID,
+        NOW,
+        exclude_task_id=9,
+    )
+
+    assert exists is True
+    sql = compile_statement(session.statements[-1])
+    assert "tasks.series_id = 3" in sql
+    assert "tasks.user_id = 7" in sql
+    assert "tasks.deleted_at IS NULL" in sql
+    assert "tasks.due_at = " in sql
+    assert "tasks.id != 9" in sql
+    assert "LIMIT 1" in sql
