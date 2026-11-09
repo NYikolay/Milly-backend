@@ -32,7 +32,9 @@ router = StandardizedAPIRouter(prefix="/tasks", tags=["tasks"])
 
 _ERRORS = {
     ErrorCode.NOT_FOUND: "The task, project, label, or series does not exist for the user.",
-    ErrorCode.BAD_REQUEST: "A task field, reminder rule, or pagination cursor is invalid.",
+    ErrorCode.BAD_REQUEST: (
+        "A task field, reminder rule, pagination cursor, or requested state transition is invalid."
+    ),
     ErrorCode.UNAUTHORIZED: "The bearer token is missing or invalid.",
 }
 
@@ -462,7 +464,9 @@ async def uncomplete_task(
     Reopen an owned task.
 
     Purpose:
-        Clear completion and rebuild reminder slots from the current time.
+        Clear completion and rebuild reminder slots from the current time,
+        recreating a soft-deleted series when a completed series task is
+        reopened.
 
     Args:
         task_id: Task identifier.
@@ -476,9 +480,18 @@ async def uncomplete_task(
         UnauthorizedError (HTTP 401): If the bearer token is missing or
             invalid.
         NotFoundError (HTTP 404): If the task does not exist for this user.
+        BadRequestError (HTTP 400): If the task was completed, has no active
+            series, and its local due date is in the past.
 
     Notes:
         - Missed reminder slots are not backfilled.
+        - Active-series instances reopen without the date guard and do not
+          recreate the series.
+        - A completed task of a soft-deleted series recreates the series with
+          the saved ``frequency`` and ``interval_days``; the task becomes its
+          first instance and future instances are generated.
+        - The date guard compares the local due date in the user's timezone,
+          falling back to UTC; an equal local date is allowed.
     """
     return _task_response(await service.uncomplete(claims.user_id, task_id))
 
@@ -497,9 +510,8 @@ async def delete_task(
     Delete an owned task or its recurring series.
 
     Purpose:
-        Remove a one-off, completed, or overdue task individually, or apply the
-        series deletion rule for an active future instance without returning
-        the deleted entity.
+        Delete a one-off task individually or remove the whole active series
+        without returning the deleted entity.
 
     Args:
         task_id: Task identifier.
@@ -516,8 +528,14 @@ async def delete_task(
             this user.
 
     Notes:
-        - Deleting an active future series instance removes the series and all
-          of its future incomplete instances; other tasks are deleted alone.
+        - Deleting any task of an active series deletes the series, including
+          when the selected task is completed or overdue.
+        - All future incomplete instances of that series are physically
+          deleted.
+        - The selected completed or overdue instance is soft-deleted with the
+          series; completed and past history is preserved.
+        - A one-off task or a task of a soft-deleted series is soft-deleted
+          individually with its deliveries cancelled.
         - The deletion is committed by the request-scoped session.
     """
     await service.delete(claims.user_id, task_id)

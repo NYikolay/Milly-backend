@@ -278,7 +278,8 @@ async def delete_series(
     Delete an owned recurring series.
 
     Purpose:
-        Stop generation and delivery while preserving past task history.
+        Stop generation and delivery, physically remove future incomplete
+        instances, and preserve completed and past task history.
 
     Args:
         series_id: Series identifier.
@@ -294,6 +295,9 @@ async def delete_series(
         NotFoundError (HTTP 404): If the series does not exist for this user.
 
     Notes:
+        - Future incomplete instances (``completed_at`` is ``None`` and
+          ``due_at`` is later than the current time) are physically deleted.
+        - Completed and past instances remain as history.
         - The deletion is committed by the request-scoped session.
     """
     await service.delete(claims.user_id, series_id)
