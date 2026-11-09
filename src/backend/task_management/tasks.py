@@ -781,9 +781,13 @@ class TaskService:
         Raises:
             BadRequestError: If the task was completed, has no active series
                 (one-off or soft-deleted), and its due date is before the
-                current local date.
-            NotFoundError: If the task does not exist for this user or its
-                referenced series does not exist.
+                current local date; or, when a soft-deleted series is
+                recreated, if its schedule is invalid, its start date or
+                generation range is unsupported, the stored user timezone is
+                invalid, or the task project is archived.
+            NotFoundError: If the task does not exist for this user, its
+                referenced series does not exist, or the recreated series
+                project or label does not exist for this user.
 
         Notes:
             - Clears ``completed_at`` and recomputes each reminder's next slot.
