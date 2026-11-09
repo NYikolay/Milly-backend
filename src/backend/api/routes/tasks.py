@@ -479,9 +479,13 @@ async def uncomplete_task(
     Raises:
         UnauthorizedError (HTTP 401): If the bearer token is missing or
             invalid.
-        NotFoundError (HTTP 404): If the task does not exist for this user.
+        NotFoundError (HTTP 404): If the task does not exist for this user,
+            its referenced series is missing, or the project or label of the
+            recreated series does not exist for this user.
         BadRequestError (HTTP 400): If the task was completed, has no active
-            series, and its local due date is in the past.
+            series, and its local due date is in the past; or if recreating a
+            soft-deleted series finds an invalid stored schedule or timezone,
+            an unsupported date range, or an archived project.
 
     Notes:
         - Missed reminder slots are not backfilled.
