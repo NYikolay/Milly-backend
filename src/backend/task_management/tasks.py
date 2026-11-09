@@ -774,9 +774,8 @@ class TaskService:
         Delete a task according to the recurrence-aware deletion matrix.
 
         Purpose:
-            Remove a one-off, completed, or overdue task without touching its
-            series, while keeping the existing series-wide rule for an active
-            future instance.
+            Remove the requested task while preserving history and, for an
+            active series, stopping the whole schedule.
 
         Args:
             user_id: Owner identifier.
@@ -790,21 +789,27 @@ class TaskService:
                 for this user.
 
         Notes:
-            - A one-off task, a task whose series is soft-deleted, a completed
-              series task, and an overdue incomplete series task are
-              soft-deleted individually with their deliveries cancelled.
-            - An incomplete series task due after the current instant delegates
-              to ``SeriesService.delete``, which soft-deletes the series and all
-              future incomplete instances, including earlier future siblings.
+            - Any task of an active series delegates to ``SeriesService.delete``
+              with this task as the target, regardless of the task's completion
+              state.
+            - That call soft-deletes the series, physically deletes all future
+              incomplete instances, and soft-deletes the selected completed or
+              overdue task when it survives hard deletion.
+            - A one-off task or a task whose series is soft-deleted is
+              soft-deleted individually with its deliveries cancelled.
             - For a series task the series row is locked before the task row;
               one-off tasks lock only the task row.
             - Does not commit.
         """
         task, series = await self._lock_update_target(user_id, task_id)
-        now = self._clock()
-        if series is not None and task.completed_at is None and task.due_at > now:
-            await self._series_service.delete(user_id, series.id)
+        if series is not None:
+            await self._series_service.delete(
+                user_id,
+                series.id,
+                target_task_id=task.id,
+            )
             return
+        now = self._clock()
         await self._repository.cancel_task_reminders(user_id, task.id)
         await self._repository.soft_delete_task(task, now, uuid4())
         await self._repository.flush()

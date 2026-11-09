@@ -466,7 +466,7 @@ async def test_delete_series_task_deletes_the_series_and_future_instances() -> N
     await service.delete(USER_ID, future.id)
 
     assert series.deleted_at == fixed_now()
-    assert future.deleted_at == fixed_now()
+    assert future.id not in repository.tasks
     assert past.deleted_at is None
 
 
@@ -1507,8 +1507,8 @@ async def test_toggle_to_one_off_on_overdue_series_task_keeps_supplied_before_du
     assert detail.reminders[0].next_run_at == datetime(2026, 11, 5, 8, 30, tzinfo=UTC)
 
 
-async def test_delete_completed_series_task_deletes_only_that_task() -> None:
-    """Deleting a completed series instance leaves the series and siblings intact."""
+async def test_delete_completed_series_task_deletes_series_and_future_instances() -> None:
+    """Deleting a completed instance also removes its series and future instances."""
     repository = FakeTaskManagementRepository()
     series = repository.insert_series(
         make_series(series_id=1, time_of_day=time(9, 0), starts_on=date(2026, 11, 1))
@@ -1524,17 +1524,21 @@ async def test_delete_completed_series_task_deletes_only_that_task() -> None:
     future = repository.insert_task(
         make_task(task_id=2, series_id=series.id, due_at=fixed_now() + timedelta(days=2))
     )
+    past = repository.insert_task(
+        make_task(task_id=3, series_id=series.id, due_at=fixed_now() - timedelta(days=1))
+    )
     service = make_service(repository)
 
     await service.delete(USER_ID, completed.id)
 
     assert completed.deleted_at == fixed_now()
-    assert series.deleted_at is None
-    assert future.deleted_at is None
+    assert series.deleted_at == fixed_now()
+    assert future.id not in repository.tasks
+    assert past.deleted_at is None
 
 
-async def test_delete_overdue_series_task_deletes_only_that_task() -> None:
-    """Deleting an overdue series instance leaves the series and siblings intact."""
+async def test_delete_overdue_series_task_deletes_series_and_future_instances() -> None:
+    """Deleting an overdue instance removes the series and all future instances."""
     repository = FakeTaskManagementRepository()
     series = repository.insert_series(
         make_series(series_id=1, time_of_day=time(9, 0), starts_on=date(2026, 11, 1))
@@ -1550,8 +1554,8 @@ async def test_delete_overdue_series_task_deletes_only_that_task() -> None:
     await service.delete(USER_ID, overdue.id)
 
     assert overdue.deleted_at == fixed_now()
-    assert series.deleted_at is None
-    assert future.deleted_at is None
+    assert series.deleted_at == fixed_now()
+    assert future.id not in repository.tasks
 
 
 async def test_delete_task_of_soft_deleted_series_deletes_only_task() -> None:
@@ -1750,8 +1754,8 @@ async def test_delete_active_future_series_task_still_deletes_series_and_all_fut
     await service.delete(USER_ID, target.id)
 
     assert series.deleted_at == fixed_now()
-    assert earlier_future.deleted_at == fixed_now()
-    assert target.deleted_at == fixed_now()
+    assert earlier_future.id not in repository.tasks
+    assert target.id not in repository.tasks
 
 
 async def test_lock_update_target_treats_soft_deleted_series_as_one_off() -> None:
