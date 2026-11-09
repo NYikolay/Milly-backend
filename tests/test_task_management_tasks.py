@@ -582,8 +582,15 @@ async def test_uncomplete_rejects_due_time_equal_to_now() -> None:
     )
     service = make_service(repository)
 
-    with pytest.raises(BadRequestError):
+    with pytest.raises(BadRequestError) as error:
         await service.uncomplete(USER_ID, task.id)
+
+    assert error.value.code is ErrorCode.BAD_REQUEST
+    assert error.value.message == "Task due date is in the past"
+    assert error.value.description == (
+        "Нельзя вернуть в работу задачу с прошедшей датой. Сначала измените дату задачи."
+    )
+    assert task.completed_at == fixed_now()
 
 
 async def test_uncomplete_allows_same_day_due_time_in_future() -> None:
