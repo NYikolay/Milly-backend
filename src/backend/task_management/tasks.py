@@ -767,7 +767,7 @@ class TaskService:
         Purpose:
             Restore delivery after accidental or reversed completion without
             backfilling missed slots, while rejecting a completed task whose
-            local due date has already passed and that has no active series.
+            due moment has already arrived, regardless of its series.
             A completed task of a soft-deleted series gets a new active series
             with the same schedule.
 
@@ -779,33 +779,31 @@ class TaskService:
             TaskDetail: The reopened task detail.
 
         Raises:
-            BadRequestError: If the task was completed, has no active series
-                (one-off or soft-deleted), and its due date is before the
-                current local date; or, when a soft-deleted series is
-                recreated, if its schedule is invalid, its start date or
-                generation range is unsupported, the stored user timezone is
-                invalid, or the task project is archived.
+            BadRequestError: If the task was completed and its ``due_at`` is
+                at or before the current instant; or, when a soft-deleted
+                series is recreated, if its schedule is invalid, its start
+                date or generation range is unsupported, the stored user
+                timezone is invalid, or the task project is archived.
             NotFoundError: If the task does not exist for this user, its
                 referenced series does not exist, or the recreated series
                 project or label does not exist for this user.
 
         Notes:
             - Clears ``completed_at`` and recomputes each reminder's next slot.
-            - The guard compares the local date of ``due_at`` with the current
-              local date in the user's timezone, defaulting to UTC; an equal
-              local date is allowed even when the due time has already passed.
-            - Active-series instances bypass the date guard because their date
-              cannot be edited independently; one-off tasks and tasks of a
-              soft-deleted series must have their date changed first.
+            - The guard compares ``due_at`` with the current instant: a due
+              moment at or before now is rejected for every completed task,
+              including instances of an active series; only a future due
+              moment is reopened.
             - A completed task of a soft-deleted series is reattached through
               ``SeriesService.create_from_task`` to a new series that copies
               the old ``frequency`` and ``interval_days``; the new series has
               ``ends_on`` set to ``None``, does not duplicate the current due
               slot, and generates future instances by the normal series rules.
               The old soft-deleted series row remains deleted as history.
+            - Series recreation still requires a future due moment.
             - A before-due moment already in the past stays disabled.
-            - A task that was not completed skips the date guard and series
-              recreation.
+            - A task that was not completed skips the due-moment guard and
+              series recreation.
             - For a series task the series row is locked before the task row;
               one-off tasks lock only the task row.
             - Does not commit.
@@ -817,13 +815,11 @@ class TaskService:
         )
         now = self._clock()
         was_completed = task.completed_at is not None
-        if was_completed and (series is None or series.deleted_at is not None):
-            zone = await self._user_timezone(user_id)
-            if task.due_at.astimezone(zone).date() < now.astimezone(zone).date():
-                raise BadRequestError(
-                    _PAST_DUE_DATE,
-                    description=_PAST_DUE_DATE_DESCRIPTION,
-                )
+        if was_completed and task.due_at <= now:
+            raise BadRequestError(
+                _PAST_DUE_DATE,
+                description=_PAST_DUE_DATE_DESCRIPTION,
+            )
         task.completed_at = None
         for reminder in await self._repository.list_task_reminders(user_id, task.id):
             await self._repository.update_reminder_next_run_at(

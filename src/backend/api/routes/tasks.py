@@ -482,20 +482,18 @@ async def uncomplete_task(
         NotFoundError (HTTP 404): If the task does not exist for this user,
             its referenced series is missing, or the project or label of the
             recreated series does not exist for this user.
-        BadRequestError (HTTP 400): If the task was completed, has no active
-            series, and its local due date is in the past; or if recreating a
+        BadRequestError (HTTP 400): If the task was completed and its due
+            moment is at or before the current instant; or if recreating a
             soft-deleted series finds an invalid stored schedule or timezone,
             an unsupported date range, or an archived project.
 
     Notes:
         - Missed reminder slots are not backfilled.
-        - Active-series instances reopen without the date guard and do not
-          recreate the series.
+        - A completed task whose ``due_at`` is at or before now is rejected
+          regardless of its series; only a future due moment reopens.
         - A completed task of a soft-deleted series recreates the series with
           the saved ``frequency`` and ``interval_days``; the task becomes its
           first instance and future instances are generated.
-        - The date guard compares the local due date in the user's timezone,
-          falling back to UTC; an equal local date is allowed.
     """
     return _task_response(await service.uncomplete(claims.user_id, task_id))
 
