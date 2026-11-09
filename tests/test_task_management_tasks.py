@@ -402,6 +402,111 @@ async def test_uncomplete_clears_timestamp_and_rebuilds_reminders_from_now() -> 
     assert reminder.next_run_at == task.due_at - timedelta(minutes=30)
 
 
+async def test_uncomplete_rejects_past_local_due_date_for_one_off_task() -> None:
+    """A past-dated one-off task cannot be reopened without changing its date."""
+    repository = FakeTaskManagementRepository()
+    task = repository.insert_task(
+        make_task(
+            task_id=1,
+            due_at=fixed_now() - timedelta(days=1),
+            completed_at=fixed_now(),
+        )
+    )
+    service = make_service(repository)
+
+    with pytest.raises(BadRequestError) as error:
+        await service.uncomplete(USER_ID, task.id)
+
+    assert error.value.code is ErrorCode.BAD_REQUEST
+    assert error.value.message == "Task due date is in the past"
+    assert error.value.description == (
+        "Нельзя вернуть в работу задачу с прошедшей датой. Сначала измените дату задачи."
+    )
+    assert task.completed_at == fixed_now()
+
+
+async def test_uncomplete_rejects_past_date_for_task_of_soft_deleted_series() -> None:
+    """A past-dated task of a soft-deleted series is rejected before recreation."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(series_id=1, deleted_at=fixed_now(), time_of_day=time(9, 0))
+    )
+    task = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=fixed_now() - timedelta(days=1),
+            completed_at=fixed_now(),
+        )
+    )
+    service = make_service(repository)
+    series_count = len(repository.series)
+
+    with pytest.raises(BadRequestError):
+        await service.uncomplete(USER_ID, task.id)
+
+    assert task.completed_at == fixed_now()
+    assert len(repository.series) == series_count
+
+
+async def test_uncomplete_allows_past_date_for_active_series_task() -> None:
+    """An active-series instance may be reopened even when its date is past."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(series_id=1, time_of_day=time(9, 0), starts_on=date(2026, 11, 1))
+    )
+    task = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=fixed_now() - timedelta(days=1),
+            completed_at=fixed_now(),
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.uncomplete(USER_ID, task.id)
+
+    assert detail.task.completed_at is None
+    assert task.series_id == series.id
+    assert series.deleted_at is None
+
+
+async def test_uncomplete_compares_local_dates_not_utc_dates() -> None:
+    """A task due yesterday in UTC may still be today in the user's timezone."""
+    repository = FakeTaskManagementRepository()
+    repository.user_timezones[USER_ID] = "Australia/Sydney"
+    task = repository.insert_task(
+        make_task(
+            task_id=1,
+            due_at=datetime(2026, 11, 3, 23, 0, tzinfo=UTC),
+            completed_at=fixed_now(),
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.uncomplete(USER_ID, task.id)
+
+    assert detail.task.completed_at is None
+
+
+async def test_uncomplete_past_date_is_allowed_for_already_active_task() -> None:
+    """The past-date guard applies only when the task was actually completed."""
+    repository = FakeTaskManagementRepository()
+    task = repository.insert_task(
+        make_task(
+            task_id=1,
+            due_at=fixed_now() - timedelta(days=1),
+            completed_at=None,
+        )
+    )
+    service = make_service(repository)
+
+    detail = await service.uncomplete(USER_ID, task.id)
+
+    assert detail.task.completed_at is None
+
+
 async def test_delete_one_off_task_soft_deletes_and_cancels_deliveries() -> None:
     """Deleting a one-off task hides it and cancels its active deliveries."""
     repository = FakeTaskManagementRepository()

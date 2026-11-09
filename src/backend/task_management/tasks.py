@@ -37,6 +37,10 @@ _INVALID_TIMEZONE = "Invalid timezone"
 _INVALID_DATE_RANGE = "Date range is out of bounds"
 _PROJECT_ARCHIVED = "Project is archived"
 _INVALID_RECURRENCE_INTERVAL = "Task recurrence and interval are incompatible"
+_PAST_DUE_DATE = "Task due date is in the past"
+_PAST_DUE_DATE_DESCRIPTION = (
+    "Нельзя вернуть в работу задачу с прошедшей датой. Сначала измените дату задачи."
+)
 
 
 @dataclass(frozen=True)
@@ -741,7 +745,8 @@ class TaskService:
 
         Purpose:
             Restore delivery after accidental or reversed completion without
-            backfilling missed slots.
+            backfilling missed slots, while rejecting a completed task whose
+            local due date has already passed and that has no active series.
 
         Args:
             user_id: Owner identifier.
@@ -751,16 +756,36 @@ class TaskService:
             TaskDetail: The reopened task detail.
 
         Raises:
-            NotFoundError: If the task does not exist for this user.
+            BadRequestError: If the task was completed, has no active series,
+                and its due date is before the current local date.
+            NotFoundError: If the task does not exist for this user or its
+                referenced series does not exist.
 
         Notes:
             - Clears ``completed_at`` and recomputes each reminder's next slot.
+            - The guard compares the local date of ``due_at`` with the current
+              local date in the user's timezone, defaulting to UTC; an equal
+              local date is allowed even when the due time has already passed.
+            - Active-series instances bypass the date guard because their date
+              cannot be edited independently; one-off tasks and tasks of a
+              soft-deleted series must have their date changed first.
             - A before-due moment already in the past stays disabled.
-            - Locks the task row and does not commit.
+            - A task that is already active skips the date guard.
+            - For a series task the series row is locked before the task row;
+              one-off tasks lock only the task row.
+            - Does not commit.
         """
-        task = await self._require_task(user_id, task_id, for_update=True)
-        task.completed_at = None
+        task, series = await self._lock_update_target(user_id, task_id)
         now = self._clock()
+        was_completed = task.completed_at is not None
+        if was_completed and series is None:
+            zone = await self._user_timezone(user_id)
+            if task.due_at.astimezone(zone).date() < now.astimezone(zone).date():
+                raise BadRequestError(
+                    _PAST_DUE_DATE,
+                    description=_PAST_DUE_DATE_DESCRIPTION,
+                )
+        task.completed_at = None
         for reminder in await self._repository.list_task_reminders(user_id, task.id):
             await self._repository.update_reminder_next_run_at(
                 reminder,
