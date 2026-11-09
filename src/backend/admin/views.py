@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 
 from sqladmin import ModelView
 from sqladmin.filters import (
@@ -16,11 +17,80 @@ from starlette.requests import Request
 from backend.core.errors import ConflictError
 from backend.models.auth_session import AuthSession
 from backend.models.color_palette import ColorPalette
+from backend.models.label import Label
 from backend.models.project import Project
 from backend.models.task import Task
 from backend.models.task_series import TaskSeries
 from backend.models.telegram_profile import TelegramProfile
 from backend.models.user import User
+
+
+class ExplicitForeignKeyFilter(ForeignKeyFilter):
+    """Foreign-key filter with an explicitly configured related key column."""
+
+    def __init__(
+        self,
+        foreign_key: Any,
+        foreign_model_key: Any,
+        foreign_display_field: Any,
+        *,
+        foreign_model: Any,
+        title: str | None = None,
+        parameter_name: str | None = None,
+    ) -> None:
+        """
+        Configure the filter with an explicit related model key.
+
+        Purpose:
+            Keep lookups working when the local column participates in composite
+            tenant foreign keys, where SQLAdmin's default key resolution is
+            ambiguous.
+
+        Args:
+            foreign_key: Local model column used for filtering.
+            foreign_model_key: Related model column used as the lookup value.
+            foreign_display_field: Related model column displayed in the filter.
+            foreign_model: Related ORM model class.
+            title: Optional filter title. Defaults to the local column title.
+            parameter_name: Optional query parameter name.
+        """
+        super().__init__(
+            foreign_key,
+            foreign_display_field,
+            foreign_model=foreign_model,
+            title=title,
+            parameter_name=parameter_name,
+        )
+        self.foreign_model_key = foreign_model_key
+
+    async def lookups(
+        self,
+        request: Request,
+        model: Any,
+        run_query: Callable[[Any], Any],
+    ) -> list[tuple[str, str]]:
+        """
+        Return distinct key/label pairs for the filter dropdown.
+
+        Purpose:
+            Build lookups from the explicitly configured key and display
+            columns instead of guessing the related key from local foreign keys.
+
+        Args:
+            request: Incoming admin request.
+            model: Model class being listed.
+            run_query: Async callable that executes the lookup select.
+
+        Returns:
+            list[tuple[str, str]]: "All" plus distinct key/label pairs.
+        """
+        display_field = cast(Any, self.foreign_display_field)
+        return [("__all", "All")] + [
+            (str(key), str(value))
+            for key, value in await run_query(
+                select(self.foreign_model_key, display_field).distinct()
+            )
+        ]
 
 
 class ColorPaletteAdmin(ModelView, model=ColorPalette):
@@ -238,6 +308,91 @@ class AuthSessionAdmin(ModelView, model=AuthSession):
     form_excluded_columns = [AuthSession.id]
 
 
+class ProjectAdmin(ModelView, model=Project):
+    """Admin view for user-owned projects."""
+
+    column_list = [
+        Project.id,
+        Project.user_id,
+        Project.name,
+        Project.description,
+        Project.color_id,
+        Project.icon,
+        Project.archived_at,
+        Project.deleted_at,
+        Project.created_at,
+    ]
+    column_searchable_list = [Project.id, Project.user_id, Project.name]
+    column_sortable_list = [
+        Project.id,
+        Project.name,
+        Project.archived_at,
+        Project.deleted_at,
+        Project.created_at,
+    ]
+    column_filters = [
+        ExplicitForeignKeyFilter(
+            Project.user_id,
+            User.id,
+            User.id,
+            foreign_model=User,
+            title="User",
+        ),
+        ForeignKeyFilter(
+            Project.color_id,
+            ColorPalette.id,
+            foreign_model=ColorPalette,
+            title="Color",
+        ),
+        OperationColumnFilter(Project.archived_at),
+        OperationColumnFilter(Project.deleted_at),
+        OperationColumnFilter(Project.created_at),
+    ]
+    column_default_sort = (Project.id, True)
+    form_include_pk = True
+    form_excluded_columns = [Project.id]
+
+
+class LabelAdmin(ModelView, model=Label):
+    """Admin view for user-owned labels."""
+
+    column_list = [
+        Label.id,
+        Label.user_id,
+        Label.name,
+        Label.color_id,
+        Label.deleted_at,
+        Label.created_at,
+    ]
+    column_searchable_list = [Label.id, Label.user_id, Label.name]
+    column_sortable_list = [
+        Label.id,
+        Label.name,
+        Label.deleted_at,
+        Label.created_at,
+    ]
+    column_filters = [
+        ExplicitForeignKeyFilter(
+            Label.user_id,
+            User.id,
+            User.id,
+            foreign_model=User,
+            title="User",
+        ),
+        ForeignKeyFilter(
+            Label.color_id,
+            ColorPalette.id,
+            foreign_model=ColorPalette,
+            title="Color",
+        ),
+        OperationColumnFilter(Label.deleted_at),
+        OperationColumnFilter(Label.created_at),
+    ]
+    column_default_sort = (Label.id, True)
+    form_include_pk = True
+    form_excluded_columns = [Label.id]
+
+
 class TaskAdmin(ModelView, model=Task):
     """Admin view for one-off and series-generated tasks."""
 
@@ -265,8 +420,9 @@ class TaskAdmin(ModelView, model=Task):
     column_filters = [
         BooleanFilter(Task.reminders_enabled),
         AllUniqueStringValuesFilter(Task.priority),
-        ForeignKeyFilter(
+        ExplicitForeignKeyFilter(
             Task.user_id,
+            User.id,
             User.id,
             foreign_model=User,
             title="User",
@@ -330,8 +486,9 @@ class TaskSeriesAdmin(ModelView, model=TaskSeries):
         BooleanFilter(TaskSeries.reminders_enabled),
         AllUniqueStringValuesFilter(TaskSeries.priority),
         AllUniqueStringValuesFilter(TaskSeries.frequency),
-        ForeignKeyFilter(
+        ExplicitForeignKeyFilter(
             TaskSeries.user_id,
+            User.id,
             User.id,
             foreign_model=User,
             title="User",

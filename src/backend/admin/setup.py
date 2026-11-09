@@ -8,6 +8,8 @@ from backend.admin.auth import AdminAuth
 from backend.admin.views import (
     AuthSessionAdmin,
     ColorPaletteAdmin,
+    LabelAdmin,
+    ProjectAdmin,
     TaskAdmin,
     TaskSeriesAdmin,
     TelegramProfileAdmin,
@@ -29,7 +31,7 @@ def setup_admin(
 
     Purpose:
         Build the admin sub-application with password authentication and the
-        six project model views, or leave it unmounted when disabled.
+        eight project model views, or leave it unmounted when disabled.
 
     Args:
         app: FastAPI application that receives the mounted admin.
@@ -80,6 +82,8 @@ def setup_admin(
     admin.add_view(UserAdmin)
     admin.add_view(TelegramProfileAdmin)
     admin.add_view(AuthSessionAdmin)
+    admin.add_view(ProjectAdmin)
+    admin.add_view(LabelAdmin)
     admin.add_view(TaskAdmin)
     admin.add_view(TaskSeriesAdmin)
     logger.info("admin.mounted", base_url="/admin")

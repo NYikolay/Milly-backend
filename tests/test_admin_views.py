@@ -18,6 +18,8 @@ from starlette.applications import Starlette
 from backend.admin.views import (
     AuthSessionAdmin,
     ColorPaletteAdmin,
+    LabelAdmin,
+    ProjectAdmin,
     TaskAdmin,
     TaskSeriesAdmin,
     TelegramProfileAdmin,
@@ -26,6 +28,8 @@ from backend.admin.views import (
 from backend.core.errors import ConflictError
 from backend.models.auth_session import AuthSession
 from backend.models.color_palette import ColorPalette
+from backend.models.label import Label
+from backend.models.project import Project
 from backend.models.task import Task
 from backend.models.task_series import TaskSeries
 from backend.models.telegram_profile import TelegramProfile
@@ -38,6 +42,8 @@ def test_views_are_bound_to_models() -> None:
     assert TelegramProfileAdmin.model is TelegramProfile
     assert AuthSessionAdmin.model is AuthSession
     assert ColorPaletteAdmin.model is ColorPalette
+    assert ProjectAdmin.model is Project
+    assert LabelAdmin.model is Label
     assert TaskAdmin.model is Task
     assert TaskSeriesAdmin.model is TaskSeries
     assert [
@@ -45,6 +51,8 @@ def test_views_are_bound_to_models() -> None:
         UserAdmin.identity,
         TelegramProfileAdmin.identity,
         AuthSessionAdmin.identity,
+        ProjectAdmin.identity,
+        LabelAdmin.identity,
         TaskAdmin.identity,
         TaskSeriesAdmin.identity,
     ] == [
@@ -52,6 +60,8 @@ def test_views_are_bound_to_models() -> None:
         "user",
         "telegram-profile",
         "auth-session",
+        "project",
+        "label",
         "task",
         "task-series",
     ]
@@ -238,6 +248,123 @@ def test_task_series_view_exposes_columns_search_sort_and_filters() -> None:
     assert sum(isinstance(item, ForeignKeyFilter) for item in filters) == 2
 
 
+def test_project_view_exposes_columns_search_sort_and_filters() -> None:
+    """Expose project columns, search, sorting, and filters."""
+    assert _column_keys(ProjectAdmin.column_list) == [
+        "id",
+        "user_id",
+        "name",
+        "description",
+        "color_id",
+        "icon",
+        "archived_at",
+        "deleted_at",
+        "created_at",
+    ]
+    assert _column_keys(ProjectAdmin.column_searchable_list) == ["id", "user_id", "name"]
+    assert _column_keys(ProjectAdmin.column_sortable_list) == [
+        "id",
+        "name",
+        "archived_at",
+        "deleted_at",
+        "created_at",
+    ]
+    assert ProjectAdmin.column_default_sort[0].key == "id"
+    assert ProjectAdmin.column_default_sort[1] is True
+    assert _column_keys(ProjectAdmin.form_excluded_columns) == ["id"]
+    filters = ProjectAdmin.column_filters
+    assert sum(isinstance(item, ForeignKeyFilter) for item in filters) == 2
+    assert any(isinstance(item, OperationColumnFilter) for item in filters)
+
+
+def test_label_view_exposes_columns_search_sort_and_filters() -> None:
+    """Expose label columns, search, sorting, and filters."""
+    assert _column_keys(LabelAdmin.column_list) == [
+        "id",
+        "user_id",
+        "name",
+        "color_id",
+        "deleted_at",
+        "created_at",
+    ]
+    assert _column_keys(LabelAdmin.column_searchable_list) == ["id", "user_id", "name"]
+    assert _column_keys(LabelAdmin.column_sortable_list) == [
+        "id",
+        "name",
+        "deleted_at",
+        "created_at",
+    ]
+    assert LabelAdmin.column_default_sort[0].key == "id"
+    assert LabelAdmin.column_default_sort[1] is True
+    assert _column_keys(LabelAdmin.form_excluded_columns) == ["id"]
+    filters = LabelAdmin.column_filters
+    assert sum(isinstance(item, ForeignKeyFilter) for item in filters) == 2
+    assert any(isinstance(item, OperationColumnFilter) for item in filters)
+
+
+async def _empty_lookup_query(statement: Any) -> list[tuple[Any, Any]]:
+    """Return no rows for a filter lookup query."""
+    return []
+
+
+async def test_all_foreign_key_filters_render_lookups() -> None:
+    """Render lookups for every FK filter without ambiguous-column errors."""
+    views = [
+        TelegramProfileAdmin(),
+        AuthSessionAdmin(),
+        ProjectAdmin(),
+        LabelAdmin(),
+        TaskAdmin(),
+        TaskSeriesAdmin(),
+    ]
+    for view in views:
+        for item in view.column_filters:
+            if isinstance(item, ForeignKeyFilter):
+                lookups = await item.lookups(
+                    cast(Any, None),
+                    view.model,
+                    _empty_lookup_query,
+                )
+                assert lookups == [("__all", "All")]
+
+
+async def test_task_user_filters_render_lookups_from_users_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Build task user lookups from ``users.id`` despite composite tenant FKs."""
+    statements: list[Any] = []
+
+    async def capture_query(statement: Any) -> list[tuple[Any, Any]]:
+        """Record the lookup query and return no rows."""
+        statements.append(statement)
+        return []
+
+    monkeypatch.setattr(
+        "sqladmin.filters.get_foreign_column_name",
+        lambda column: "user_id",
+    )
+    views = [TaskAdmin(), TaskSeriesAdmin()]
+    for view in views:
+        user_filter = next(
+            item
+            for item in view.column_filters
+            if isinstance(item, ForeignKeyFilter)
+            and getattr(item.foreign_key, "key", None) == "user_id"
+        )
+        lookups = await user_filter.lookups(
+            cast(Any, None),
+            view.model,
+            capture_query,
+        )
+        assert lookups == [("__all", "All")]
+
+    assert len(statements) == len(views)
+    for statement in statements:
+        sql = _compile_statement(statement)
+        assert "users.id" in sql
+        assert "users.user_id" not in sql
+
+
 async def test_palette_change_rejects_slug_change() -> None:
     """Reject changing the stable slug after creation."""
     view, _ = _palette_view(10)
@@ -344,6 +471,8 @@ def test_views_include_primary_keys_in_forms() -> None:
     assert UserAdmin.form_include_pk is True
     assert TelegramProfileAdmin.form_include_pk is True
     assert AuthSessionAdmin.form_include_pk is True
+    assert ProjectAdmin.form_include_pk is True
+    assert LabelAdmin.form_include_pk is True
     assert TaskAdmin.form_include_pk is True
     assert TaskSeriesAdmin.form_include_pk is True
 
@@ -355,6 +484,8 @@ def test_views_register_on_admin() -> None:
     admin.add_view(UserAdmin)
     admin.add_view(TelegramProfileAdmin)
     admin.add_view(AuthSessionAdmin)
+    admin.add_view(ProjectAdmin)
+    admin.add_view(LabelAdmin)
     admin.add_view(TaskAdmin)
     admin.add_view(TaskSeriesAdmin)
     assert [view.identity for view in admin.views] == [
@@ -362,6 +493,8 @@ def test_views_register_on_admin() -> None:
         "user",
         "telegram-profile",
         "auth-session",
+        "project",
+        "label",
         "task",
         "task-series",
     ]
@@ -374,6 +507,8 @@ async def test_forms_include_foreign_keys_without_primary_keys() -> None:
     admin.add_view(UserAdmin)
     admin.add_view(TelegramProfileAdmin)
     admin.add_view(AuthSessionAdmin)
+    admin.add_view(ProjectAdmin)
+    admin.add_view(LabelAdmin)
     admin.add_view(TaskAdmin)
     admin.add_view(TaskSeriesAdmin)
 
@@ -400,6 +535,22 @@ async def test_forms_include_foreign_keys_without_primary_keys() -> None:
     assert "user_id" in session_fields
     assert "refresh_token_hash" in session_fields
     assert "id" not in session_fields
+
+    project_view = next(view for view in admin.views if view.identity == "project")
+    assert isinstance(project_view, ModelView)
+    project_form = await project_view.scaffold_form()
+    project_fields = project_form()._fields
+    assert "user_id" in project_fields
+    assert "color_id" in project_fields
+    assert "id" not in project_fields
+
+    label_view = next(view for view in admin.views if view.identity == "label")
+    assert isinstance(label_view, ModelView)
+    label_form = await label_view.scaffold_form()
+    label_fields = label_form()._fields
+    assert "user_id" in label_fields
+    assert "color_id" in label_fields
+    assert "id" not in label_fields
 
     user_view = next(view for view in admin.views if view.identity == "user")
     assert isinstance(user_view, ModelView)
