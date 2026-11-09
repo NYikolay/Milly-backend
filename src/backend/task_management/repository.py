@@ -1222,8 +1222,8 @@ class SqlAlchemyTaskManagementRepository:
 
         Purpose:
             Remove generated instances that no longer belong to a series edit
-            while relying on foreign-key cascades for labels, reminders, and
-            deliveries.
+            or a deleted series while relying on foreign-key cascades for
+            labels, reminders, and deliveries.
 
         Args:
             task_ids: Task identifiers to delete.

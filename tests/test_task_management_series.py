@@ -287,8 +287,8 @@ async def test_update_series_only_touches_future_incomplete_instances() -> None:
     assert completed.title == "Old"
 
 
-async def test_delete_series_soft_deletes_future_incomplete_and_keeps_past() -> None:
-    """Deleting a series removes future incomplete instances but keeps history."""
+async def test_delete_series_hard_deletes_future_incomplete_and_keeps_past() -> None:
+    """Deleting a series physically removes future incomplete instances."""
     repository = FakeTaskManagementRepository()
     series = repository.insert_series(
         make_series(
@@ -324,9 +324,44 @@ async def test_delete_series_soft_deletes_future_incomplete_and_keeps_past() -> 
     await service.delete(USER_ID, series.id)
 
     assert series.deleted_at == fixed_now()
-    assert future.deleted_at == fixed_now()
+    assert future.id not in repository.tasks
     assert past.deleted_at is None
     assert completed.deleted_at is None
+
+
+async def test_delete_series_soft_deletes_selected_completed_task() -> None:
+    """A selected completed instance is soft-deleted while future instances are removed."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    completed = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=fixed_now() + timedelta(days=1),
+            completed_at=fixed_now(),
+        )
+    )
+    future = repository.insert_task(
+        make_task(
+            task_id=2,
+            series_id=series.id,
+            due_at=fixed_now() + timedelta(days=2),
+        )
+    )
+    service = make_service(repository)
+
+    await service.delete(USER_ID, series.id, target_task_id=completed.id)
+
+    assert completed.deleted_at == fixed_now()
+    assert completed.deletion_batch_id == series.deletion_batch_id
+    assert future.id not in repository.tasks
+    assert series.deleted_at == fixed_now()
 
 
 async def test_get_cross_user_series_raises_not_found() -> None:

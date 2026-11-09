@@ -622,16 +622,26 @@ class SeriesService:
         task.series_id = None
         await self._repository.flush()
 
-    async def delete(self, user_id: int, series_id: int) -> None:
+    async def delete(
+        self,
+        user_id: int,
+        series_id: int,
+        *,
+        target_task_id: int | None = None,
+    ) -> None:
         """
-        Soft-delete a series and its future incomplete instances.
+        Soft-delete a series while physically removing future incomplete instances.
 
         Purpose:
-            Stop generation and delivery while preserving past task history.
+            Stop generation and delivery, remove upcoming occurrences that no
+            longer belong to a schedule, and preserve completed and past task
+            history.
 
         Args:
             user_id: Owner identifier.
             series_id: Series identifier.
+            target_task_id: Optional selected task to soft-delete when it
+                survives hard deletion. Defaults to None.
 
         Returns:
             None: The deletion stays in the current unit of work.
@@ -641,10 +651,13 @@ class SeriesService:
 
         Notes:
             - Cancels reminder slots and deliveries for every task of the
-              series, including overdue incomplete instances, while keeping
-              their task rows as history.
-            - Soft-deletes only future incomplete instances and the series,
-              and clears template reminders.
+              series before rows are removed or kept.
+            - Physically deletes future incomplete instances (``completed_at``
+              is ``None`` and ``due_at`` is later than the current time).
+            - Soft-deletes the selected task with the series deletion batch
+              when that task is not part of the hard-deleted set; completed
+              and past instances stay as history.
+            - Soft-deletes the series and clears template reminders.
             - Locks the series row and its task rows, and does not commit.
         """
         series = await self._require_series(user_id, series_id, for_update=True)
@@ -656,10 +669,17 @@ class SeriesService:
         )
         for task in locked_tasks:
             await self._repository.cancel_task_reminders(user_id, task.id)
-        for task in locked_tasks:
-            if task.due_at <= now or task.completed_at is not None:
-                continue
-            await self._repository.soft_delete_task(task, now, batch_id)
+        future_ids = tuple(
+            task.id for task in locked_tasks if task.completed_at is None and task.due_at > now
+        )
+        await self._repository.hard_delete_tasks(future_ids, user_id)
+        if target_task_id is not None and target_task_id not in future_ids:
+            target = next(
+                (task for task in locked_tasks if task.id == target_task_id),
+                None,
+            )
+            if target is not None:
+                await self._repository.soft_delete_task(target, now, batch_id)
         await self._repository.cancel_series_reminders(user_id, series.id)
         await self._repository.soft_delete_series(series, now, batch_id)
         await self._repository.flush()
