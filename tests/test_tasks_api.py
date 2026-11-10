@@ -12,13 +12,8 @@ from backend.api.deps import get_current_access, get_task_service
 from backend.api.pagination import MAX_DB_ID, encode_cursor, filter_fingerprint
 from backend.auth.tokens import AccessTokenClaims
 from backend.core.errors import NotFoundError
-from backend.models.label import Label
-from backend.models.task import Task
-from backend.models.task_reminder import TaskReminder
+from backend.domain.entities import Label, Task, TaskReminder
 from backend.task_management.enums import Priority, ReminderKind, TaskRecurrence
-from backend.task_management.labels import LabelService
-from backend.task_management.palette import PaletteService
-from backend.task_management.projects import ProjectService
 from backend.task_management.series import SeriesService
 from backend.task_management.tasks import (
     TaskDetail,
@@ -962,14 +957,27 @@ async def test_task_routes_forward_the_claim_user_id(
 async def test_task_list_rejects_max_date_with_validation_error(app: FastAPI) -> None:
     """The last calendar date is rejected before it can overflow local bounds."""
     repository = FakeTaskManagementRepository()
-    palette = PaletteService(repository)
     series = SeriesService(
         repository,
-        ProjectService(repository, palette, clock=fixed_now),
-        LabelService(repository, palette, clock=fixed_now),
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
         clock=fixed_now,
     )
-    service = TaskService(repository, series, clock=fixed_now)
+    service = TaskService(
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        series,
+        repository,
+        clock=fixed_now,
+    )
     app.dependency_overrides[get_task_service] = lambda: service
     app.dependency_overrides[get_current_access] = lambda: _claims()
     transport = ASGITransport(app=app)
@@ -986,14 +994,27 @@ async def test_task_list_rejects_min_date_in_positive_offset_zone(app: FastAPI) 
     """The first calendar date is rejected before it can overflow local bounds."""
     repository = FakeTaskManagementRepository()
     repository.user_timezones[1] = "Europe/Moscow"
-    palette = PaletteService(repository)
     series = SeriesService(
         repository,
-        ProjectService(repository, palette, clock=fixed_now),
-        LabelService(repository, palette, clock=fixed_now),
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
         clock=fixed_now,
     )
-    service = TaskService(repository, series, clock=fixed_now)
+    service = TaskService(
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        series,
+        repository,
+        clock=fixed_now,
+    )
     app.dependency_overrides[get_task_service] = lambda: service
     app.dependency_overrides[get_current_access] = lambda: _claims()
     transport = ASGITransport(app=app)

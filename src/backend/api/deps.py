@@ -5,20 +5,25 @@ from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.auth.repository import SqlAlchemyAuthRepository
-from backend.auth.service import AuthService
-from backend.auth.tokens import AccessTokenClaims, decode_access_token
+from backend.application.auth.service import AuthService
+from backend.application.task_management.labels import LabelService
+from backend.application.task_management.palette import PaletteService
+from backend.application.task_management.projects import ProjectService
+from backend.application.task_management.series import SeriesService
+from backend.application.task_management.tasks import TaskService
+from backend.composition.auth import build_auth_service
+from backend.composition.task_management import (
+    build_palette_service,
+    build_series_service,
+    build_task_management_services,
+)
 from backend.core.config import Settings
 from backend.core.errors import UnauthorizedError
 from backend.db.probe import DatabaseProbe
 from backend.db.session import Database
-from backend.models.user import User
-from backend.task_management.labels import LabelService
-from backend.task_management.palette import PaletteService
-from backend.task_management.projects import ProjectService
-from backend.task_management.repository import SqlAlchemyTaskManagementRepository
-from backend.task_management.series import SeriesService
-from backend.task_management.tasks import TaskService
+from backend.domain.auth.models import AccessTokenClaims
+from backend.domain.entities import User
+from backend.infrastructure.auth.tokens import decode_access_token
 
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
@@ -78,8 +83,8 @@ async def get_palette_service(session: SessionDep) -> PaletteService:
     Build the palette service for the current request.
 
     Purpose:
-        Bind the SQLAlchemy task-management repository to the request-scoped
-        session used for palette reads.
+        Build the palette service through the composition root using the
+        request-scoped session used for palette reads.
 
     Args:
         session: Request-scoped database session.
@@ -91,7 +96,7 @@ async def get_palette_service(session: SessionDep) -> PaletteService:
         - The service does not commit; ``SessionDep`` owns the transaction
           boundary.
     """
-    return PaletteService(SqlAlchemyTaskManagementRepository(session))
+    return build_palette_service(session)
 
 
 async def get_project_service(session: SessionDep) -> ProjectService:
@@ -99,8 +104,8 @@ async def get_project_service(session: SessionDep) -> ProjectService:
     Build the project service for the current request.
 
     Purpose:
-        Bind the SQLAlchemy task-management repository and palette service to
-        the request-scoped session used by project routes.
+        Build the project service through the composition root using the
+        request-scoped session used by project routes.
 
     Args:
         session: Request-scoped database session.
@@ -112,8 +117,7 @@ async def get_project_service(session: SessionDep) -> ProjectService:
         - The service does not commit; ``SessionDep`` owns the transaction
           boundary.
     """
-    repository = SqlAlchemyTaskManagementRepository(session)
-    return ProjectService(repository, PaletteService(repository))
+    return build_task_management_services(session).projects
 
 
 async def get_label_service(session: SessionDep) -> LabelService:
@@ -121,8 +125,8 @@ async def get_label_service(session: SessionDep) -> LabelService:
     Build the label service for the current request.
 
     Purpose:
-        Bind the SQLAlchemy task-management repository and palette service to
-        the request-scoped session used by label routes.
+        Build the label service through the composition root using the
+        request-scoped session used by label routes.
 
     Args:
         session: Request-scoped database session.
@@ -134,8 +138,7 @@ async def get_label_service(session: SessionDep) -> LabelService:
         - The service does not commit; ``SessionDep`` owns the transaction
           boundary.
     """
-    repository = SqlAlchemyTaskManagementRepository(session)
-    return LabelService(repository, PaletteService(repository))
+    return build_task_management_services(session).labels
 
 
 PaletteServiceDep = Annotated[PaletteService, Depends(get_palette_service)]
@@ -148,8 +151,8 @@ async def get_series_service(session: SessionDep) -> SeriesService:
     Build the recurring-series service for the current request.
 
     Purpose:
-        Bind the SQLAlchemy task-management repository, project service, and
-        label service to the request-scoped session used by series routes.
+        Build the series service through the composition root using the
+        request-scoped session used by series routes.
 
     Args:
         session: Request-scoped database session.
@@ -161,13 +164,7 @@ async def get_series_service(session: SessionDep) -> SeriesService:
         - The service does not commit; ``SessionDep`` owns the transaction
           boundary.
     """
-    repository = SqlAlchemyTaskManagementRepository(session)
-    palette = PaletteService(repository)
-    return SeriesService(
-        repository,
-        ProjectService(repository, palette),
-        LabelService(repository, palette),
-    )
+    return build_series_service(session)
 
 
 async def get_task_service(session: SessionDep) -> TaskService:
@@ -175,8 +172,8 @@ async def get_task_service(session: SessionDep) -> TaskService:
     Build the task service for the current request.
 
     Purpose:
-        Bind the SQLAlchemy task-management repository and series service to
-        the request-scoped session used by task routes.
+        Build the task service through the composition root using the
+        request-scoped session used by task routes.
 
     Args:
         session: Request-scoped database session.
@@ -188,14 +185,7 @@ async def get_task_service(session: SessionDep) -> TaskService:
         - The service does not commit; ``SessionDep`` owns the transaction
           boundary.
     """
-    repository = SqlAlchemyTaskManagementRepository(session)
-    palette = PaletteService(repository)
-    series_service = SeriesService(
-        repository,
-        ProjectService(repository, palette),
-        LabelService(repository, palette),
-    )
-    return TaskService(repository, series_service)
+    return build_task_management_services(session).tasks
 
 
 SeriesServiceDep = Annotated[SeriesService, Depends(get_series_service)]
@@ -207,9 +197,9 @@ async def get_auth_service(request: Request, session: SessionDep) -> AuthService
     Build the authentication service for the current request.
 
     Purpose:
-        Bind the SQLAlchemy auth repository and application settings to the
-        request-scoped session used by login, refresh, logout, and the ``/me``
-        current-user lookup.
+        Build the authentication service through the composition root with the
+        application settings and the request-scoped session used by login,
+        refresh, logout, and the ``/me`` current-user lookup.
 
     Args:
         request: Incoming request carrying the application settings.
@@ -223,7 +213,7 @@ async def get_auth_service(request: Request, session: SessionDep) -> AuthService
           boundary.
     """
     settings: Settings = request.app.state.settings
-    return AuthService(SqlAlchemyAuthRepository(session), settings)
+    return build_auth_service(session, settings)
 
 
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]

@@ -47,19 +47,22 @@ async def test_generation_task_delegates_to_series_service(
     class FakeSeriesService:
         """Series service double recording the generation instant."""
 
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            """Store constructor arguments for optional inspection."""
-            self.args = args
-            self.kwargs = kwargs
-
         async def generate(self, now: datetime) -> int:
             """Record the generation instant and return a fixed count."""
             calls.append(now)
             return 3
 
-    monkeypatch.setattr(generation, "SeriesService", FakeSeriesService)
+    def fake_build_series_service(session: AsyncSession) -> FakeSeriesService:
+        """Return the series service double for the supplied job session."""
+        constructed["session"] = session
+        return FakeSeriesService()
+
+    constructed: dict[str, object] = {}
+    monkeypatch.setattr(generation, "build_series_service", fake_build_series_service)
     monkeypatch.setattr(generation, "datetime", FixedDateTime)
 
-    await generate_task_series(session=cast(AsyncSession, object()))
+    session = cast(AsyncSession, object())
+    await generate_task_series(session=session)
 
     assert calls == [_FIXED_NOW]
+    assert constructed["session"] is session

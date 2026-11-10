@@ -11,9 +11,9 @@ from backend.api.task_schemas import (
     LabelResponse,
     LabelUpdate,
 )
+from backend.application.task_management.palette import PaletteService
 from backend.core.errors import ErrorCode
-from backend.models.label import Label
-from backend.task_management.palette import PaletteService
+from backend.domain.entities import Label
 
 router = StandardizedAPIRouter(prefix="/labels", tags=["labels"])
 

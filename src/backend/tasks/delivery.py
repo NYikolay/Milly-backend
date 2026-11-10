@@ -6,12 +6,11 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 from taskiq import TaskiqDepends
 
+from backend.composition.task_management import build_reminder_dispatcher
 from backend.core.config import get_settings
-from backend.task_management.reminders import ReminderDispatcher
-from backend.task_management.repository import SqlAlchemyTaskManagementRepository
+from backend.infrastructure.telegram.sender import TelegramBotSender
 from backend.tasks.broker import broker
 from backend.tasks.deps import get_task_session
-from backend.tasks.telegram import TelegramBotSender
 
 logger = structlog.get_logger(__name__)
 
@@ -41,9 +40,8 @@ async def dispatch_task_reminders(
         - The bot token is read from application settings when the job starts.
         - Only the number of successful deliveries is logged.
     """
-    repository = SqlAlchemyTaskManagementRepository(session)
-    dispatcher = ReminderDispatcher(
-        repository,
+    dispatcher = build_reminder_dispatcher(
+        session,
         TelegramBotSender(get_settings()),
         clock=lambda: datetime.now(UTC),
     )

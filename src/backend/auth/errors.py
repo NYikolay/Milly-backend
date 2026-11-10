@@ -1,13 +1,10 @@
-from __future__ import annotations
+"""Compatibility re-exports of authentication errors."""
 
-from backend.core.errors import ErrorCode, SemanticAppError, UnauthorizedError
+from backend.application.auth.errors import (
+    AuthNotConfiguredError as AuthNotConfiguredError,
+)
+from backend.application.auth.errors import (
+    RefreshTokenGraceError as RefreshTokenGraceError,
+)
 
-
-class AuthNotConfiguredError(SemanticAppError):
-    """Raised when required authentication settings are missing."""
-
-    _code = ErrorCode.AUTH_NOT_CONFIGURED
-
-
-class RefreshTokenGraceError(UnauthorizedError):
-    """Raised when a just-rotated refresh token is reused within the grace window."""
+__all__ = ["AuthNotConfiguredError", "RefreshTokenGraceError"]

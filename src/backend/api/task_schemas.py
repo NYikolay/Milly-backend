@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend.api.pagination import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
-from backend.models.task_reminder import TaskReminder
+from backend.domain.entities import TaskReminder
 from backend.task_management.date_bounds import (
     require_supported_date,
     require_supported_datetime,

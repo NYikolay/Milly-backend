@@ -799,6 +799,7 @@ async def test_archive_project_pauses_task_reminders_and_deliveries() -> None:
     service = ProjectService(
         repository,
         PaletteService(repository),
+        repository,
         clock=fixed_now,
     )
 
@@ -883,6 +884,7 @@ async def test_unarchive_resumes_reminders_without_catching_up() -> None:
     service = ProjectService(
         repository,
         PaletteService(repository),
+        repository,
         clock=fixed_now,
     )
 
@@ -955,6 +957,7 @@ async def test_unarchive_resumes_scheduled_reminder_for_overdue_task() -> None:
     service = ProjectService(
         repository,
         PaletteService(repository),
+        repository,
         clock=fixed_now,
     )
 

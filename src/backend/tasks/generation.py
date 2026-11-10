@@ -6,11 +6,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 from taskiq import TaskiqDepends
 
-from backend.task_management.labels import LabelService
-from backend.task_management.palette import PaletteService
-from backend.task_management.projects import ProjectService
-from backend.task_management.repository import SqlAlchemyTaskManagementRepository
-from backend.task_management.series import SeriesService
+from backend.composition.task_management import build_series_service
 from backend.tasks.broker import broker
 from backend.tasks.deps import get_task_session
 
@@ -41,12 +37,6 @@ async def generate_task_series(
         - Concurrent workers skip series that are locked by another run.
         - Only the number of created instances is logged.
     """
-    repository = SqlAlchemyTaskManagementRepository(session)
-    palette_service = PaletteService(repository)
-    service = SeriesService(
-        repository,
-        ProjectService(repository, palette_service),
-        LabelService(repository, palette_service),
-    )
+    service = build_series_service(session)
     created = await service.generate(datetime.now(UTC))
     logger.info("task.series_generated", count=created)

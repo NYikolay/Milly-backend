@@ -173,7 +173,7 @@ def project_service(
     palette_service: PaletteService,
 ) -> ProjectService:
     """Build a project service backed by the in-memory repository."""
-    return ProjectService(repository, palette_service, clock=lambda: NOW)
+    return ProjectService(repository, palette_service, repository, clock=lambda: NOW)
 
 
 @pytest.fixture
@@ -186,16 +186,16 @@ def label_service(
 
 
 @pytest.fixture
-def series_service(
-    repository: FakeTaskManagementRepository,
-    project_service: ProjectService,
-    label_service: LabelService,
-) -> SeriesService:
+def series_service(repository: FakeTaskManagementRepository) -> SeriesService:
     """Build a series service backed by the in-memory repository."""
     return SeriesService(
         repository,
-        project_service,
-        label_service,
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
         clock=lambda: NOW,
     )
 
@@ -206,7 +206,17 @@ def task_service(
     series_service: SeriesService,
 ) -> TaskService:
     """Build a task service backed by the in-memory repository."""
-    return TaskService(repository, series_service, clock=lambda: NOW)
+    return TaskService(
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        series_service,
+        repository,
+        clock=lambda: NOW,
+    )
 
 
 @pytest.fixture

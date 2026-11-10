@@ -13,9 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.auth.errors import AuthNotConfiguredError
 from backend.core.config import Settings
-from backend.tasks import delivery, telegram
+from backend.infrastructure.telegram import sender as telegram_sender
+from backend.infrastructure.telegram.sender import TelegramBotSender
+from backend.tasks import delivery
 from backend.tasks.delivery import dispatch_task_reminders
-from backend.tasks.telegram import TelegramBotSender
 
 
 class FakeResponse:
@@ -60,31 +61,36 @@ async def test_delivery_task_delegates_to_dispatcher(
     class FakeDispatcher:
         """Reminder dispatcher double recording the dispatch call."""
 
-        def __init__(
-            self,
-            repository: object,
-            sender: object,
-            clock: Callable[[], datetime],
-        ) -> None:
-            """Record the dispatcher dependencies for later assertions."""
-            constructed["repository"] = repository
-            constructed["sender"] = sender
-            constructed["clock"] = clock
-
         async def dispatch_due(self) -> int:
             """Record the dispatch and return a fixed count."""
             dispatched.append(None)
             return 2
 
+    def fake_build_dispatcher(
+        session: AsyncSession,
+        sender: object,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] | None = None,
+    ) -> FakeDispatcher:
+        """Record the composition inputs and return the dispatcher double."""
+        constructed["session"] = session
+        constructed["sender"] = sender
+        constructed["clock"] = clock
+        constructed["monotonic"] = monotonic
+        return FakeDispatcher()
+
     settings = Settings(_env_file=None, telegram_bot_token="123:secret")
     sender = object()
-    monkeypatch.setattr(delivery, "ReminderDispatcher", FakeDispatcher)
+    session = cast(AsyncSession, object())
+    monkeypatch.setattr(delivery, "build_reminder_dispatcher", fake_build_dispatcher)
     monkeypatch.setattr(delivery, "TelegramBotSender", lambda _: sender)
     monkeypatch.setattr(delivery, "get_settings", lambda: settings)
 
-    await dispatch_task_reminders(session=cast(AsyncSession, object()))
+    await dispatch_task_reminders(session=session)
 
     assert dispatched == [None]
+    assert constructed["session"] is session
     assert constructed["sender"] is sender
     clock = cast(Callable[[], datetime], constructed["clock"])
     assert clock().tzinfo is UTC
@@ -113,7 +119,7 @@ async def test_telegram_sender_posts_and_returns_message_id(
         captured["timeout"] = timeout
         return FakeResponse(b'{"ok": true, "result": {"message_id": 42}}')
 
-    monkeypatch.setattr(telegram, "urlopen", fake_urlopen)
+    monkeypatch.setattr(telegram_sender, "urlopen", fake_urlopen)
 
     message_id = await sender.send(7, "Reminder text")
 
@@ -139,7 +145,7 @@ async def test_telegram_sender_failure_message_is_safe(
         """Return a Telegram payload that rejects the message."""
         return FakeResponse(b'{"ok": false, "description": "Bad Request"}')
 
-    monkeypatch.setattr(telegram, "urlopen", fake_urlopen)
+    monkeypatch.setattr(telegram_sender, "urlopen", fake_urlopen)
 
     with pytest.raises(RuntimeError) as excinfo:
         await sender.send(7, "Secret reminder text")
@@ -161,7 +167,7 @@ async def test_telegram_sender_network_failure_message_is_safe(
         """Raise a network-level URL error before any HTTP response exists."""
         raise URLError("connection refused")
 
-    monkeypatch.setattr(telegram, "urlopen", failing_urlopen)
+    monkeypatch.setattr(telegram_sender, "urlopen", failing_urlopen)
 
     with pytest.raises(RuntimeError) as excinfo:
         await sender.send(7, "Secret reminder text")

@@ -11,9 +11,7 @@ from httpx import ASGITransport, AsyncClient
 from backend.api.deps import get_current_access, get_series_service
 from backend.auth.tokens import AccessTokenClaims
 from backend.core.errors import NotFoundError
-from backend.models.label import Label
-from backend.models.task_reminder import TaskReminder
-from backend.models.task_series import TaskSeries
+from backend.domain.entities import Label, TaskReminder, TaskSeries
 from backend.task_management.enums import Priority, ReminderKind
 from backend.task_management.series import SeriesDetail
 
