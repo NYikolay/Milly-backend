@@ -5,8 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from backend.domain.entities import ColorPalette, Label
-from backend.models.project import Project
+from backend.domain.entities import ColorPalette, Label, Project
 from backend.models.reminder_delivery import ReminderDelivery
 from backend.models.task import Task
 from backend.models.task_label import TaskLabel
@@ -120,9 +119,9 @@ class FakeTaskManagementRepository:
         self.colors[color.id] = color
         return color
 
-    def insert_project(self, project: Project) -> Project:
-        """Insert a project and return it."""
-        if project.id is None:
+    def insert_project(self, project: Project) -> Any:
+        """Insert a domain project and return it."""
+        if not project.id:
             project.id = self._next_id("project", self.projects)
         self.projects[project.id] = project
         return project
@@ -243,7 +242,7 @@ class FakeTaskManagementRepository:
         after_archived: bool | None,
         after_name: str | None,
         after_project_id: int | None,
-    ) -> Sequence[tuple[Project, str]]:
+    ) -> Any:
         """List one cursor-bounded page of projects with lower-case name keys."""
         rows = sorted(
             (
@@ -278,8 +277,8 @@ class FakeTaskManagementRepository:
         project_id: int,
         *,
         for_update: bool = False,
-    ) -> Project | None:
-        """Return a non-deleted project owned by a user."""
+    ) -> Any:
+        """Return a non-deleted domain project owned by a user."""
         project = self.projects.get(project_id)
         if project is None or project.user_id != user_id or project.deleted_at is not None:
             return None
@@ -289,7 +288,7 @@ class FakeTaskManagementRepository:
         self,
         user_id: int,
         project_ids: Sequence[int],
-    ) -> dict[int, Project]:
+    ) -> Any:
         """Return non-deleted projects owned by a user keyed by identifier."""
         self.batch_calls.append(("get_projects_by_ids", tuple(project_ids)))
         projects = [await self.get_project(user_id, project_id) for project_id in project_ids]
@@ -312,9 +311,14 @@ class FakeTaskManagementRepository:
             for project in self.projects.values()
         )
 
-    async def add_project(self, project: Project) -> Project:
+    async def add_project(self, project: Any) -> Any:
         """Persist a project."""
         return self.insert_project(project)
+
+    async def save_project(self, project: Any) -> None:
+        """Persist changed project fields and record the save."""
+        self.saved_projects.append(project.id)
+        self.projects[project.id] = project
 
     async def count_projects(self, user_id: int, *, archived: bool) -> int:
         """Count non-deleted projects in one archive state."""
@@ -374,7 +378,7 @@ class FakeTaskManagementRepository:
 
     async def soft_delete_project(
         self,
-        project: Project,
+        project: Any,
         batch_id: UUID,
         deleted_at: datetime,
     ) -> None:
@@ -1182,19 +1186,20 @@ def fixed_now() -> datetime:
 
 def make_project(
     *,
-    project_id: int | None = None,
+    project_id: int = 0,
     user_id: int = 7,
     name: str = "Work",
+    color_id: int = 1,
     archived_at: datetime | None = None,
     deleted_at: datetime | None = None,
 ) -> Project:
-    """Build a project with deterministic values."""
+    """Build a domain project with deterministic values."""
     return Project(
         id=project_id,
         user_id=user_id,
         name=name,
         description=None,
-        color_id=1,
+        color_id=color_id,
         icon=None,
         archived_at=archived_at,
         deleted_at=deleted_at,

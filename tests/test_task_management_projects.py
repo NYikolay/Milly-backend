@@ -1,24 +1,29 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import cast
 from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
 
 from backend.api.pagination import DEFAULT_PAGE_SIZE
+from backend.application.ports.task_management import (
+    PaletteRepository,
+    ProjectRepository,
+    ReminderRepository,
+)
+from backend.application.task_management.palette import PaletteService
+from backend.application.task_management.projects import ProjectService
 from backend.core.errors import BadRequestError, ConflictError, ErrorCode, NotFoundError
-from backend.models.color_palette import ColorPalette
-from backend.models.project import Project
-from backend.task_management.palette import PaletteService
-from backend.task_management.ports import TaskManagementRepository
-from backend.task_management.projects import (
+from backend.domain.entities import ColorPalette, Project
+from backend.domain.task_management.models import (
     ProjectListCursor,
     ProjectPage,
     ProjectProgress,
-    ProjectService,
     ProjectSummary,
 )
+from tests.task_management_fakes import FakeTaskManagementRepository, fixed_now
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
 USER_ID = 7
@@ -30,8 +35,18 @@ def clock() -> datetime:
 
 
 def make_repository() -> AsyncMock:
-    """Build an async repository double constrained to the task-management port."""
-    return AsyncMock(spec=TaskManagementRepository)
+    """Build an async repository double constrained to the project port."""
+    return AsyncMock(spec=ProjectRepository)
+
+
+def make_palette_repository() -> AsyncMock:
+    """Build an async repository double constrained to the palette port."""
+    return AsyncMock(spec=PaletteRepository)
+
+
+def make_reminder_repository() -> AsyncMock:
+    """Build an async repository double constrained to the reminder port."""
+    return AsyncMock(spec=ReminderRepository)
 
 
 def make_color(*, color_id: int = 1) -> ColorPalette:
@@ -67,9 +82,17 @@ def make_project(
     )
 
 
-def make_service(repository: AsyncMock) -> ProjectService:
+def make_service(
+    repository: AsyncMock,
+    palette_repository: AsyncMock | None = None,
+    reminder_repository: AsyncMock | None = None,
+) -> ProjectService:
     """Build a project service with the fixed clock and real palette rules."""
-    return ProjectService(repository, PaletteService(repository), clock=clock)
+    palette = palette_repository if palette_repository is not None else make_palette_repository()
+    reminders = (
+        reminder_repository if reminder_repository is not None else make_reminder_repository()
+    )
+    return ProjectService(repository, PaletteService(palette), reminders, clock=clock)
 
 
 async def _return_project(project: Project) -> Project:
@@ -80,13 +103,14 @@ async def _return_project(project: Project) -> Project:
 async def test_list_returns_progress_and_palette_color() -> None:
     """Project summaries include task progress and the assigned palette color."""
     repository = make_repository()
+    palette_repository = make_palette_repository()
     project = make_project()
     color = make_color()
     repository.list_projects.return_value = [(project, "work")]
     repository.project_progress_for_projects.return_value = {project.id: (5, 2)}
-    repository.get_palette_colors_by_ids.return_value = {color.id: color}
+    palette_repository.get_palette_colors_by_ids.return_value = {color.id: color}
 
-    service = make_service(repository)
+    service = make_service(repository, palette_repository)
 
     result = await service.list(
         USER_ID,
@@ -113,26 +137,27 @@ async def test_list_returns_progress_and_palette_color() -> None:
         after_project_id=None,
     )
     repository.project_progress_for_projects.assert_awaited_once_with(USER_ID, [project.id])
-    repository.get_palette_colors_by_ids.assert_awaited_once_with([color.id])
+    palette_repository.get_palette_colors_by_ids.assert_awaited_once_with([color.id])
     repository.project_progress.assert_not_awaited()
-    repository.get_palette_color.assert_not_awaited()
+    palette_repository.get_palette_color.assert_not_awaited()
 
 
 async def test_list_uses_grouped_progress_and_colors() -> None:
     """A project page loads progress and colors with one batch query each."""
     repository = make_repository()
+    palette_repository = make_palette_repository()
     first = make_project(project_id=1, name="Alpha")
     second = make_project(project_id=2, name="Beta", color_id=2)
     first_color = make_color(color_id=1)
     second_color = make_color(color_id=2)
     repository.list_projects.return_value = [(first, "alpha"), (second, "beta")]
     repository.project_progress_for_projects.return_value = {1: (5, 2), 2: (1, 1)}
-    repository.get_palette_colors_by_ids.return_value = {
+    palette_repository.get_palette_colors_by_ids.return_value = {
         1: first_color,
         2: second_color,
     }
 
-    service = make_service(repository)
+    service = make_service(repository, palette_repository)
 
     page = await service.list(
         USER_ID,
@@ -144,14 +169,15 @@ async def test_list_uses_grouped_progress_and_colors() -> None:
     assert page.items[0].progress == ProjectProgress(total=5, completed=2, remaining=3)
     assert page.items[1].color is second_color
     repository.project_progress_for_projects.assert_awaited_once_with(USER_ID, [1, 2])
-    repository.get_palette_colors_by_ids.assert_awaited_once_with([1, 2])
+    palette_repository.get_palette_colors_by_ids.assert_awaited_once_with([1, 2])
     repository.project_progress.assert_not_awaited()
-    repository.get_palette_color.assert_not_awaited()
+    palette_repository.get_palette_color.assert_not_awaited()
 
 
 async def test_list_returns_cursor_from_last_kept_project() -> None:
     """An extra repository row signals another page and yields its cursor."""
     repository = make_repository()
+    palette_repository = make_palette_repository()
     projects = [
         make_project(project_id=1, name="Alpha"),
         make_project(project_id=2, name="Beta", archived_at=NOW),
@@ -164,9 +190,9 @@ async def test_list_returns_cursor_from_last_kept_project() -> None:
         (projects[2], "gamma"),
     ]
     repository.project_progress_for_projects.return_value = {}
-    repository.get_palette_colors_by_ids.return_value = {color.id: color}
+    palette_repository.get_palette_colors_by_ids.return_value = {color.id: color}
 
-    service = make_service(repository)
+    service = make_service(repository, palette_repository)
 
     page = await service.list(USER_ID, include_archived=True, limit=2)
 
@@ -181,6 +207,7 @@ async def test_list_returns_cursor_from_last_kept_project() -> None:
 async def test_list_hides_archived_projects_unless_requested() -> None:
     """Archived projects disappear from active lists but remain available."""
     repository = make_repository()
+    palette_repository = make_palette_repository()
     active = make_project(project_id=1, name="Active")
     archived = make_project(project_id=2, name="Archived", archived_at=NOW)
     color = make_color()
@@ -208,9 +235,9 @@ async def test_list_hides_archived_projects_unless_requested() -> None:
 
     repository.list_projects.side_effect = list_projects
     repository.project_progress_for_projects.return_value = {1: (0, 0), 2: (0, 0)}
-    repository.get_palette_colors_by_ids.return_value = {color.id: color}
+    palette_repository.get_palette_colors_by_ids.return_value = {color.id: color}
 
-    service = make_service(repository)
+    service = make_service(repository, palette_repository)
 
     active_result = await service.list(
         USER_ID,
@@ -230,12 +257,13 @@ async def test_list_hides_archived_projects_unless_requested() -> None:
 async def test_list_raises_not_found_for_missing_color() -> None:
     """A page that references a missing palette color fails like a single lookup."""
     repository = make_repository()
+    palette_repository = make_palette_repository()
     project = make_project()
     repository.list_projects.return_value = [(project, "work")]
     repository.project_progress_for_projects.return_value = {project.id: (0, 0)}
-    repository.get_palette_colors_by_ids.return_value = {}
+    palette_repository.get_palette_colors_by_ids.return_value = {}
 
-    service = make_service(repository)
+    service = make_service(repository, palette_repository)
 
     with pytest.raises(NotFoundError) as error:
         await service.list(USER_ID, include_archived=False, limit=DEFAULT_PAGE_SIZE)
@@ -246,13 +274,14 @@ async def test_list_raises_not_found_for_missing_color() -> None:
 async def test_get_summary_returns_progress_and_color() -> None:
     """A single project summary uses one project, progress, and color lookup."""
     repository = make_repository()
+    palette_repository = make_palette_repository()
     project = make_project()
     color = make_color()
     repository.get_project.return_value = project
     repository.project_progress.return_value = (5, 2)
-    repository.get_palette_color.return_value = color
+    palette_repository.get_palette_color.return_value = color
 
-    service = make_service(repository)
+    service = make_service(repository, palette_repository)
 
     result = await service.get_summary(USER_ID, project.id)
 
@@ -263,7 +292,7 @@ async def test_get_summary_returns_progress_and_color() -> None:
     )
     repository.get_project.assert_awaited_once_with(USER_ID, project.id, for_update=False)
     repository.project_progress.assert_awaited_once_with(USER_ID, project.id)
-    repository.get_palette_color.assert_awaited_once_with(color.id)
+    palette_repository.get_palette_color.assert_awaited_once_with(color.id)
     repository.list_projects.assert_not_awaited()
 
 
@@ -297,12 +326,13 @@ async def test_get_cross_user_project_raises_not_found() -> None:
 async def test_create_trims_name_and_uses_default_color() -> None:
     """Project creation strips the name and resolves the default active color."""
     repository = make_repository()
+    palette_repository = make_palette_repository()
     color = make_color()
     repository.project_name_exists.return_value = False
-    repository.get_default_palette_color.return_value = color
+    palette_repository.get_default_palette_color.return_value = color
     repository.add_project.side_effect = _return_project
 
-    service = make_service(repository)
+    service = make_service(repository, palette_repository)
 
     result = await service.create(
         USER_ID,
@@ -318,7 +348,7 @@ async def test_create_trims_name_and_uses_default_color() -> None:
     assert result.color_id == color.id
     assert result.icon == "briefcase-business"
     repository.project_name_exists.assert_awaited_once_with(USER_ID, "Work")
-    repository.get_default_palette_color.assert_awaited_once_with()
+    palette_repository.get_default_palette_color.assert_awaited_once_with()
     repository.add_project.assert_awaited_once_with(result)
 
 
@@ -352,15 +382,16 @@ async def test_create_rejects_duplicate_active_name() -> None:
 async def test_update_changes_trimmed_name_and_clears_optional_fields() -> None:
     """Project updates trim names and clear optional fields when explicitly None."""
     repository = make_repository()
+    palette_repository = make_palette_repository()
     project = make_project()
     project.description = "Old"
     project.icon = "leaf"
     new_color = make_color(color_id=2)
     repository.get_project.return_value = project
     repository.project_name_exists.return_value = False
-    repository.get_palette_color.return_value = new_color
+    palette_repository.get_palette_color.return_value = new_color
 
-    service = make_service(repository)
+    service = make_service(repository, palette_repository)
 
     result = await service.update(
         USER_ID,
@@ -381,7 +412,8 @@ async def test_update_changes_trimmed_name_and_clears_optional_fields() -> None:
         "Renamed",
         exclude_project_id=project.id,
     )
-    repository.get_palette_color.assert_awaited_once_with(new_color.id)
+    palette_repository.get_palette_color.assert_awaited_once_with(new_color.id)
+    repository.save_project.assert_awaited_once_with(project)
 
 
 async def test_update_keeps_omitted_optional_fields() -> None:
@@ -398,14 +430,16 @@ async def test_update_keeps_omitted_optional_fields() -> None:
 
     assert project.description == "Keep"
     assert project.icon == "leaf"
+    repository.save_project.assert_awaited_once_with(project)
 
 
 async def test_update_cannot_move_to_inactive_color() -> None:
     """Moving a project to an inactive palette color is rejected."""
     repository = make_repository()
+    palette_repository = make_palette_repository()
     project = make_project(color_id=1)
     repository.get_project.return_value = project
-    repository.get_palette_color.return_value = ColorPalette(
+    palette_repository.get_palette_color.return_value = ColorPalette(
         id=9,
         slug="inactive",
         name="Inactive",
@@ -414,13 +448,14 @@ async def test_update_cannot_move_to_inactive_color() -> None:
         is_active=False,
     )
 
-    service = make_service(repository)
+    service = make_service(repository, palette_repository)
 
     with pytest.raises(BadRequestError) as error:
         await service.update(USER_ID, project.id, color_id=9)
 
     assert error.value.code is ErrorCode.BAD_REQUEST
     assert project.color_id == 1
+    repository.save_project.assert_not_awaited()
 
 
 async def test_update_rejects_empty_name() -> None:
@@ -433,6 +468,8 @@ async def test_update_rejects_empty_name() -> None:
 
     with pytest.raises(BadRequestError):
         await service.update(USER_ID, project.id, name="  ")
+
+    repository.save_project.assert_not_awaited()
 
 
 async def test_update_rejects_duplicate_name() -> None:
@@ -448,45 +485,72 @@ async def test_update_rejects_duplicate_name() -> None:
         await service.update(USER_ID, project.id, name="Other")
 
     assert str(error.value) == "Project name already exists"
+    repository.save_project.assert_not_awaited()
 
 
 async def test_archive_sets_archived_at() -> None:
     """Archiving records the injected current time."""
     repository = make_repository()
+    reminder_repository = make_reminder_repository()
     project = make_project()
     repository.get_project.return_value = project
 
-    service = make_service(repository)
+    service = make_service(repository, reminder_repository=reminder_repository)
 
     result = await service.archive(USER_ID, project.id)
 
     assert result is project
     assert project.archived_at == NOW
     repository.get_project.assert_awaited_once_with(USER_ID, project.id, for_update=True)
+    reminder_repository.pause_project_reminders.assert_awaited_once_with(USER_ID, project.id)
+    repository.save_project.assert_awaited_once_with(project)
 
 
 async def test_archive_keeps_existing_archive_timestamp() -> None:
     """Archiving an already archived project does not move its timestamp."""
     older = datetime(2026, 10, 1, 8, 0, tzinfo=UTC)
     repository = make_repository()
+    reminder_repository = make_reminder_repository()
     project = make_project(archived_at=older)
     repository.get_project.return_value = project
 
-    service = make_service(repository)
+    service = make_service(repository, reminder_repository=reminder_repository)
 
     await service.archive(USER_ID, project.id)
 
     assert project.archived_at == older
+    reminder_repository.pause_project_reminders.assert_not_awaited()
+    repository.save_project.assert_not_awaited()
+
+
+async def test_project_archive_delegates_reminder_pause() -> None:
+    """Project archive pauses project reminders and persists the entity."""
+    repository = FakeTaskManagementRepository()
+    reminder_repository = make_reminder_repository()
+    project = repository.insert_project(make_project())
+    service = ProjectService(
+        repository,
+        PaletteService(repository),
+        reminder_repository,
+        clock=fixed_now,
+    )
+
+    archived = await service.archive(USER_ID, project.id)
+
+    assert archived.archived_at == fixed_now()
+    assert repository.saved_projects == [project.id]
+    reminder_repository.pause_project_reminders.assert_awaited_once_with(USER_ID, project.id)
 
 
 async def test_unarchive_clears_archived_at() -> None:
     """Unarchiving a project makes it active again."""
     repository = make_repository()
+    reminder_repository = make_reminder_repository()
     project = make_project(archived_at=NOW)
     repository.get_project.return_value = project
     repository.project_name_exists.return_value = False
 
-    service = make_service(repository)
+    service = make_service(repository, reminder_repository=reminder_repository)
 
     result = await service.unarchive(USER_ID, project.id)
 
@@ -497,6 +561,12 @@ async def test_unarchive_clears_archived_at() -> None:
         project.name,
         exclude_project_id=project.id,
     )
+    reminder_repository.resume_project_reminders.assert_awaited_once_with(
+        USER_ID,
+        project.id,
+        NOW,
+    )
+    repository.save_project.assert_awaited_once_with(project)
 
 
 async def test_unarchive_rebuilds_every_series_and_task_reminder() -> None:
@@ -505,7 +575,6 @@ async def test_unarchive_rebuilds_every_series_and_task_reminder() -> None:
 
     from backend.task_management.enums import ReminderKind
     from tests.task_management_fakes import (
-        FakeTaskManagementRepository,
         make_reminder,
         make_series,
         make_task,
@@ -581,7 +650,12 @@ async def test_unarchive_rebuilds_every_series_and_task_reminder() -> None:
             next_run_at=NOW,
         )
     )
-    service = ProjectService(repository, PaletteService(repository), clock=clock)
+    service = ProjectService(
+        repository,
+        PaletteService(repository),
+        cast(ReminderRepository, repository),
+        clock=clock,
+    )
 
     await service.unarchive(USER_ID, project.id)
 
@@ -591,22 +665,26 @@ async def test_unarchive_rebuilds_every_series_and_task_reminder() -> None:
     assert second_template.timezone == "Europe/Berlin"
     assert first_task_reminder.next_run_at == first_task.due_at - timedelta(minutes=30)
     assert second_task_reminder.next_run_at == second_task.due_at - timedelta(minutes=15)
+    assert repository.saved_projects == [project.id]
 
 
 async def test_unarchive_rejects_name_conflict_with_active_project() -> None:
     """Unarchiving a project whose name is active elsewhere raises a conflict."""
     repository = make_repository()
+    reminder_repository = make_reminder_repository()
     project = make_project(name="Work", archived_at=NOW)
     repository.get_project.return_value = project
     repository.project_name_exists.return_value = True
 
-    service = make_service(repository)
+    service = make_service(repository, reminder_repository=reminder_repository)
 
     with pytest.raises(ConflictError) as error:
         await service.unarchive(USER_ID, project.id)
 
     assert str(error.value) == "Project name already exists"
     assert project.archived_at == NOW
+    reminder_repository.resume_project_reminders.assert_not_awaited()
+    repository.save_project.assert_not_awaited()
 
 
 async def test_delete_soft_deletes_project_with_batch_and_cancels_deliveries() -> None:
@@ -626,6 +704,7 @@ async def test_delete_soft_deletes_project_with_batch_and_cancels_deliveries() -
     assert isinstance(call.args[1], UUID)
     assert call.args[2] == NOW
     repository.get_project.assert_awaited_once_with(USER_ID, project.id, for_update=True)
+    repository.save_project.assert_not_awaited()
 
 
 async def test_stats_returns_active_archived_and_planned_counts() -> None:
@@ -659,3 +738,21 @@ async def test_delete_cross_user_project_raises_not_found() -> None:
         await service.delete(USER_ID, 999)
 
     repository.soft_delete_project.assert_not_awaited()
+
+
+async def test_project_update_persists_mutated_domain_entity() -> None:
+    """Project updates call save_project after mutating the domain entity."""
+    repository = FakeTaskManagementRepository()
+    project = repository.insert_project(make_project(name="Old"))
+    service = ProjectService(
+        repository,
+        PaletteService(repository),
+        cast(ReminderRepository, repository),
+        clock=fixed_now,
+    )
+
+    updated = await service.update(USER_ID, project.id, name="New")
+
+    assert updated.name == "New"
+    assert repository.saved_projects == [project.id]
+    assert repository.projects[project.id].name == "New"

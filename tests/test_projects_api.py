@@ -11,9 +11,8 @@ from backend.api.deps import get_current_access, get_project_service
 from backend.api.pagination import MAX_DB_ID, encode_cursor, filter_fingerprint
 from backend.auth.tokens import AccessTokenClaims
 from backend.core.errors import ConflictError, NotFoundError
-from backend.models.color_palette import ColorPalette
-from backend.models.project import Project
-from backend.task_management.projects import (
+from backend.domain.entities import ColorPalette, Project
+from backend.domain.task_management.models import (
     ProjectListCursor,
     ProjectPage,
     ProjectProgress,

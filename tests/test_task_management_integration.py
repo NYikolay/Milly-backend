@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
+from typing import Any, cast
 
 import pytest
 
 from backend.api.pagination import DEFAULT_PAGE_SIZE
+from backend.application.ports.task_management import ReminderRepository
+from backend.application.task_management.projects import ProjectService
 from backend.core.errors import NotFoundError
 from backend.models.color_palette import ColorPalette
 from backend.task_management.enums import Priority, ReminderKind
 from backend.task_management.labels import LabelService
 from backend.task_management.palette import PaletteService
-from backend.task_management.projects import ProjectService
 from backend.task_management.reminders import ReminderDispatcher, ReminderInput
 from backend.task_management.schedule import HORIZON_DAYS
 from backend.task_management.series import SeriesService
@@ -56,9 +58,14 @@ def make_services(
             test clock.
     """
     palette = PaletteService(repository)
-    projects = ProjectService(repository, palette, clock=fixed_now)
+    projects = ProjectService(
+        repository,
+        cast(Any, palette),
+        cast(ReminderRepository, repository),
+        clock=fixed_now,
+    )
     labels = LabelService(repository, palette, clock=fixed_now)
-    series = SeriesService(repository, projects, labels, clock=fixed_now)
+    series = SeriesService(repository, cast(Any, projects), labels, clock=fixed_now)
     tasks = TaskService(repository, series, clock=fixed_now)
     return palette, projects, series, tasks
 
