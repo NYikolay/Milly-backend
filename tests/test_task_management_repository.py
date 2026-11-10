@@ -9,13 +9,22 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.domain.entities import ColorPalette as ColorPaletteEntity
+from backend.domain.entities import Label as LabelEntity
 from backend.domain.entities import Project as ProjectEntity
+from backend.domain.entities import Task as TaskEntity
+from backend.domain.entities import TaskLabel as TaskLabelEntity
 from backend.infrastructure.persistence.sqlalchemy.account_repository import (
     SqlAlchemyAccountRepository,
 )
+from backend.infrastructure.persistence.sqlalchemy.label_repository import (
+    SqlAlchemyLabelRepository,
+)
 from backend.infrastructure.persistence.sqlalchemy.mappers import (
     color_to_entity,
+    label_to_entity,
     project_to_entity,
+    reminder_to_entity,
+    task_to_entity,
 )
 from backend.infrastructure.persistence.sqlalchemy.palette_repository import (
     SqlAlchemyPaletteRepository,
@@ -23,12 +32,14 @@ from backend.infrastructure.persistence.sqlalchemy.palette_repository import (
 from backend.infrastructure.persistence.sqlalchemy.project_repository import (
     SqlAlchemyProjectRepository,
 )
+from backend.infrastructure.persistence.sqlalchemy.task_repository import (
+    SqlAlchemyTaskRepository,
+)
 from backend.models.color_palette import ColorPalette
 from backend.models.project import Project
-from backend.models.task_label import TaskLabel
 from backend.models.task_reminder import TaskReminder
 from backend.task_management.repository import SqlAlchemyTaskManagementRepository
-from tests.task_management_fakes import make_task
+from tests.task_management_fakes import make_label, make_reminder, make_task
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
 USER_ID = 7
@@ -272,6 +283,16 @@ def make_account_repository(session: RecordingSession) -> SqlAlchemyAccountRepos
 def make_project_repository(session: RecordingSession) -> SqlAlchemyProjectRepository:
     """Build a project adapter bound to the recording session."""
     return SqlAlchemyProjectRepository(cast(AsyncSession, session))
+
+
+def make_label_repository(session: RecordingSession) -> SqlAlchemyLabelRepository:
+    """Build a label adapter bound to the recording session."""
+    return SqlAlchemyLabelRepository(cast(AsyncSession, session))
+
+
+def make_task_repository(session: RecordingSession) -> SqlAlchemyTaskRepository:
+    """Build a task adapter bound to the recording session."""
+    return SqlAlchemyTaskRepository(cast(AsyncSession, session))
 
 
 def compile_statement(statement: Any) -> str:
@@ -543,7 +564,7 @@ async def test_label_name_exists_is_case_insensitive_non_deleted_and_excludes_id
             RecordingResult(scalar=None),
         ]
     )
-    repository = make_repository(session)
+    repository = make_label_repository(session)
 
     exists = await repository.label_name_exists(USER_ID, "Home", exclude_label_id=9)
     without_exclusion = await repository.label_name_exists(USER_ID, "Home")
@@ -561,11 +582,101 @@ async def test_label_name_exists_is_case_insensitive_non_deleted_and_excludes_id
     assert "labels.id !=" not in plain_sql
 
 
+async def test_label_repository_lists_domain_labels_in_display_order() -> None:
+    """Label listing maps ORM rows to domain labels ordered by name and id."""
+    first = make_label(label_id=2, name="Home")
+    second = make_label(label_id=3, name="Work")
+    session = RecordingSession(results=[RecordingResult(values=[first, second])])
+    repository = make_label_repository(session)
+
+    labels = await repository.list_labels(USER_ID)
+    sql = compile_statement(session.statements[-1])
+
+    assert list(labels) == [label_to_entity(first), label_to_entity(second)]
+    assert isinstance(labels[0], LabelEntity)
+    assert "labels.user_id = 7" in sql
+    assert "labels.deleted_at IS NULL" in sql
+    assert "ORDER BY lower(labels.name), labels.id" in sql
+
+
+async def test_label_repository_returns_domain_label() -> None:
+    """Label lookup maps the ORM row to a domain label."""
+    row = make_label(label_id=9, name="Home")
+    session = RecordingSession(results=[RecordingResult(scalar=row)])
+    repository = make_label_repository(session)
+
+    label = await repository.get_label(USER_ID, 9)
+
+    assert label == label_to_entity(row)
+
+
+async def test_label_add_inserts_fresh_row_without_domain_id() -> None:
+    """New labels insert a fresh ORM row and return a domain entity."""
+    session = RecordingSession()
+    repository = make_label_repository(session)
+    label = LabelEntity(user_id=USER_ID, name="Home", color_id=2)
+
+    result = await repository.add_label(label)
+
+    assert len(session.added) == 1
+    row = session.added[0]
+    assert row.id is None
+    assert row.user_id == USER_ID
+    assert row.name == "Home"
+    assert row.color_id == 2
+    assert isinstance(result, LabelEntity)
+    assert result.name == "Home"
+    assert session.flush_count == 1
+
+
+async def test_label_save_issues_update() -> None:
+    """Saving a label applies the domain fields to the tracked row."""
+    row = make_label(label_id=9, name="Old")
+    session = RecordingSession(get_results=[row])
+    repository = make_label_repository(session)
+    label = LabelEntity(id=9, user_id=USER_ID, name="New", color_id=3)
+
+    await repository.save_label(label)
+
+    assert row.name == "New"
+    assert row.color_id == 3
+    assert session.flush_count == 1
+    assert session.statements == []
+
+
+async def test_label_save_transient_delegates_to_add() -> None:
+    """Saving a transient label inserts it instead of updating."""
+    session = RecordingSession()
+    repository = make_label_repository(session)
+    label = LabelEntity(user_id=USER_ID, name="Home", color_id=1)
+
+    await repository.save_label(label)
+
+    assert len(session.added) == 1
+    assert session.added[0].id is None
+    assert session.flush_count == 1
+
+
+async def test_label_soft_delete_issues_scoped_update() -> None:
+    """Soft-deleting a label marks the domain entity and updates only its row."""
+    session = RecordingSession()
+    repository = make_label_repository(session)
+    label = LabelEntity(id=9, user_id=USER_ID, name="Home", color_id=1)
+
+    await repository.soft_delete_label(label, NOW)
+    sql = compile_statement(session.statements[-1])
+
+    assert label.deleted_at == NOW
+    assert sql.startswith("UPDATE labels SET deleted_at=")
+    assert "labels.id = 9" in sql
+    assert session.flush_count == 1
+
+
 async def test_get_project_and_label_are_tenant_scoped_and_can_lock() -> None:
     """Project and label lookups filter by owner, exclude deleted rows, and lock on demand."""
     session = RecordingSession()
     project_repository = make_project_repository(session)
-    label_repository = make_repository(session)
+    label_repository = make_label_repository(session)
 
     await project_repository.get_project(USER_ID, PROJECT_ID)
     project_sql = compile_statement(session.statements[-1])
@@ -865,29 +976,45 @@ async def test_list_series_due_times_filters_future_slots() -> None:
 
 
 async def test_add_tasks_bulk_adds_and_flushes_once() -> None:
-    """Bulk task insertion adds every task and flushes a single time."""
+    """Bulk task insertion builds fresh rows, maps domains, and flushes once."""
     session = RecordingSession()
-    repository = make_repository(session)
+    repository = make_task_repository(session)
     tasks = [
-        make_task(due_at=NOW),
-        make_task(due_at=NOW + timedelta(days=1)),
+        TaskEntity(user_id=USER_ID, title="First", due_at=NOW),
+        TaskEntity(user_id=USER_ID, title="Second", due_at=NOW + timedelta(days=1)),
     ]
 
     result = await repository.add_tasks(tasks)
 
-    assert list(result) == tasks
-    assert session.added == tasks
+    assert [task.title for task in result] == ["First", "Second"]
+    assert all(isinstance(task, TaskEntity) for task in result)
+    assert [row.title for row in session.added] == ["First", "Second"]
+    assert all(row.id is None for row in session.added)
     assert session.flush_count == 1
 
 
-async def test_bulk_label_and_reminder_rows_add_all_and_flush_once() -> None:
-    """Bulk label and reminder insertion adds every row and flushes once each."""
+async def test_bulk_task_label_rows_adds_orm_rows_and_flushes_once() -> None:
+    """Bulk task-label insertion maps domain rows and flushes once."""
+    session = RecordingSession()
+    repository = make_task_repository(session)
+    rows = [
+        TaskLabelEntity(task_id=1, label_id=2, user_id=USER_ID),
+        TaskLabelEntity(task_id=1, label_id=3, user_id=USER_ID),
+    ]
+
+    await repository.add_task_label_rows(rows)
+
+    assert [(row.task_id, row.label_id, row.user_id) for row in session.added] == [
+        (1, 2, USER_ID),
+        (1, 3, USER_ID),
+    ]
+    assert session.flush_count == 1
+
+
+async def test_bulk_reminder_rows_add_all_and_flush_once() -> None:
+    """Bulk reminder insertion adds every row and flushes once."""
     session = RecordingSession()
     repository = make_repository(session)
-    rows = [
-        TaskLabel(task_id=1, label_id=2, user_id=USER_ID),
-        TaskLabel(task_id=1, label_id=3, user_id=USER_ID),
-    ]
     reminders = [
         TaskReminder(
             user_id=USER_ID,
@@ -905,20 +1032,20 @@ async def test_bulk_label_and_reminder_rows_add_all_and_flush_once() -> None:
         ),
     ]
 
-    await repository.add_task_label_rows(rows)
     await repository.add_reminders(reminders)
 
-    assert session.added == rows + reminders
-    assert session.flush_count == 2
+    assert session.added == reminders
+    assert session.flush_count == 1
 
 
 async def test_bulk_add_methods_skip_empty_input() -> None:
     """Bulk insertion with no rows is a no-op without a flush."""
     session = RecordingSession()
+    task_repository = make_task_repository(session)
     repository = make_repository(session)
 
-    tasks = await repository.add_tasks([])
-    await repository.add_task_label_rows([])
+    tasks = await task_repository.add_tasks([])
+    await task_repository.add_task_label_rows([])
     await repository.add_reminders([])
 
     assert list(tasks) == []
@@ -1102,12 +1229,11 @@ async def test_resume_project_reminders_clears_slot_on_datetime_overflow() -> No
     assert reminder.next_run_at is None
 
 
-async def test_list_tasks_applies_cursor_and_limit() -> None:
-    """Task pagination applies the compound cursor predicate and a bounded limit."""
-    session = RecordingSession()
-    repository = make_repository(session)
-
-    await repository.list_tasks(
+async def test_task_repository_list_keeps_cursor_and_tenant_scope() -> None:
+    """Task listing preserves ordering, limit, and user scope."""
+    session = RecordingSession(results=[RecordingResult(values=[])])
+    repository = make_task_repository(session)
+    tasks = await repository.list_tasks(
         USER_ID,
         date_start=None,
         date_end=None,
@@ -1118,31 +1244,115 @@ async def test_list_tasks_applies_cursor_and_limit() -> None:
         query=None,
         include_archived_projects=False,
         now=NOW,
-        limit=26,
+        limit=51,
         after_due_at=NOW,
-        after_task_id=10,
+        after_task_id=9,
     )
+    assert tasks == []
     sql = compile_statement(session.statements[-1])
-
+    assert "tasks.user_id = 7" in sql
     assert "tasks.due_at > '" in sql
     assert "tasks.due_at = '" in sql
-    assert "tasks.id > 10" in sql
+    assert "tasks.id > 9" in sql
     assert "ORDER BY tasks.due_at, tasks.id" in sql
-    assert "LIMIT 26" in sql
+    assert "LIMIT 51" in sql
+
+
+async def test_task_repository_list_maps_domain_tasks() -> None:
+    """Task listing maps ORM rows to domain tasks."""
+    row = make_task(task_id=11, due_at=NOW)
+    session = RecordingSession(results=[RecordingResult(values=[row])])
+    repository = make_task_repository(session)
+
+    tasks = await repository.list_tasks(
+        USER_ID,
+        date_start=None,
+        date_end=None,
+        project_ids=(),
+        priorities=(),
+        status="all",
+        recurrence="all",
+        query=None,
+        include_archived_projects=False,
+        now=NOW,
+        limit=50,
+        after_due_at=None,
+        after_task_id=None,
+    )
+
+    assert list(tasks) == [task_to_entity(row)]
+    assert isinstance(tasks[0], TaskEntity)
+
+
+async def test_task_add_inserts_fresh_row_without_domain_id() -> None:
+    """New tasks insert a fresh ORM row and return a domain entity."""
+    session = RecordingSession()
+    repository = make_task_repository(session)
+    task = TaskEntity(user_id=USER_ID, title="New", due_at=NOW)
+
+    result = await repository.add_task(task)
+
+    assert len(session.added) == 1
+    row = session.added[0]
+    assert row.id is None
+    assert row.user_id == USER_ID
+    assert row.title == "New"
+    assert row.due_at == NOW
+    assert isinstance(result, TaskEntity)
+    assert result.title == "New"
+    assert session.flush_count == 1
+
+
+async def test_task_save_issues_update() -> None:
+    """Saving a task applies the domain fields to the tracked row."""
+    row = make_task(task_id=11, title="Old", due_at=NOW)
+    session = RecordingSession(get_results=[row])
+    repository = make_task_repository(session)
+    task = TaskEntity(
+        id=11,
+        user_id=USER_ID,
+        title="New",
+        description="Updated",
+        due_at=NOW + timedelta(hours=1),
+        completed_at=NOW,
+    )
+
+    await repository.save_task(task)
+
+    assert row.title == "New"
+    assert row.description == "Updated"
+    assert row.due_at == NOW + timedelta(hours=1)
+    assert row.completed_at == NOW
+    assert session.flush_count == 1
+    assert session.statements == []
+
+
+async def test_task_save_transient_delegates_to_add() -> None:
+    """Saving a transient task inserts it instead of updating."""
+    session = RecordingSession()
+    repository = make_task_repository(session)
+    task = TaskEntity(user_id=USER_ID, title="New", due_at=NOW)
+
+    await repository.save_task(task)
+
+    assert len(session.added) == 1
+    assert session.added[0].id is None
+    assert session.flush_count == 1
 
 
 async def test_list_tasks_batch_methods_filter_by_user_and_ids() -> None:
     """Batch enrichment scopes each query to the owner and the requested ids."""
     session = RecordingSession()
-    repository = make_repository(session)
+    task_repository = make_task_repository(session)
+    project_repository = make_project_repository(session)
 
-    labels = await repository.list_task_labels_for_tasks(USER_ID, (1, 2))
+    labels = await task_repository.list_task_labels_for_tasks(USER_ID, (1, 2))
     labels_sql = compile_statement(session.statements[-1])
 
-    reminders = await repository.list_task_reminders_for_tasks(USER_ID, (1, 2))
+    reminders = await task_repository.list_task_reminders_for_tasks(USER_ID, (1, 2))
     reminders_sql = compile_statement(session.statements[-1])
 
-    projects = await repository.get_projects_by_ids(USER_ID, (5, 6))
+    projects = await project_repository.get_projects_by_ids(USER_ID, (5, 6))
     projects_sql = compile_statement(session.statements[-1])
 
     assert labels == {}
@@ -1159,15 +1369,38 @@ async def test_list_tasks_batch_methods_filter_by_user_and_ids() -> None:
     assert "projects.id IN (5, 6)" in projects_sql
 
 
+async def test_batch_task_loaders_map_domain_rows() -> None:
+    """Batch task loaders group mapped domain labels and reminders."""
+    first_label = make_label(label_id=2)
+    second_label = make_label(label_id=3)
+    reminder = make_reminder(reminder_id=4, task_id=1)
+    session = RecordingSession(
+        results=[
+            RecordingResult(values=[(first_label, 1), (second_label, 1)]),
+            RecordingResult(values=[reminder]),
+        ]
+    )
+    repository = make_task_repository(session)
+
+    labels = await repository.list_task_labels_for_tasks(USER_ID, (1, 2))
+    reminders = await repository.list_task_reminders_for_tasks(USER_ID, (1, 2))
+
+    assert labels == {
+        1: (label_to_entity(first_label), label_to_entity(second_label)),
+    }
+    assert reminders == {1: (reminder_to_entity(reminder),)}
+
+
 async def test_get_task_and_series_are_tenant_scoped_and_lockable() -> None:
     """Task and series lookups filter by owner and lock rows on demand."""
     session = RecordingSession()
+    task_repository = make_task_repository(session)
     repository = make_repository(session)
 
-    await repository.get_task(USER_ID, 11)
+    await task_repository.get_task(USER_ID, 11)
     task_sql = compile_statement(session.statements[-1])
 
-    await repository.get_task(USER_ID, 11, for_update=True)
+    await task_repository.get_task(USER_ID, 11, for_update=True)
     locked_task_sql = compile_statement(session.statements[-1])
 
     await repository.get_series(USER_ID, 3)
@@ -1188,12 +1421,24 @@ async def test_get_task_and_series_are_tenant_scoped_and_lockable() -> None:
     assert "FOR UPDATE" in locked_series_sql
 
 
+async def test_task_repository_returns_domain_task() -> None:
+    """Task lookup maps the ORM row to a domain task."""
+    row = make_task(task_id=11, due_at=NOW)
+    session = RecordingSession(results=[RecordingResult(scalar=row)])
+    repository = make_task_repository(session)
+
+    task = await repository.get_task(USER_ID, 11)
+
+    assert task == task_to_entity(row)
+
+
 async def test_list_tasks_and_series_are_tenant_scoped() -> None:
     """Task and series listings always filter by the owning user."""
     session = RecordingSession()
+    task_repository = make_task_repository(session)
     repository = make_repository(session)
 
-    await repository.list_tasks(
+    await task_repository.list_tasks(
         USER_ID,
         date_start=None,
         date_end=None,
@@ -1221,24 +1466,28 @@ async def test_list_tasks_and_series_are_tenant_scoped() -> None:
 
 
 async def test_soft_delete_task_marks_only_the_scoped_task() -> None:
-    """Soft deletion mutates only the already owner-scoped task instance."""
+    """Soft deletion updates only the already owner-scoped task row."""
     session = RecordingSession()
-    repository = make_repository(session)
-    task = make_task(task_id=4, user_id=USER_ID, due_at=NOW)
-    other = make_task(task_id=5, user_id=USER_ID, due_at=NOW)
+    repository = make_task_repository(session)
+    task = TaskEntity(id=4, user_id=USER_ID, title="Task", due_at=NOW)
+    other = TaskEntity(id=5, user_id=USER_ID, title="Other", due_at=NOW)
 
     await repository.soft_delete_task(task, NOW, BATCH_ID)
+    sql = compile_statement(session.statements[-1])
 
     assert task.deleted_at == NOW
     assert task.deletion_batch_id == BATCH_ID
     assert other.deleted_at is None
+    assert sql.startswith("UPDATE tasks SET deleted_at=")
+    assert "deletion_batch_id=" in sql
+    assert "tasks.id = 4" in sql
     assert session.flush_count == 1
 
 
 async def test_add_task_labels_stamps_owner_on_every_row() -> None:
     """Task label assignments persist the owner on every inserted row."""
     session = RecordingSession()
-    repository = make_repository(session)
+    repository = make_task_repository(session)
 
     await repository.add_task_labels(11, USER_ID, (1, 2))
 
@@ -1249,24 +1498,57 @@ async def test_add_task_labels_stamps_owner_on_every_row() -> None:
     assert session.flush_count == 1
 
 
+async def test_replace_task_labels_deletes_then_reassigns() -> None:
+    """Replacing task labels deletes the old selection and inserts the new one."""
+    session = RecordingSession()
+    repository = make_task_repository(session)
+
+    await repository.replace_task_labels(11, USER_ID, (1, 2))
+
+    delete_sql = compile_statement(session.statements[0])
+    assert delete_sql.startswith("DELETE FROM task_labels")
+    assert "task_labels.task_id = 11" in delete_sql
+    assert "task_labels.user_id = 7" in delete_sql
+    assert [(row.task_id, row.label_id) for row in session.added] == [(11, 1), (11, 2)]
+    assert session.flush_count == 1
+
+
 async def test_get_labels_by_ids_filters_by_owner_and_ids() -> None:
     """Batch label lookup is tenant-scoped, non-deleted, and bounded by IN."""
-    session = RecordingSession()
-    repository = make_repository(session)
+    row = make_label(label_id=1)
+    session = RecordingSession(results=[RecordingResult(values=[row])])
+    repository = make_label_repository(session)
 
     result = await repository.get_labels_by_ids(USER_ID, (1, 2))
     sql = compile_statement(session.statements[-1])
 
-    assert list(result) == []
+    assert list(result) == [label_to_entity(row)]
     assert "labels.user_id = 7" in sql
     assert "labels.deleted_at IS NULL" in sql
     assert "labels.id IN (1, 2)" in sql
 
 
+async def test_list_task_labels_returns_domain_labels() -> None:
+    """Task label listing joins assignments and maps domain labels."""
+    row = make_label(label_id=2)
+    session = RecordingSession(results=[RecordingResult(values=[row])])
+    repository = make_task_repository(session)
+
+    result = await repository.list_task_labels(USER_ID, 11)
+    sql = compile_statement(session.statements[-1])
+
+    assert list(result) == [label_to_entity(row)]
+    assert "task_labels.task_id = 11" in sql
+    assert "task_labels.user_id = 7" in sql
+    assert "labels.user_id = 7" in sql
+    assert "labels.deleted_at IS NULL" in sql
+    assert "ORDER BY labels.id" in sql
+
+
 async def test_list_tasks_regular_joins_daily_series_without_deleted_filter() -> None:
     """Regular recurrence joins the series table and filters daily series only."""
     session = RecordingSession()
-    repository = make_repository(session)
+    repository = make_task_repository(session)
     await repository.list_tasks(
         USER_ID,
         date_start=None,
@@ -1291,7 +1573,7 @@ async def test_list_tasks_regular_joins_daily_series_without_deleted_filter() ->
 async def test_list_tasks_periodic_joins_periodic_series() -> None:
     """Periodic recurrence joins the series table and filters periodic series only."""
     session = RecordingSession()
-    repository = make_repository(session)
+    repository = make_task_repository(session)
     await repository.list_tasks(
         USER_ID,
         date_start=None,
@@ -1337,12 +1619,42 @@ async def test_get_series_by_ids_is_tenant_scoped_and_optional_deleted() -> None
 async def test_hard_delete_tasks_is_user_scoped_and_physical() -> None:
     """Hard deletion issues one owner-scoped DELETE for the requested tasks."""
     session = RecordingSession()
-    repository = make_repository(session)
+    repository = make_task_repository(session)
     await repository.hard_delete_tasks((4, 5), USER_ID)
     sql = compile_statement(session.statements[-1])
     assert sql.startswith("DELETE FROM tasks")
     assert "tasks.id IN (4, 5)" in sql
     assert "tasks.user_id = 7" in sql
+    assert session.flush_count == 1
+
+
+async def test_hard_delete_tasks_skips_empty_input() -> None:
+    """Hard deletion with no identifiers performs no query or flush."""
+    session = RecordingSession()
+    repository = make_task_repository(session)
+
+    await repository.hard_delete_tasks((), USER_ID)
+
+    assert session.statements == []
+    assert session.flush_count == 0
+
+
+async def test_list_future_series_tasks_maps_domain_and_scopes_tenant() -> None:
+    """Future series instances are owner-scoped, ordered, and mapped to domains."""
+    row = make_task(task_id=11, series_id=3, due_at=NOW + timedelta(days=1))
+    session = RecordingSession(results=[RecordingResult(values=[row])])
+    repository = make_task_repository(session)
+
+    tasks = await repository.list_future_series_tasks(3, USER_ID, NOW)
+    sql = compile_statement(session.statements[-1])
+
+    assert list(tasks) == [task_to_entity(row)]
+    assert "tasks.series_id = 3" in sql
+    assert "tasks.user_id = 7" in sql
+    assert "tasks.deleted_at IS NULL" in sql
+    assert "tasks.completed_at IS NULL" in sql
+    assert "tasks.due_at > " in sql
+    assert "ORDER BY tasks.due_at, tasks.id" in sql
 
 
 async def test_series_due_slot_exists_is_owner_scoped_and_excludes_task() -> None:
