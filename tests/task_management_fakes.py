@@ -10,12 +10,12 @@ from backend.domain.entities import (
     ColorPalette,
     Label,
     Project,
+    ReminderDelivery,
     Task,
     TaskReminder,
     TaskSeries,
 )
 from backend.domain.task_management.policies import HORIZON_DAYS, rebuild_reminder_slot
-from backend.models.reminder_delivery import ReminderDelivery
 from backend.task_management.enums import DeliveryStatus, ReminderKind, SeriesFrequency
 
 _ACTIVE_DELIVERY_STATUSES = {
@@ -245,7 +245,7 @@ class FakeTaskManagementRepository:
 
     def insert_delivery(self, delivery: ReminderDelivery) -> ReminderDelivery:
         """Insert a delivery and return it."""
-        if delivery.id is None:
+        if not delivery.id:
             delivery.id = self._next_id("delivery", self.deliveries)
         self.deliveries[delivery.id] = delivery
         return delivery
@@ -1507,10 +1507,15 @@ def make_delivery(
     attempts: int = 0,
     locked_at: datetime | None = None,
     next_attempt_at: datetime | None = None,
-) -> ReminderDelivery:
-    """Build a reminder delivery with deterministic values."""
+) -> Any:
+    """Build a domain reminder delivery with deterministic values.
+
+    Notes:
+        - The ``Any`` return keeps legacy ORM-row repository tests
+          type-compatible until the Task 18 bridge cleanup.
+    """
     return ReminderDelivery(
-        id=delivery_id,
+        id=cast(int, delivery_id),
         reminder_id=reminder_id,
         user_id=user_id,
         scheduled_for=scheduled_for,

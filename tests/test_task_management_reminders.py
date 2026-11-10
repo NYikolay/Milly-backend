@@ -4,12 +4,11 @@ from datetime import UTC, datetime, time, timedelta
 
 import pytest
 
-from backend.models.task import Task
-from backend.models.task_reminder import TaskReminder
-from backend.task_management.enums import Priority, ReminderKind
-from backend.task_management.reminders import (
-    ReminderContent,
-    ReminderDispatcher,
+from backend.application.task_management.reminders import ReminderDispatcher
+from backend.domain.entities import Task, TaskReminder
+from backend.domain.enums import Priority, ReminderKind
+from backend.domain.task_management.models import ReminderContent
+from backend.domain.task_management.policies import (
     build_reminder_text,
     next_reminder_slot,
 )
@@ -28,12 +27,41 @@ USER_ID = 7
 TELEGRAM_ID = 7007
 
 
+class RecordingUnitOfWork:
+    """Unit-of-work double that records transaction calls."""
+
+    def __init__(self) -> None:
+        """Initialize an empty call log."""
+        self.calls: list[str] = []
+
+    async def flush(self) -> None:
+        """Record a flush request."""
+        self.calls.append("flush")
+
+    async def commit(self) -> None:
+        """Record a commit request."""
+        self.calls.append("commit")
+
+    async def rollback(self) -> None:
+        """Record a rollback request."""
+        self.calls.append("rollback")
+
+
 def make_dispatcher(
     repository: FakeTaskManagementRepository,
     sender: FakeSender,
 ) -> ReminderDispatcher:
     """Build a reminder dispatcher with the fixed clock."""
-    return ReminderDispatcher(repository, sender, clock=fixed_now)
+    return ReminderDispatcher(
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        sender,
+        clock=fixed_now,
+    )
 
 
 def seed_telegram(repository: FakeTaskManagementRepository) -> None:
@@ -439,6 +467,11 @@ async def test_dispatch_due_stops_at_deadline() -> None:
     ticks = iter([0.0] + [240.0] * 10)
     dispatcher = ReminderDispatcher(
         repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
         sender,
         clock=fixed_now,
         monotonic=lambda: next(ticks),
@@ -480,6 +513,11 @@ async def test_dispatch_due_finishes_in_flight_send() -> None:
     sender = FakeSender()
     ticks = iter([0.0, 239.9, 250.0, 250.0])
     dispatcher = ReminderDispatcher(
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
         repository,
         sender,
         clock=fixed_now,
@@ -941,6 +979,29 @@ async def test_disabled_series_toggle_cancels_instance_delivery() -> None:
     assert sender.calls == []
     assert repository.deliveries[1].status == "cancelled"
     assert reminder.next_run_at is None
+
+
+async def test_dispatch_commits_sending_sent_and_slot_update() -> None:
+    """The dispatcher preserves its commit order through the UnitOfWork."""
+    repository = FakeTaskManagementRepository()
+    _, reminder = make_scheduled_reminder(repository)
+    uow = RecordingUnitOfWork()
+    dispatcher = ReminderDispatcher(
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        uow,
+        FakeSender(),
+        clock=fixed_now,
+    )
+
+    await dispatcher.dispatch_due()
+
+    assert uow.calls == ["commit", "commit", "commit"]
+    assert repository.deliveries[1].status == "sent"
+    assert reminder.next_run_at == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
 
 
 async def test_sent_mark_is_committed_before_slot_update(

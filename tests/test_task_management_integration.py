@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, cast
 
@@ -8,15 +9,15 @@ import pytest
 from backend.api.pagination import DEFAULT_PAGE_SIZE
 from backend.application.ports.task_management import ReminderRepository
 from backend.application.task_management.projects import ProjectService
+from backend.application.task_management.reminders import ReminderDispatcher
 from backend.application.task_management.series import SeriesService
 from backend.application.task_management.tasks import TaskFilters, TaskService
 from backend.core.errors import NotFoundError
 from backend.domain.task_management.models import ReminderInput
+from backend.domain.task_management.policies import HORIZON_DAYS
 from backend.models.color_palette import ColorPalette
 from backend.task_management.enums import Priority, ReminderKind
 from backend.task_management.palette import PaletteService
-from backend.task_management.reminders import ReminderDispatcher
-from backend.task_management.schedule import HORIZON_DAYS
 from tests.task_management_fakes import (
     FakeSender,
     FakeTaskManagementRepository,
@@ -88,6 +89,25 @@ def make_services(
     return palette, projects, series, tasks
 
 
+def make_dispatcher(
+    repository: FakeTaskManagementRepository,
+    sender: FakeSender,
+    *,
+    clock: Callable[[], datetime],
+) -> ReminderDispatcher:
+    """Build a reminder dispatcher over the fake repository ports."""
+    return ReminderDispatcher(
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        sender,
+        clock=clock,
+    )
+
+
 async def test_daily_series_lifecycle_end_to_end() -> None:
     """Drive a daily series through generation, reminders, archive, and delete."""
     repository = FakeTaskManagementRepository()
@@ -153,7 +173,7 @@ async def test_daily_series_lifecycle_end_to_end() -> None:
     ] == [THIRD_REMINDER_AT]
 
     success_sender = FakeSender(message_id=321)
-    success_dispatcher = ReminderDispatcher(
+    success_dispatcher = make_dispatcher(
         repository,
         success_sender,
         clock=lambda: SECOND_REMINDER_AT,
@@ -183,7 +203,7 @@ async def test_daily_series_lifecycle_end_to_end() -> None:
     assert await series_service.generate(POST_HORIZON_NOW) == 0
     assert len(repository.tasks) == HORIZON_DAYS
     paused_sender = FakeSender()
-    paused_dispatcher = ReminderDispatcher(
+    paused_dispatcher = make_dispatcher(
         repository,
         paused_sender,
         clock=lambda: THIRD_REMINDER_AT,
@@ -202,7 +222,7 @@ async def test_daily_series_lifecycle_end_to_end() -> None:
     assert third_reminder.next_run_at == THIRD_REMINDER_AT
 
     failure_sender = FakeSender(error=RuntimeError("telegram is down"))
-    failure_dispatcher = ReminderDispatcher(
+    failure_dispatcher = make_dispatcher(
         repository,
         failure_sender,
         clock=lambda: THIRD_REMINDER_AT,
