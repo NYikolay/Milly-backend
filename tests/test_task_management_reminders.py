@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, time, timedelta
+from typing import Any, cast
 
 import pytest
 
@@ -30,21 +31,95 @@ TELEGRAM_ID = 7007
 class RecordingUnitOfWork:
     """Unit-of-work double that records transaction calls."""
 
-    def __init__(self) -> None:
-        """Initialize an empty call log."""
+    def __init__(self, events: list[str] | None = None) -> None:
+        """
+        Initialize an empty call log and an optional shared event log.
+
+        Args:
+            events: Shared ordered event log that receives transaction calls.
+        """
         self.calls: list[str] = []
+        self._events = events
 
     async def flush(self) -> None:
         """Record a flush request."""
-        self.calls.append("flush")
+        self._record("flush")
 
     async def commit(self) -> None:
         """Record a commit request."""
-        self.calls.append("commit")
+        self._record("commit")
 
     async def rollback(self) -> None:
         """Record a rollback request."""
-        self.calls.append("rollback")
+        self._record("rollback")
+
+    def _record(self, call: str) -> None:
+        """Append a transaction call to the local and optional shared logs."""
+        self.calls.append(call)
+        if self._events is not None:
+            self._events.append(f"uow.{call}")
+
+
+class EventRecordingRepository(FakeTaskManagementRepository):
+    """Fake repository that records dispatcher operations in a shared log."""
+
+    def __init__(self, events: list[str]) -> None:
+        """Initialize the fake and store the shared event log."""
+        super().__init__()
+        self.dispatch_events = events
+
+    async def claim_due_reminder(
+        self,
+        reminder_id: int,
+        now: datetime,
+    ) -> TaskReminder | None:
+        """Record a claim and delegate to the fake."""
+        self.dispatch_events.append("claim")
+        return cast(TaskReminder | None, await super().claim_due_reminder(reminder_id, now))
+
+    async def mark_delivery_sending(self, delivery: Any, now: datetime) -> None:
+        """Record a sending claim and delegate to the fake."""
+        self.dispatch_events.append("mark_sending")
+        await super().mark_delivery_sending(delivery, now)
+
+    async def mark_delivery_sent(
+        self,
+        delivery: Any,
+        sent_at: datetime,
+        telegram_message_id: int | None,
+    ) -> None:
+        """Record a sent mark and delegate to the fake."""
+        self.dispatch_events.append("mark_sent")
+        await super().mark_delivery_sent(delivery, sent_at, telegram_message_id)
+
+    async def update_reminder_next_run_at(
+        self,
+        reminder: TaskReminder,
+        next_run_at: datetime | None,
+    ) -> None:
+        """Record a slot update and delegate to the fake."""
+        self.dispatch_events.append("update_slot")
+        await super().update_reminder_next_run_at(reminder, next_run_at)
+
+
+class EventRecordingSender(FakeSender):
+    """Sender double that records sends in a shared event log."""
+
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        message_id: int | None = 1,
+        error: Exception | None = None,
+    ) -> None:
+        """Initialize the sender double and store the shared event log."""
+        super().__init__(message_id=message_id, error=error)
+        self._events = events
+
+    async def send(self, chat_id: int, text: str) -> int | None:
+        """Record a send and delegate to the fake sender."""
+        self._events.append("send")
+        return await super().send(chat_id, text)
 
 
 def make_dispatcher(
@@ -982,10 +1057,12 @@ async def test_disabled_series_toggle_cancels_instance_delivery() -> None:
 
 
 async def test_dispatch_commits_sending_sent_and_slot_update() -> None:
-    """The dispatcher preserves its commit order through the UnitOfWork."""
-    repository = FakeTaskManagementRepository()
+    """The dispatcher commits the sending claim, sent mark, and slot update in order."""
+    events: list[str] = []
+    repository = EventRecordingRepository(events)
     _, reminder = make_scheduled_reminder(repository)
-    uow = RecordingUnitOfWork()
+    uow = RecordingUnitOfWork(events)
+    sender = EventRecordingSender(events)
     dispatcher = ReminderDispatcher(
         repository,
         repository,
@@ -993,15 +1070,53 @@ async def test_dispatch_commits_sending_sent_and_slot_update() -> None:
         repository,
         repository,
         uow,
-        FakeSender(),
+        sender,
         clock=fixed_now,
     )
 
     await dispatcher.dispatch_due()
 
+    assert events == [
+        "claim",
+        "mark_sending",
+        "uow.commit",
+        "send",
+        "mark_sent",
+        "uow.commit",
+        "update_slot",
+        "uow.commit",
+    ]
     assert uow.calls == ["commit", "commit", "commit"]
     assert repository.deliveries[1].status == "sent"
     assert reminder.next_run_at == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
+
+
+async def test_dispatch_commits_when_claimed_candidate_is_skipped() -> None:
+    """The claim branch commits only when the candidate is no longer deliverable."""
+    events: list[str] = []
+    repository = EventRecordingRepository(events)
+    _, reminder = make_scheduled_reminder(repository)
+    repository.on_claim = lambda: setattr(reminder, "next_run_at", None)
+    uow = RecordingUnitOfWork(events)
+    sender = EventRecordingSender(events)
+    dispatcher = ReminderDispatcher(
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        uow,
+        sender,
+        clock=fixed_now,
+    )
+
+    sent = await dispatcher.dispatch_due()
+
+    assert sent == 0
+    assert events == ["claim", "uow.commit"]
+    assert uow.calls == ["commit"]
+    assert sender.calls == []
+    assert repository.deliveries == {}
 
 
 async def test_sent_mark_is_committed_before_slot_update(
