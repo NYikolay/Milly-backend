@@ -5,12 +5,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from backend.application.ports.task_management import LabelRepository, PaletteRepository
+from backend.application.task_management.labels import LabelService
+from backend.application.task_management.palette import PaletteService
 from backend.core.errors import BadRequestError, ConflictError, ErrorCode, NotFoundError
-from backend.models.color_palette import ColorPalette
-from backend.models.label import Label
-from backend.task_management.labels import LabelService
-from backend.task_management.palette import PaletteService
-from backend.task_management.ports import TaskManagementRepository
+from backend.domain.entities import ColorPalette, Label
+from tests import task_management_fakes
+from tests.task_management_fakes import (
+    FakeTaskManagementRepository,
+    fixed_now,
+)
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
 USER_ID = 7
@@ -22,8 +26,13 @@ def clock() -> datetime:
 
 
 def make_repository() -> AsyncMock:
-    """Build an async repository double constrained to the task-management port."""
-    return AsyncMock(spec=TaskManagementRepository)
+    """Build an async repository double constrained to the label port."""
+    return AsyncMock(spec=LabelRepository)
+
+
+def make_palette_repository() -> AsyncMock:
+    """Build an async repository double constrained to the palette port."""
+    return AsyncMock(spec=PaletteRepository)
 
 
 def make_color(*, color_id: int = 1) -> ColorPalette:
@@ -49,9 +58,13 @@ def make_label(*, label_id: int = 1, name: str = "Home", color_id: int = 1) -> L
     )
 
 
-def make_service(repository: AsyncMock) -> LabelService:
+def make_service(
+    repository: AsyncMock,
+    palette_repository: AsyncMock | None = None,
+) -> LabelService:
     """Build a label service with the fixed clock and real palette rules."""
-    return LabelService(repository, PaletteService(repository), clock=clock)
+    palette = palette_repository if palette_repository is not None else make_palette_repository()
+    return LabelService(repository, PaletteService(palette), clock=clock)
 
 
 async def _return_label(label: Label) -> Label:
@@ -103,12 +116,13 @@ async def test_get_cross_user_label_raises_not_found() -> None:
 async def test_create_trims_name_and_uses_default_color() -> None:
     """Label creation strips the name and resolves the default active color."""
     repository = make_repository()
+    palette_repository = make_palette_repository()
     color = make_color()
     repository.label_name_exists.return_value = False
-    repository.get_default_palette_color.return_value = color
+    palette_repository.get_default_palette_color.return_value = color
     repository.add_label.side_effect = _return_label
 
-    service = make_service(repository)
+    service = make_service(repository, palette_repository)
 
     result = await service.create(USER_ID, name="  Home  ", color_id=None)
 
@@ -116,7 +130,7 @@ async def test_create_trims_name_and_uses_default_color() -> None:
     assert result.name == "Home"
     assert result.color_id == color.id
     repository.label_name_exists.assert_awaited_once_with(USER_ID, "Home")
-    repository.get_default_palette_color.assert_awaited_once_with()
+    palette_repository.get_default_palette_color.assert_awaited_once_with()
     repository.add_label.assert_awaited_once_with(result)
 
 
@@ -150,13 +164,14 @@ async def test_create_rejects_duplicate_name() -> None:
 async def test_update_changes_trimmed_name_and_color() -> None:
     """Label updates trim names and validate the new active color."""
     repository = make_repository()
+    palette_repository = make_palette_repository()
     label = make_label()
     new_color = make_color(color_id=2)
     repository.get_label.return_value = label
     repository.label_name_exists.return_value = False
-    repository.get_palette_color.return_value = new_color
+    palette_repository.get_palette_color.return_value = new_color
 
-    service = make_service(repository)
+    service = make_service(repository, palette_repository)
 
     result = await service.update(
         USER_ID,
@@ -173,7 +188,8 @@ async def test_update_changes_trimmed_name_and_color() -> None:
         "Errands",
         exclude_label_id=label.id,
     )
-    repository.get_palette_color.assert_awaited_once_with(new_color.id)
+    palette_repository.get_palette_color.assert_awaited_once_with(new_color.id)
+    repository.save_label.assert_awaited_once_with(label)
 
 
 async def test_update_keeps_omitted_fields() -> None:
@@ -188,6 +204,7 @@ async def test_update_keeps_omitted_fields() -> None:
 
     assert label.name == "Keep"
     assert label.color_id == 3
+    repository.save_label.assert_awaited_once_with(label)
 
 
 async def test_update_rejects_empty_name() -> None:
@@ -200,6 +217,8 @@ async def test_update_rejects_empty_name() -> None:
 
     with pytest.raises(BadRequestError):
         await service.update(USER_ID, label.id, name="  ")
+
+    repository.save_label.assert_not_awaited()
 
 
 async def test_update_rejects_duplicate_name() -> None:
@@ -215,14 +234,16 @@ async def test_update_rejects_duplicate_name() -> None:
         await service.update(USER_ID, label.id, name="Other")
 
     assert str(error.value) == "Label name already exists"
+    repository.save_label.assert_not_awaited()
 
 
 async def test_update_cannot_move_to_inactive_color() -> None:
     """Moving a label to an inactive palette color is rejected."""
     repository = make_repository()
+    palette_repository = make_palette_repository()
     label = make_label(color_id=1)
     repository.get_label.return_value = label
-    repository.get_palette_color.return_value = ColorPalette(
+    palette_repository.get_palette_color.return_value = ColorPalette(
         id=9,
         slug="inactive",
         name="Inactive",
@@ -231,13 +252,14 @@ async def test_update_cannot_move_to_inactive_color() -> None:
         is_active=False,
     )
 
-    service = make_service(repository)
+    service = make_service(repository, palette_repository)
 
     with pytest.raises(BadRequestError) as error:
         await service.update(USER_ID, label.id, color_id=9)
 
     assert error.value.code is ErrorCode.BAD_REQUEST
     assert label.color_id == 1
+    repository.save_label.assert_not_awaited()
 
 
 async def test_delete_soft_deletes_with_injected_time() -> None:
@@ -278,3 +300,41 @@ async def test_delete_cross_user_label_is_idempotent() -> None:
     await service.delete(USER_ID, 999)
 
     repository.soft_delete_label.assert_not_awaited()
+
+
+async def test_create_persists_domain_label_through_add_label() -> None:
+    """Label creation stores a domain entity with its generated identifier."""
+    repository = FakeTaskManagementRepository()
+    service = LabelService(repository, PaletteService(repository), clock=fixed_now)
+
+    created = await service.create(USER_ID, name="  Home  ")
+
+    assert isinstance(created, Label)
+    assert created.id
+    assert repository.labels[created.id] is created
+
+
+async def test_update_persists_mutated_domain_entity() -> None:
+    """Label updates call save_label after mutating the domain entity."""
+    repository = FakeTaskManagementRepository()
+    label = repository.insert_label(task_management_fakes.make_label(name="Old"))
+    service = LabelService(repository, PaletteService(repository), clock=fixed_now)
+
+    updated = await service.update(USER_ID, label.id, name="New")
+
+    assert updated.name == "New"
+    assert repository.saved_labels == [label.id]
+    assert repository.labels[label.id].name == "New"
+
+
+async def test_delete_soft_deletes_domain_entity() -> None:
+    """Label deletion persists the soft-delete on the domain entity."""
+    repository = FakeTaskManagementRepository()
+    label = repository.insert_label(task_management_fakes.make_label())
+    service = LabelService(repository, PaletteService(repository), clock=fixed_now)
+
+    await service.delete(USER_ID, label.id)
+
+    assert isinstance(label, Label)
+    assert repository.labels[label.id].deleted_at == fixed_now()
+    assert list(await service.list(USER_ID)) == []

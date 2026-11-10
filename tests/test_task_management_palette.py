@@ -4,15 +4,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from backend.application.ports.task_management import PaletteRepository
+from backend.application.task_management.palette import PaletteService
 from backend.core.errors import BadRequestError, ConflictError, ErrorCode, NotFoundError
-from backend.models.color_palette import ColorPalette
-from backend.task_management.palette import PaletteService
-from backend.task_management.ports import TaskManagementRepository
+from backend.domain.entities import ColorPalette
+from tests.task_management_fakes import FakeTaskManagementRepository
 
 
 def make_repository() -> AsyncMock:
-    """Build an async repository double constrained to the task-management port."""
-    return AsyncMock(spec=TaskManagementRepository)
+    """Build an async repository double constrained to the palette port."""
+    return AsyncMock(spec=PaletteRepository)
 
 
 def make_color(
@@ -214,3 +215,15 @@ async def test_ensure_can_delete_allows_inactive_color_with_active_peer() -> Non
     service = PaletteService(repository)
 
     await service.ensure_can_delete(3)
+
+
+async def test_palette_list_returns_domain_colors() -> None:
+    """The migrated palette service returns domain colors from the fake."""
+    repository = FakeTaskManagementRepository()
+    service = PaletteService(repository)
+
+    colors = await service.list_active()
+
+    assert list(colors)
+    assert all(isinstance(color, ColorPalette) for color in colors)
+    assert [color.slug for color in colors] == ["default"]

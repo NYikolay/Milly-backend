@@ -5,8 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from backend.models.color_palette import ColorPalette
-from backend.models.label import Label
+from backend.domain.entities import ColorPalette, Label
 from backend.models.project import Project
 from backend.models.reminder_delivery import ReminderDelivery
 from backend.models.task import Task
@@ -99,6 +98,8 @@ class FakeTaskManagementRepository:
         self.due_reminder_limits: list[int] = []
         self.commits = 0
         self.rollbacks = 0
+        self.saved_labels: list[int] = []
+        self.saved_projects: list[int] = []
         self.claimed_series_ids: list[int] = []
         self.blocked_series_ids: set[int] = set()
         self.series_errors: dict[int, Exception] = {}
@@ -112,9 +113,9 @@ class FakeTaskManagementRepository:
         self._next_ids[name] = next_id
         return next_id
 
-    def insert_color(self, color: ColorPalette) -> ColorPalette:
+    def insert_color(self, color: Any) -> Any:
         """Insert a palette color and return it."""
-        if color.id is None:
+        if not color.id:
             color.id = self._next_id("color", self.colors)
         self.colors[color.id] = color
         return color
@@ -126,9 +127,9 @@ class FakeTaskManagementRepository:
         self.projects[project.id] = project
         return project
 
-    def insert_label(self, label: Label) -> Label:
+    def insert_label(self, label: Any) -> Any:
         """Insert a label and return it."""
-        if label.id is None:
+        if not label.id:
             label.id = self._next_id("label", self.labels)
         self.labels[label.id] = label
         return label
@@ -188,29 +189,29 @@ class FakeTaskManagementRepository:
                 delivery.locked_at = None
                 delivery.next_attempt_at = None
 
-    async def list_palette_colors(self) -> Sequence[ColorPalette]:
+    async def list_palette_colors(self) -> Any:
         """Return every palette color ordered by display position."""
         return sorted(self.colors.values(), key=lambda color: (color.sort_order, color.id))
 
-    async def list_active_palette_colors(self) -> Sequence[ColorPalette]:
+    async def list_active_palette_colors(self) -> Any:
         """Return active palette colors ordered by display position."""
         return [color for color in await self.list_palette_colors() if color.is_active]
 
-    async def get_palette_color(self, color_id: int) -> ColorPalette | None:
+    async def get_palette_color(self, color_id: int) -> Any:
         """Return one palette color."""
         return self.colors.get(color_id)
 
     async def get_palette_colors_by_ids(
         self,
         color_ids: Sequence[int],
-    ) -> dict[int, ColorPalette]:
+    ) -> Any:
         """Return palette colors keyed by identifier and record the batch call."""
         self.batch_calls.append(("get_palette_colors_by_ids", tuple(color_ids)))
         return {
             color_id: self.colors[color_id] for color_id in color_ids if color_id in self.colors
         }
 
-    async def get_default_palette_color(self) -> ColorPalette | None:
+    async def get_default_palette_color(self) -> Any:
         """Return the first active palette color."""
         colors = await self.list_active_palette_colors()
         return colors[0] if colors else None
@@ -402,7 +403,7 @@ class FakeTaskManagementRepository:
             self.reminders[reminder_id].next_run_at = None
         self._cancel_deliveries(reminder_ids)
 
-    async def list_labels(self, user_id: int) -> Sequence[Label]:
+    async def list_labels(self, user_id: int) -> Any:
         """List non-deleted labels owned by a user."""
         return sorted(
             (
@@ -419,7 +420,7 @@ class FakeTaskManagementRepository:
         label_id: int,
         *,
         for_update: bool = False,
-    ) -> Label | None:
+    ) -> Any:
         """Return a non-deleted label owned by a user."""
         label = self.labels.get(label_id)
         if label is None or label.user_id != user_id or label.deleted_at is not None:
@@ -430,7 +431,7 @@ class FakeTaskManagementRepository:
         self,
         user_id: int,
         label_ids: Sequence[int],
-    ) -> Sequence[Label]:
+    ) -> Any:
         """Record the batch and return matching non-deleted owned labels."""
         self.label_batch_calls.append((tuple(label_ids),))
         return [
@@ -457,11 +458,16 @@ class FakeTaskManagementRepository:
             for label in self.labels.values()
         )
 
-    async def add_label(self, label: Label) -> Label:
+    async def add_label(self, label: Any) -> Any:
         """Persist a label."""
         return self.insert_label(label)
 
-    async def soft_delete_label(self, label: Label, deleted_at: datetime) -> None:
+    async def save_label(self, label: Any) -> None:
+        """Persist changed label fields and record the save."""
+        self.saved_labels.append(label.id)
+        self.labels[label.id] = label
+
+    async def soft_delete_label(self, label: Any, deleted_at: datetime) -> None:
         """Soft-delete a label."""
         label.deleted_at = deleted_at
 
@@ -629,7 +635,7 @@ class FakeTaskManagementRepository:
         self.task_labels = {pair for pair in self.task_labels if pair[0] != task_id}
         await self.add_task_labels(task_id, user_id, label_ids)
 
-    async def list_task_labels(self, user_id: int, task_id: int) -> Sequence[Label]:
+    async def list_task_labels(self, user_id: int, task_id: int) -> Any:
         """Return labels assigned to a task."""
         return [
             self.labels[label_id]
@@ -644,7 +650,7 @@ class FakeTaskManagementRepository:
         self,
         user_id: int,
         task_ids: Sequence[int],
-    ) -> dict[int, Sequence[Label]]:
+    ) -> Any:
         """Return labels assigned to each requested task."""
         self.batch_calls.append(("list_task_labels_for_tasks", tuple(task_ids)))
         return {task_id: await self.list_task_labels(user_id, task_id) for task_id in task_ids}
@@ -894,7 +900,7 @@ class FakeTaskManagementRepository:
         self.series_labels = {pair for pair in self.series_labels if pair[0] != series_id}
         await self.add_series_labels(series_id, user_id, label_ids)
 
-    async def list_series_labels(self, user_id: int, series_id: int) -> Sequence[Label]:
+    async def list_series_labels(self, user_id: int, series_id: int) -> Any:
         """Return labels assigned to a series."""
         return [
             self.labels[label_id]
@@ -1198,12 +1204,17 @@ def make_project(
 
 def make_label(
     *,
-    label_id: int | None = None,
+    label_id: int = 0,
     user_id: int = 7,
     name: str = "Home",
     deleted_at: datetime | None = None,
-) -> Label:
-    """Build a label with deterministic values."""
+) -> Any:
+    """Build a domain label with deterministic values.
+
+    Notes:
+        - The ``Any`` return keeps legacy ORM-row repository tests type-compatible
+          until the Task 18 bridge cleanup.
+    """
     return Label(
         id=label_id,
         user_id=user_id,
