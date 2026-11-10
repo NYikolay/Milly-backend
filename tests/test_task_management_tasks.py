@@ -1,18 +1,25 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Any, cast
 
 import pytest
 
 from backend.api.pagination import DEFAULT_PAGE_SIZE
+from backend.application.ports.collaborators import SeriesOperations
 from backend.application.task_management.series import SeriesService
+from backend.application.task_management.tasks import (
+    TaskFilters,
+    TaskListCursor,
+    TaskService,
+)
 from backend.core.errors import BadRequestError, ErrorCode, NotFoundError
-from backend.task_management.enums import Priority, ReminderKind, TaskRecurrence
+from backend.domain.entities import Task, TaskSeries
+from backend.domain.enums import Priority, ReminderKind, TaskRecurrence
+from backend.domain.task_management.models import ReminderInput
 from backend.task_management.palette import PaletteService
 from backend.task_management.projects import ProjectService
-from backend.task_management.reminders import ReminderInput
-from backend.task_management.tasks import TaskFilters, TaskListCursor, TaskService
 from tests.task_management_fakes import (
     FakeTaskManagementRepository,
     fixed_now,
@@ -41,13 +48,74 @@ def make_series_service(repository: FakeTaskManagementRepository) -> SeriesServi
     )
 
 
-def make_service(repository: FakeTaskManagementRepository) -> TaskService:
-    """Build a task service over the fake repository."""
+def make_service(
+    repository: FakeTaskManagementRepository,
+    *,
+    series_operations: SeriesOperations | None = None,
+    clock: Callable[[], datetime] = fixed_now,
+) -> TaskService:
+    """Build a task service over the fake repository ports."""
     return TaskService(
         repository,
-        cast(Any, make_series_service(repository)),
-        clock=fixed_now,
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        series_operations if series_operations is not None else make_series_service(repository),
+        repository,
+        clock=clock,
     )
+
+
+class GeneratedIdTaskRepository(FakeTaskManagementRepository):
+    """Fake repository returning a fresh task entity with its generated identifier."""
+
+    async def add_task(self, task: Task) -> Task:
+        """Insert a copy and return it without mutating the caller's entity."""
+        generated = replace(task, id=1000)
+        self.tasks[generated.id] = generated
+        return generated
+
+
+class RecordingSeriesService(SeriesService):
+    """Real series service that records task-service delegation calls."""
+
+    def __init__(self, repository: FakeTaskManagementRepository) -> None:
+        """Build the service over the fake ports and initialize call logs."""
+        super().__init__(
+            repository,
+            repository,
+            repository,
+            repository,
+            repository,
+            repository,
+            repository,
+            clock=fixed_now,
+        )
+        self.detach_calls: list[tuple[int, int, int]] = []
+        self.delete_calls: list[tuple[int, int, int | None]] = []
+
+    async def detach_task(
+        self,
+        user_id: int,
+        task: Task,
+        series: TaskSeries,
+    ) -> None:
+        """Record the detach request and delegate to the real series rule."""
+        self.detach_calls.append((user_id, task.id, series.id))
+        await super().detach_task(user_id, task, series)
+
+    async def delete(
+        self,
+        user_id: int,
+        series_id: int,
+        *,
+        target_task_id: int | None = None,
+    ) -> None:
+        """Record the delete request and delegate to the real series rule."""
+        self.delete_calls.append((user_id, series_id, target_task_id))
+        await super().delete(user_id, series_id, target_task_id=target_task_id)
 
 
 async def test_create_one_off_task_inserts_labels_and_before_due_reminder() -> None:
@@ -2248,10 +2316,130 @@ async def test_today_progress_uses_local_date_near_utc_midnight(
     repository = FakeTaskManagementRepository()
     repository.user_timezones[USER_ID] = timezone_name
     repository.insert_task(make_task(task_id=1, due_at=due_at))
-    service = TaskService(
-        repository,
-        cast(Any, make_series_service(repository)),
-        clock=lambda: clock,
-    )
+    service = make_service(repository, clock=lambda: clock)
 
     assert await service.today_progress(USER_ID) == (1, 0)
+
+
+async def test_complete_persists_task_and_returns_domain_detail() -> None:
+    """Completing a task saves the mutated domain entity."""
+    repository = FakeTaskManagementRepository()
+    task = repository.insert_task(
+        make_task(user_id=USER_ID, due_at=fixed_now() + timedelta(hours=1))
+    )
+    service = make_service(repository)
+
+    detail = await service.complete(USER_ID, task.id)
+
+    assert detail.task.completed_at == fixed_now()
+    assert task.id in repository.saved_tasks
+    assert repository.tasks[task.id].completed_at == fixed_now()
+
+
+async def test_update_persists_task_and_returns_domain_detail() -> None:
+    """Editing a task saves the mutated domain entity."""
+    repository = FakeTaskManagementRepository()
+    task = repository.insert_task(
+        make_task(user_id=USER_ID, due_at=fixed_now() + timedelta(hours=1))
+    )
+    service = make_service(repository)
+    new_due_at = fixed_now() + timedelta(hours=3)
+
+    detail = await service.update(USER_ID, task.id, title="Changed", due_at=new_due_at)
+
+    assert detail.task.title == "Changed"
+    assert detail.task.due_at == new_due_at
+    assert task.id in repository.saved_tasks
+    assert repository.tasks[task.id].title == "Changed"
+    assert repository.tasks[task.id].due_at == new_due_at
+
+
+async def test_cross_user_task_update_does_not_mutate() -> None:
+    """Another user's task is invisible and unchanged."""
+    repository = FakeTaskManagementRepository()
+    task = repository.insert_task(
+        make_task(user_id=USER_ID, due_at=fixed_now() + timedelta(hours=1))
+    )
+    service = make_service(repository)
+
+    with pytest.raises(NotFoundError):
+        await service.update(USER_ID + 1, task.id, title="Hacked")
+
+    assert task.title == "Task"
+    assert repository.saved_tasks == []
+
+
+async def test_create_uses_identifier_returned_by_add_task() -> None:
+    """Created labels and reminders use the identifier from the inserted entity."""
+    repository = GeneratedIdTaskRepository()
+    label = repository.insert_label(make_label(user_id=USER_ID))
+    service = make_service(repository)
+
+    detail = await service.create(
+        USER_ID,
+        title="Task",
+        description=None,
+        priority=Priority.NEITHER,
+        due_at=fixed_now() + timedelta(hours=2),
+        project_id=None,
+        label_ids=(label.id,),
+        reminders_enabled=True,
+        reminders=(ReminderInput(kind=ReminderKind.BEFORE_DUE, offset_minutes=30),),
+    )
+
+    assert detail.task.id == 1000
+    assert repository.tasks[detail.task.id] is detail.task
+    assert repository.task_label_calls == [(detail.task.id, USER_ID, (label.id,))]
+    assert {reminder.task_id for reminder in repository.reminders.values()} == {detail.task.id}
+
+
+async def test_disable_recurrence_delegates_to_series_operations() -> None:
+    """Converting a series instance to one-off calls the series detach rule."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            user_id=USER_ID,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    task = repository.insert_task(
+        make_task(
+            user_id=USER_ID,
+            series_id=series.id,
+            due_at=fixed_now() + timedelta(days=1),
+        )
+    )
+    series_operations = RecordingSeriesService(repository)
+    service = make_service(repository, series_operations=series_operations)
+
+    await service.update(USER_ID, task.id, recurrence=TaskRecurrence.ONE_OFF)
+
+    assert series_operations.detach_calls == [(USER_ID, task.id, series.id)]
+
+
+async def test_delete_series_task_delegates_to_series_operations() -> None:
+    """Deleting a series instance calls the series delete rule with the target."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            user_id=USER_ID,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    task = repository.insert_task(
+        make_task(
+            user_id=USER_ID,
+            series_id=series.id,
+            due_at=fixed_now() + timedelta(days=1),
+        )
+    )
+    series_operations = RecordingSeriesService(repository)
+    service = make_service(repository, series_operations=series_operations)
+
+    await service.delete(USER_ID, task.id)
+
+    assert series_operations.delete_calls == [(USER_ID, series.id, task.id)]

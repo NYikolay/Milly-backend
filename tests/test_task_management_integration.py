@@ -9,6 +9,7 @@ from backend.api.pagination import DEFAULT_PAGE_SIZE
 from backend.application.ports.task_management import ReminderRepository
 from backend.application.task_management.projects import ProjectService
 from backend.application.task_management.series import SeriesService
+from backend.application.task_management.tasks import TaskFilters, TaskService
 from backend.core.errors import NotFoundError
 from backend.domain.task_management.models import ReminderInput
 from backend.models.color_palette import ColorPalette
@@ -16,7 +17,6 @@ from backend.task_management.enums import Priority, ReminderKind
 from backend.task_management.palette import PaletteService
 from backend.task_management.reminders import ReminderDispatcher
 from backend.task_management.schedule import HORIZON_DAYS
-from backend.task_management.tasks import TaskFilters, TaskService
 from tests.task_management_fakes import (
     FakeSender,
     FakeTaskManagementRepository,
@@ -74,7 +74,17 @@ def make_services(
         repository,
         clock=fixed_now,
     )
-    tasks = TaskService(repository, cast(Any, series), clock=fixed_now)
+    tasks = TaskService(
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        series,
+        repository,
+        clock=fixed_now,
+    )
     return palette, projects, series, tasks
 
 

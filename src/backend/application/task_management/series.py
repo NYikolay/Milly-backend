@@ -50,29 +50,6 @@ logger = structlog.get_logger(__name__)
 __all__ = ["SeriesDetail", "SeriesService", "UNSET", "UnsetType"]
 
 
-def _is_legacy_unset(value: object) -> bool:
-    """
-    Detect the legacy task-management unset sentinel.
-
-    Purpose:
-        Keep the migrated service usable by the old task service during the
-        transition to the new application wiring.
-
-    Args:
-        value: Candidate update-field value.
-
-    Returns:
-        bool: ``True`` when the value is an unset sentinel from the legacy
-            module rather than the domain sentinel.
-
-    Notes:
-        - The domain ``UnsetType`` is excluded so callers using the new
-          sentinel keep their exact instance.
-        - This bridge is removed once all wiring uses the application service.
-    """
-    return not isinstance(value, UnsetType) and type(value).__name__ == "UnsetType"
-
-
 class SeriesService:
     """Coordinates recurring series creation, generation, edits, and deletion."""
 
@@ -494,12 +471,7 @@ class SeriesService:
               reminders in place.
             - Locks the series row and its task rows; persists the mutated
               series and every changed future task explicitly; does not commit.
-            - Accepts the legacy unset sentinel while the old task service
-              still calls this module during the migration.
         """
-        description = UNSET if _is_legacy_unset(description) else description
-        ends_on = UNSET if _is_legacy_unset(ends_on) else ends_on
-        project_id = UNSET if _is_legacy_unset(project_id) else project_id
         series = await self._require_series(user_id, series_id, for_update=True)
         resolved_frequency, resolved_interval_days = self._resolve_schedule(
             frequency=frequency,
