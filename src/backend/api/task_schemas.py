@@ -8,7 +8,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend.api.pagination import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
-from backend.domain.entities import TaskReminder
 from backend.task_management.date_bounds import (
     require_supported_date,
     require_supported_datetime,
@@ -401,32 +400,6 @@ class ReminderResponse(BaseModel):
     time_of_day: time | None
     timezone: str | None
     next_run_at: datetime | None
-
-    @classmethod
-    def from_row(cls, reminder: TaskReminder) -> ReminderResponse:
-        """
-        Build a reminder response from a persisted row.
-
-        Purpose:
-            Serialize reminder configuration together with its next computed
-            slot for task and series responses.
-
-        Args:
-            reminder: Persisted task or series reminder.
-
-        Returns:
-            ReminderResponse: Reminder fields exposed to clients.
-        """
-        return cls(
-            id=reminder.id,
-            kind=ReminderKind(reminder.kind),
-            enabled=reminder.enabled,
-            offset_minutes=reminder.offset_minutes,
-            interval_days=reminder.interval_days,
-            time_of_day=reminder.time_of_day,
-            timezone=reminder.timezone,
-            next_run_at=reminder.next_run_at,
-        )
 
 
 class TaskLabelResponse(BaseModel):

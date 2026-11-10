@@ -7,28 +7,22 @@ from pydantic import BaseModel, Field
 
 from backend.api.deps import CurrentAccessDep, ProjectServiceDep
 from backend.api.errors.openapi import StandardizedAPIRouter, document_errors
-from backend.api.pagination import (
-    DEFAULT_PAGE_SIZE,
-    MAX_DB_ID,
-    MAX_PAGE_SIZE,
-    decode_cursor,
-    encode_cursor,
-    filter_fingerprint,
+from backend.api.mappers.task_management import project_response
+from backend.api.pagination import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+from backend.api.queries.projects import (
+    encode_project_cursor,
+    parse_project_cursor,
+    project_filter_fingerprint,
 )
 from backend.api.task_schemas import (
-    ColorResponse,
     ProjectCreate,
     ProjectListResponse,
-    ProjectProgressResponse,
     ProjectResponse,
     ProjectUpdate,
 )
-from backend.core.errors import BadRequestError, ErrorCode
-from backend.task_management.projects import (
-    ProjectListCursor,
-    ProjectService,
-    ProjectSummary,
-)
+from backend.application.task_management.projects import ProjectService
+from backend.core.errors import ErrorCode
+from backend.domain.task_management.models import ProjectSummary
 
 router = StandardizedAPIRouter(prefix="/projects", tags=["projects"])
 
@@ -46,95 +40,6 @@ class ProjectListQuery(BaseModel):
     include_archived: bool = False
     limit: int = Field(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE)
     cursor: str | None = None
-
-
-def _project_response(summary: ProjectSummary) -> ProjectResponse:
-    """
-    Build a project response from a service summary.
-
-    Purpose:
-        Serialize the project, its resolved palette color, and progress
-        counters consistently across project routes.
-
-    Args:
-        summary: Project summary returned by the project service.
-
-    Returns:
-        ProjectResponse: Project fields with color and progress data.
-    """
-    return ProjectResponse(
-        id=summary.project.id,
-        name=summary.project.name,
-        description=summary.project.description,
-        icon=summary.project.icon,
-        color=ColorResponse.model_validate(summary.color),
-        progress=ProjectProgressResponse(
-            total=summary.progress.total,
-            completed=summary.progress.completed,
-            remaining=summary.progress.remaining,
-        ),
-        archived_at=summary.project.archived_at,
-        created_at=summary.project.created_at,
-        updated_at=summary.project.updated_at,
-    )
-
-
-def _is_safe_project_name_key(name_key: str) -> bool:
-    """
-    Check whether a project cursor name key is safe for a database comparison.
-
-    Purpose:
-        Reject NUL and surrogate code points that PostgreSQL text values
-        cannot contain before the key is bound into a query.
-
-    Args:
-        name_key: Case-insensitive project name key decoded from a cursor.
-
-    Returns:
-        bool: ``True`` when the key contains no forbidden code points.
-    """
-    if "\x00" in name_key:
-        return False
-    return not any(0xD800 <= ord(character) <= 0xDFFF for character in name_key)
-
-
-def _project_list_cursor(order_key: list[object]) -> ProjectListCursor:
-    """
-    Convert a decoded cursor ordering key into a typed project cursor.
-
-    Purpose:
-        Validate the ordering-key shape and types before querying the next
-        page.
-
-    Args:
-        order_key: Decoded ordering values from the cursor.
-
-    Returns:
-        ProjectListCursor: Archive state, case-insensitive name key, and
-            identifier of the last project on the previous page.
-
-    Raises:
-        BadRequestError: If the key does not contain an integer archive flag
-            of ``0`` or ``1``, a database-safe string name key, and an integer
-            project identifier within the database range.
-    """
-    try:
-        if len(order_key) != 3:
-            raise ValueError
-        archived_value, name_key, project_id = order_key
-        if type(archived_value) is not int or archived_value not in (0, 1):
-            raise ValueError
-        if not isinstance(name_key, str) or not _is_safe_project_name_key(name_key):
-            raise ValueError
-        if type(project_id) is not int or not 1 <= project_id <= MAX_DB_ID:
-            raise ValueError
-    except (TypeError, ValueError):  # fmt: skip
-        raise BadRequestError("Invalid pagination cursor") from None
-    return ProjectListCursor(
-        is_archived=archived_value == 1,
-        name_key=name_key,
-        project_id=project_id,
-    )
 
 
 async def _load_summary(
@@ -205,14 +110,12 @@ async def list_projects(
         - ``cursor`` length is enforced by the cursor decoder so an overlong
           token is a bad request rather than a validation error.
     """
-    fingerprint = filter_fingerprint({"include_archived": query.include_archived})
+    fingerprint = project_filter_fingerprint(query.include_archived)
     after = (
-        _project_list_cursor(
-            decode_cursor(
-                query.cursor,
-                user_id=claims.user_id,
-                filter_fingerprint=fingerprint,
-            )
+        parse_project_cursor(
+            query.cursor,
+            user_id=claims.user_id,
+            filter_fingerprint=fingerprint,
         )
         if query.cursor is not None
         else None
@@ -224,20 +127,16 @@ async def list_projects(
         after=after,
     )
     next_cursor = (
-        encode_cursor(
+        encode_project_cursor(
+            page.next_cursor,
             user_id=claims.user_id,
             filter_fingerprint=fingerprint,
-            order_key=[
-                1 if page.next_cursor.is_archived else 0,
-                page.next_cursor.name_key,
-                page.next_cursor.project_id,
-            ],
         )
         if page.next_cursor is not None
         else None
     )
     return ProjectListResponse(
-        items=[_project_response(item) for item in page.items],
+        items=[project_response(item) for item in page.items],
         next_cursor=next_cursor,
     )
 
@@ -285,7 +184,7 @@ async def create_project(
         icon=payload.icon,
     )
     summary = await _load_summary(service, claims.user_id, project.id)
-    return _project_response(summary)
+    return project_response(summary)
 
 
 @router.get(
@@ -321,7 +220,7 @@ async def read_project(
         - Another user's project is reported as not found.
     """
     summary = await _load_summary(service, claims.user_id, project_id)
-    return _project_response(summary)
+    return project_response(summary)
 
 
 @router.patch(
@@ -365,7 +264,7 @@ async def update_project(
     changes = payload.model_dump(exclude_unset=True)
     project = await service.update(claims.user_id, project_id, **changes)
     summary = await _load_summary(service, claims.user_id, project.id)
-    return _project_response(summary)
+    return project_response(summary)
 
 
 @router.post(
@@ -403,7 +302,7 @@ async def archive_project(
     """
     project = await service.archive(claims.user_id, project_id)
     summary = await _load_summary(service, claims.user_id, project.id)
-    return _project_response(summary)
+    return project_response(summary)
 
 
 @router.post(
@@ -442,7 +341,7 @@ async def unarchive_project(
     """
     project = await service.unarchive(claims.user_id, project_id)
     summary = await _load_summary(service, claims.user_id, project.id)
-    return _project_response(summary)
+    return project_response(summary)
 
 
 @router.delete(

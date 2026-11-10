@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from backend.api.deps import CurrentAccessDep, PaletteServiceDep
 from backend.api.errors.openapi import StandardizedAPIRouter, document_errors
-from backend.api.task_schemas import ColorPaletteResponse, ColorResponse
+from backend.api.mappers.task_management import color_response
+from backend.api.task_schemas import ColorPaletteResponse
 from backend.core.errors import ErrorCode
 
 router = StandardizedAPIRouter(prefix="/color-palette", tags=["color-palette"])
@@ -46,4 +47,4 @@ async def read_color_palette(
         - Inactive colors are never exposed by this endpoint.
     """
     colors = await service.list_active()
-    return ColorPaletteResponse(items=[ColorResponse.model_validate(color) for color in colors])
+    return ColorPaletteResponse(items=[color_response(color) for color in colors])

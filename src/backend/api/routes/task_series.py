@@ -6,17 +6,14 @@ from fastapi import Response, status
 
 from backend.api.deps import CurrentAccessDep, SeriesServiceDep
 from backend.api.errors.openapi import StandardizedAPIRouter, document_errors
+from backend.api.mappers.task_management import series_response
 from backend.api.task_schemas import (
-    ReminderResponse,
     SeriesCreate,
     SeriesListResponse,
     SeriesResponse,
     SeriesUpdate,
-    TaskLabelResponse,
 )
 from backend.core.errors import ErrorCode
-from backend.task_management.enums import Priority, SeriesFrequency
-from backend.task_management.series import SeriesDetail
 
 router = StandardizedAPIRouter(prefix="/task-series", tags=["task-series"])
 
@@ -25,42 +22,6 @@ _ERRORS = {
     ErrorCode.BAD_REQUEST: "A series field or reminder rule is invalid.",
     ErrorCode.UNAUTHORIZED: "The bearer token is missing or invalid.",
 }
-
-
-def _series_response(detail: SeriesDetail) -> SeriesResponse:
-    """
-    Build a series response from a service detail.
-
-    Purpose:
-        Serialize one recurring series with its schedule, labels, and template
-        reminders.
-
-    Args:
-        detail: Series detail returned by the series service.
-
-    Returns:
-        SeriesResponse: The series fields exposed to clients, including its
-            frequency and interval between occurrences.
-    """
-    series = detail.series
-    return SeriesResponse(
-        id=series.id,
-        title=series.title,
-        description=series.description,
-        priority=Priority(series.priority),
-        frequency=SeriesFrequency(series.frequency),
-        interval_days=series.interval_days,
-        time_of_day=series.time_of_day,
-        timezone=series.timezone,
-        starts_on=series.starts_on,
-        ends_on=series.ends_on,
-        generated_through=series.generated_through,
-        reminders_enabled=series.reminders_enabled,
-        labels=[TaskLabelResponse(id=label.id, name=label.name) for label in detail.labels],
-        reminders=[ReminderResponse.from_row(reminder) for reminder in detail.reminders],
-        created_at=series.created_at,
-        updated_at=series.updated_at,
-    )
 
 
 def _series_changes(payload: SeriesUpdate) -> dict[str, Any]:
@@ -118,7 +79,7 @@ async def list_series(
         - Performs no writes.
     """
     details = await service.list_details(claims.user_id)
-    return SeriesListResponse(items=[_series_response(detail) for detail in details])
+    return SeriesListResponse(items=[series_response(detail) for detail in details])
 
 
 @router.post(
@@ -178,7 +139,7 @@ async def create_series(
         reminders_enabled=payload.reminders_enabled,
         reminders=tuple(reminder.to_input() for reminder in payload.reminders),
     )
-    return _series_response(await service.get_detail(claims.user_id, series.id))
+    return series_response(await service.get_detail(claims.user_id, series.id))
 
 
 @router.get(
@@ -213,7 +174,7 @@ async def read_series(
     Notes:
         - Another user's series is reported as not found.
     """
-    return _series_response(await service.get_detail(claims.user_id, series_id))
+    return series_response(await service.get_detail(claims.user_id, series_id))
 
 
 @router.patch(
@@ -261,7 +222,7 @@ async def update_series(
           series by the service.
     """
     await service.update(claims.user_id, series_id, **_series_changes(payload))
-    return _series_response(await service.get_detail(claims.user_id, series_id))
+    return series_response(await service.get_detail(claims.user_id, series_id))
 
 
 @router.delete(
