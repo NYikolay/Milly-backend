@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
-from backend.domain.entities import ColorPalette, Label, Project
+from backend.domain.entities import (
+    ColorPalette,
+    Label,
+    Project,
+    Task,
+    TaskReminder,
+    TaskSeries,
+)
+from backend.domain.task_management.policies import HORIZON_DAYS, rebuild_reminder_slot
 from backend.models.reminder_delivery import ReminderDelivery
-from backend.models.task import Task
-from backend.models.task_label import TaskLabel
-from backend.models.task_reminder import TaskReminder
-from backend.models.task_series import TaskSeries
 from backend.task_management.enums import DeliveryStatus, ReminderKind, SeriesFrequency
-from backend.task_management.reminders import rebuild_reminder_slot
-from backend.task_management.schedule import HORIZON_DAYS
 
 _ACTIVE_DELIVERY_STATUSES = {
     DeliveryStatus.PENDING.value,
@@ -83,9 +86,9 @@ class FakeTaskManagementRepository:
         }
         self.projects: dict[int, Project] = {}
         self.labels: dict[int, Label] = {}
-        self.tasks: dict[int, Task] = {}
-        self.series: dict[int, TaskSeries] = {}
-        self.reminders: dict[int, TaskReminder] = {}
+        self.tasks: dict[int, Any] = {}
+        self.series: dict[int, Any] = {}
+        self.reminders: dict[int, Any] = {}
         self.deliveries: dict[int, ReminderDelivery] = {}
         self.task_labels: set[tuple[int, int]] = set()
         self.series_labels: set[tuple[int, int]] = set()
@@ -97,8 +100,12 @@ class FakeTaskManagementRepository:
         self.due_reminder_limits: list[int] = []
         self.commits = 0
         self.rollbacks = 0
+        self.flush_calls = 0
         self.saved_labels: list[int] = []
         self.saved_projects: list[int] = []
+        self.saved_tasks: list[int] = []
+        self.saved_series: list[int] = []
+        self.saved_reminders: list[int] = []
         self.claimed_series_ids: list[int] = []
         self.blocked_series_ids: set[int] = set()
         self.series_errors: dict[int, Exception] = {}
@@ -133,23 +140,23 @@ class FakeTaskManagementRepository:
         self.labels[label.id] = label
         return label
 
-    def insert_task(self, task: Task) -> Task:
+    def insert_task(self, task: Any) -> Any:
         """Insert a task and return it."""
-        if task.id is None:
+        if not task.id:
             task.id = self._next_id("task", self.tasks)
         self.tasks[task.id] = task
         return task
 
-    def insert_series(self, series: TaskSeries) -> TaskSeries:
+    def insert_series(self, series: Any) -> Any:
         """Insert a series and return it."""
-        if series.id is None:
+        if not series.id:
             series.id = self._next_id("series", self.series)
         self.series[series.id] = series
         return series
 
-    def insert_reminder(self, reminder: TaskReminder) -> TaskReminder:
+    def insert_reminder(self, reminder: Any) -> Any:
         """Insert a reminder and return it."""
-        if reminder.id is None:
+        if not reminder.id:
             reminder.id = self._next_id("reminder", self.reminders)
         self.reminders[reminder.id] = reminder
         return reminder
@@ -175,7 +182,7 @@ class FakeTaskManagementRepository:
         series = self.series.get(series_id)
         if series is None or series.user_id != user_id:
             return None
-        return series.frequency
+        return cast(str | None, series.frequency)
 
     def _cancel_deliveries(self, reminder_ids: set[int]) -> None:
         """Cancel active deliveries for the selected reminders."""
@@ -502,7 +509,7 @@ class FakeTaskManagementRepository:
         limit: int,
         after_due_at: datetime | None,
         after_task_id: int | None,
-    ) -> Sequence[Task]:
+    ) -> Any:
         """List tasks applying service filters and the cursor page bounds."""
         tasks = [
             task
@@ -561,7 +568,7 @@ class FakeTaskManagementRepository:
         task_id: int,
         *,
         for_update: bool = False,
-    ) -> Task | None:
+    ) -> Any:
         """Return a non-deleted task owned by a user."""
         if task_id in self.task_errors:
             raise RuntimeError("task lookup failed")
@@ -570,18 +577,23 @@ class FakeTaskManagementRepository:
             return None
         return task
 
-    async def add_task(self, task: Task) -> Task:
+    async def add_task(self, task: Any) -> Any:
         """Persist a task."""
         return self.insert_task(task)
 
-    async def add_tasks(self, tasks: Sequence[Task]) -> Sequence[Task]:
-        """Persist multiple tasks in one batch."""
+    async def add_tasks(self, tasks: Sequence[Any]) -> Sequence[Any]:
+        """Persist multiple tasks in one batch and return their generated entities."""
         self.bulk_calls.append("add_tasks")
-        return [self.insert_task(task) for task in tasks]
+        return [self.insert_task(replace(task, id=0)) for task in tasks]
+
+    async def save_task(self, task: Any) -> None:
+        """Persist changed task fields and record the save."""
+        self.saved_tasks.append(task.id)
+        self.tasks[task.id] = task
 
     async def soft_delete_task(
         self,
-        task: Task,
+        task: Any,
         deleted_at: datetime,
         batch_id: UUID | None = None,
     ) -> None:
@@ -623,7 +635,7 @@ class FakeTaskManagementRepository:
         for label_id in label_ids:
             self.task_labels.add((task_id, label_id))
 
-    async def add_task_label_rows(self, rows: Sequence[TaskLabel]) -> None:
+    async def add_task_label_rows(self, rows: Sequence[Any]) -> None:
         """Assign multiple task-label rows in one batch."""
         self.bulk_calls.append("add_task_label_rows")
         for row in rows:
@@ -663,7 +675,7 @@ class FakeTaskManagementRepository:
         self,
         user_id: int,
         task_id: int,
-    ) -> Sequence[TaskReminder]:
+    ) -> Any:
         """Return reminders attached to a task."""
         return sorted(
             (
@@ -678,7 +690,7 @@ class FakeTaskManagementRepository:
         self,
         user_id: int,
         task_ids: Sequence[int],
-    ) -> dict[int, Sequence[TaskReminder]]:
+    ) -> Any:
         """Return reminders attached to each requested task."""
         self.batch_calls.append(("list_task_reminders_for_tasks", tuple(task_ids)))
         return {task_id: await self.list_task_reminders(user_id, task_id) for task_id in task_ids}
@@ -687,7 +699,7 @@ class FakeTaskManagementRepository:
         self,
         user_id: int,
         series_id: int,
-    ) -> Sequence[TaskReminder]:
+    ) -> Any:
         """Return template reminders attached to a series."""
         return sorted(
             (
@@ -698,11 +710,16 @@ class FakeTaskManagementRepository:
             key=lambda reminder: reminder.id,
         )
 
-    async def add_reminder(self, reminder: TaskReminder) -> TaskReminder:
+    async def add_reminder(self, reminder: Any) -> Any:
         """Persist a reminder."""
         return self.insert_reminder(reminder)
 
-    async def add_reminders(self, reminders: Sequence[TaskReminder]) -> None:
+    async def save_reminder(self, reminder: Any) -> None:
+        """Persist changed reminder fields and record the save."""
+        self.saved_reminders.append(reminder.id)
+        self.reminders[reminder.id] = reminder
+
+    async def add_reminders(self, reminders: Sequence[Any]) -> None:
         """Persist multiple reminders in one batch."""
         self.bulk_calls.append("add_reminders")
         for reminder in reminders:
@@ -823,7 +840,7 @@ class FakeTaskManagementRepository:
             and project.archived_at is None
         )
 
-    async def list_series(self, user_id: int) -> Sequence[TaskSeries]:
+    async def list_series(self, user_id: int) -> Any:
         """List non-deleted series owned by a user."""
         return sorted(
             (
@@ -841,7 +858,7 @@ class FakeTaskManagementRepository:
         *,
         for_update: bool = False,
         include_deleted: bool = False,
-    ) -> TaskSeries | None:
+    ) -> Any:
         """Return a series owned by a user, including soft-deleted rows on demand."""
         series = self.series.get(series_id)
         if series is None or series.user_id != user_id:
@@ -856,7 +873,7 @@ class FakeTaskManagementRepository:
         series_ids: Sequence[int],
         *,
         include_deleted: bool = False,
-    ) -> dict[int, TaskSeries]:
+    ) -> Any:
         """Record the batch and return owned series keyed by identifier."""
         self.series_batch_calls.append((tuple(series_ids), include_deleted))
         result: dict[int, TaskSeries] = {}
@@ -870,13 +887,18 @@ class FakeTaskManagementRepository:
                 result[series_id] = series
         return result
 
-    async def add_series(self, series: TaskSeries) -> TaskSeries:
+    async def add_series(self, series: Any) -> Any:
         """Persist a series."""
         return self.insert_series(series)
 
+    async def save_series(self, series: Any) -> None:
+        """Persist changed series fields and record the save."""
+        self.saved_series.append(series.id)
+        self.series[series.id] = series
+
     async def soft_delete_series(
         self,
-        series: TaskSeries,
+        series: Any,
         deleted_at: datetime,
         batch_id: UUID | None = None,
     ) -> None:
@@ -915,7 +937,7 @@ class FakeTaskManagementRepository:
             and self.labels[label_id].deleted_at is None
         ]
 
-    async def list_series_for_generation(self, now: datetime) -> Sequence[TaskSeries]:
+    async def list_series_for_generation(self, now: datetime) -> Any:
         """List active series that may need new instances."""
         threshold = now + timedelta(days=HORIZON_DAYS) - timedelta(days=1)
         utc_today = now.astimezone(UTC).date()
@@ -935,7 +957,7 @@ class FakeTaskManagementRepository:
         self,
         series_id: int,
         user_id: int,
-    ) -> TaskSeries | None:
+    ) -> Any:
         """Return a series for generation unless the fake marks it locked."""
         self.claimed_series_ids.append(series_id)
         if series_id in self.series_errors:
@@ -951,7 +973,7 @@ class FakeTaskManagementRepository:
         self,
         series_id: int,
         user_id: int,
-    ) -> Sequence[Task]:
+    ) -> Any:
         """Return non-deleted tasks of a series."""
         return sorted(
             (
@@ -987,7 +1009,7 @@ class FakeTaskManagementRepository:
         series_id: int,
         user_id: int,
         now: datetime,
-    ) -> Sequence[Task]:
+    ) -> Any:
         """Return future, incomplete, non-deleted instances of a series."""
         return sorted(
             (
@@ -1024,7 +1046,7 @@ class FakeTaskManagementRepository:
         now: datetime,
         *,
         limit: int,
-    ) -> Sequence[TaskReminder]:
+    ) -> Any:
         """List due reminders whose owner is active and enabled, up to the limit."""
         self.due_reminder_limits.append(limit)
         due: list[TaskReminder] = []
@@ -1061,7 +1083,7 @@ class FakeTaskManagementRepository:
         self,
         reminder_id: int,
         now: datetime,
-    ) -> TaskReminder | None:
+    ) -> Any:
         """Return a due reminder for simulated locking."""
         reminder = self.reminders.get(reminder_id)
         if (
@@ -1077,7 +1099,7 @@ class FakeTaskManagementRepository:
 
     async def update_reminder_next_run_at(
         self,
-        reminder: TaskReminder,
+        reminder: Any,
         next_run_at: datetime | None,
     ) -> None:
         """Update a reminder slot."""
@@ -1087,7 +1109,7 @@ class FakeTaskManagementRepository:
         self,
         reminder_id: int,
         scheduled_for: datetime,
-    ) -> ReminderDelivery | None:
+    ) -> Any:
         """Return a delivery by its idempotency key."""
         return next(
             (
@@ -1098,13 +1120,17 @@ class FakeTaskManagementRepository:
             None,
         )
 
-    async def add_delivery(self, delivery: ReminderDelivery) -> ReminderDelivery:
+    async def add_delivery(self, delivery: Any) -> Any:
         """Persist a delivery."""
         return self.insert_delivery(delivery)
 
+    async def save_delivery(self, delivery: Any) -> None:
+        """Persist changed delivery fields in the in-memory implementation."""
+        self.deliveries[delivery.id] = delivery
+
     async def mark_delivery_sending(
         self,
-        delivery: ReminderDelivery,
+        delivery: Any,
         now: datetime,
     ) -> None:
         """Claim a delivery for sending."""
@@ -1115,7 +1141,7 @@ class FakeTaskManagementRepository:
 
     async def mark_delivery_sent(
         self,
-        delivery: ReminderDelivery,
+        delivery: Any,
         sent_at: datetime,
         telegram_message_id: int | None,
     ) -> None:
@@ -1129,7 +1155,7 @@ class FakeTaskManagementRepository:
 
     async def mark_delivery_pending(
         self,
-        delivery: ReminderDelivery,
+        delivery: Any,
         next_attempt_at: datetime,
         last_error: str | None,
     ) -> None:
@@ -1141,7 +1167,7 @@ class FakeTaskManagementRepository:
 
     async def mark_delivery_failed(
         self,
-        delivery: ReminderDelivery,
+        delivery: Any,
         next_attempt_at: datetime | None,
         last_error: str | None,
     ) -> None:
@@ -1151,13 +1177,13 @@ class FakeTaskManagementRepository:
         delivery.locked_at = None
         delivery.last_error = last_error
 
-    async def cancel_delivery(self, delivery: ReminderDelivery) -> None:
+    async def cancel_delivery(self, delivery: Any) -> None:
         """Cancel a delivery without sending it."""
         delivery.status = DeliveryStatus.CANCELLED.value
         delivery.locked_at = None
         delivery.next_attempt_at = None
 
-    async def reactivate_delivery(self, delivery: ReminderDelivery) -> None:
+    async def reactivate_delivery(self, delivery: Any) -> None:
         """Reset a cancelled delivery to pending."""
         delivery.status = DeliveryStatus.PENDING.value
         delivery.attempts = 0
@@ -1176,7 +1202,8 @@ class FakeTaskManagementRepository:
         self.rollbacks += 1
 
     async def flush(self) -> None:
-        """Flush pending changes in the in-memory implementation."""
+        """Record a flush in the in-memory implementation."""
+        self.flush_calls += 1
 
 
 def fixed_now() -> datetime:
@@ -1242,10 +1269,15 @@ def make_task(
     completed_at: datetime | None = None,
     reminders_enabled: bool = False,
     deleted_at: datetime | None = None,
-) -> Task:
-    """Build a task with deterministic values."""
+) -> Any:
+    """Build a domain task with deterministic values.
+
+    Notes:
+        - The ``Any`` return keeps legacy ORM-row repository tests
+          type-compatible until the Task 18 bridge cleanup.
+    """
     return Task(
-        id=task_id,
+        id=cast(int, task_id),
         user_id=user_id,
         series_id=series_id,
         project_id=project_id,
@@ -1277,10 +1309,15 @@ def make_series(
     generated_through: datetime | None = None,
     reminders_enabled: bool = False,
     deleted_at: datetime | None = None,
-) -> TaskSeries:
-    """Build a series with deterministic values."""
+) -> Any:
+    """Build a domain series with deterministic values.
+
+    Notes:
+        - The ``Any`` return keeps legacy ORM-row repository tests
+          type-compatible until the Task 18 bridge cleanup.
+    """
     return TaskSeries(
-        id=series_id,
+        id=cast(int, series_id),
         user_id=user_id,
         project_id=project_id,
         title=title,
@@ -1312,10 +1349,15 @@ def make_reminder(
     time_of_day: Any = None,
     timezone: str | None = None,
     next_run_at: datetime | None = None,
-) -> TaskReminder:
-    """Build a reminder with deterministic values."""
+) -> Any:
+    """Build a domain reminder with deterministic values.
+
+    Notes:
+        - The ``Any`` return keeps legacy ORM-row repository tests
+          type-compatible until the Task 18 bridge cleanup.
+    """
     return TaskReminder(
-        id=reminder_id,
+        id=cast(int, reminder_id),
         user_id=user_id,
         task_id=task_id,
         series_id=series_id,

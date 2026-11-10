@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
+from typing import Any, cast
 
 import pytest
 
 from backend.api.pagination import DEFAULT_PAGE_SIZE
+from backend.application.task_management.series import SeriesService
 from backend.core.errors import BadRequestError, ErrorCode, NotFoundError
 from backend.task_management.enums import Priority, ReminderKind, TaskRecurrence
-from backend.task_management.labels import LabelService
 from backend.task_management.palette import PaletteService
 from backend.task_management.projects import ProjectService
 from backend.task_management.reminders import ReminderInput
-from backend.task_management.series import SeriesService
 from backend.task_management.tasks import TaskFilters, TaskListCursor, TaskService
 from tests.task_management_fakes import (
     FakeTaskManagementRepository,
@@ -28,19 +28,26 @@ USER_ID = 7
 
 
 def make_series_service(repository: FakeTaskManagementRepository) -> SeriesService:
-    """Build a real series service over the fake repository."""
-    palette = PaletteService(repository)
+    """Build a real application series service over the fake repository ports."""
     return SeriesService(
         repository,
-        ProjectService(repository, palette, clock=fixed_now),
-        LabelService(repository, palette, clock=fixed_now),
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
         clock=fixed_now,
     )
 
 
 def make_service(repository: FakeTaskManagementRepository) -> TaskService:
     """Build a task service over the fake repository."""
-    return TaskService(repository, make_series_service(repository), clock=fixed_now)
+    return TaskService(
+        repository,
+        cast(Any, make_series_service(repository)),
+        clock=fixed_now,
+    )
 
 
 async def test_create_one_off_task_inserts_labels_and_before_due_reminder() -> None:
@@ -2243,7 +2250,7 @@ async def test_today_progress_uses_local_date_near_utc_midnight(
     repository.insert_task(make_task(task_id=1, due_at=due_at))
     service = TaskService(
         repository,
-        make_series_service(repository),
+        cast(Any, make_series_service(repository)),
         clock=lambda: clock,
     )
 

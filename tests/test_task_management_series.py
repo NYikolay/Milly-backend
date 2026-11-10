@@ -5,14 +5,11 @@ from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 
+from backend.application.task_management.series import SeriesService
 from backend.core.errors import BadRequestError, ErrorCode, NotFoundError
+from backend.domain.task_management.models import ReminderInput
 from backend.models.task import Task
 from backend.task_management.enums import Priority, ReminderKind, SeriesFrequency
-from backend.task_management.labels import LabelService
-from backend.task_management.palette import PaletteService
-from backend.task_management.projects import ProjectService
-from backend.task_management.reminders import ReminderInput
-from backend.task_management.series import SeriesService
 from tests.task_management_fakes import (
     FakeTaskManagementRepository,
     fixed_now,
@@ -27,15 +24,23 @@ from tests.task_management_fakes import (
 USER_ID = 7
 
 
-def make_service(repository: FakeTaskManagementRepository) -> SeriesService:
-    """Build a real series service over the fake repository."""
-    palette = PaletteService(repository)
+def make_series_service(repository: FakeTaskManagementRepository) -> SeriesService:
+    """Build a real series service over the fake repository ports."""
     return SeriesService(
         repository,
-        ProjectService(repository, palette, clock=fixed_now),
-        LabelService(repository, palette, clock=fixed_now),
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
+        repository,
         clock=fixed_now,
     )
+
+
+def make_service(repository: FakeTaskManagementRepository) -> SeriesService:
+    """Build a real series service over the fake repository."""
+    return make_series_service(repository)
 
 
 class FlushOrderingRepository(FakeTaskManagementRepository):
@@ -1716,3 +1721,226 @@ async def test_create_from_task_rejects_derived_start_outside_supported_range() 
 
     assert repository.series == {}
     assert task.series_id is None
+
+
+async def test_generate_commits_each_series_and_rolls_back_failures() -> None:
+    """Generation keeps per-series commit boundaries."""
+    repository = FakeTaskManagementRepository()
+    for series_id in (1, 2, 3):
+        repository.insert_series(
+            make_series(
+                series_id=series_id,
+                time_of_day=time(9, 0),
+                starts_on=fixed_now().date(),
+            )
+        )
+    service = make_series_service(repository)
+    repository.series_errors[2] = RuntimeError("boom")
+
+    await service.generate(fixed_now())
+
+    assert repository.commits >= 2
+    assert repository.rollbacks == 1
+
+
+async def test_create_from_task_flushes_before_generation() -> None:
+    """The new series link is saved and visible to due-slot dedupe."""
+    repository = FakeTaskManagementRepository()
+    service = make_series_service(repository)
+    task = repository.insert_task(
+        make_task(
+            user_id=USER_ID,
+            due_at=fixed_now() + timedelta(days=1),
+        )
+    )
+
+    await service.create_from_task(USER_ID, task, frequency=SeriesFrequency.DAILY)
+
+    assert task.id in repository.saved_tasks
+    assert repository.flush_calls >= 1
+
+
+async def test_update_series_saves_mutated_series() -> None:
+    """Series field edits are persisted through an explicit save."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    service = make_service(repository)
+
+    await service.update(USER_ID, series.id, title="New")
+
+    assert repository.saved_series == [series.id]
+
+
+async def test_create_saves_generated_through_marker() -> None:
+    """Creation persists the advanced generation marker explicitly."""
+    repository = FakeTaskManagementRepository()
+    service = make_service(repository)
+
+    series = await service.create(
+        USER_ID,
+        title="Daily",
+        description=None,
+        priority=Priority.NEITHER,
+        time_of_day=time(9, 0),
+        timezone="UTC",
+        starts_on=fixed_now().date(),
+        ends_on=None,
+        project_id=None,
+        label_ids=(),
+        reminders_enabled=False,
+        reminders=(),
+    )
+
+    assert series.generated_through is not None
+    assert series.id in repository.saved_series
+
+
+async def test_generate_saves_generated_through_marker() -> None:
+    """Periodic generation persists the advanced marker before committing."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=fixed_now().date(),
+        )
+    )
+    service = make_service(repository)
+
+    await service.generate(fixed_now())
+
+    assert series.generated_through is not None
+    assert series.id in repository.saved_series
+
+
+async def test_update_future_instances_saves_each_changed_task() -> None:
+    """Only future incomplete instances receive an explicit task save."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    past = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=fixed_now() - timedelta(days=1),
+        )
+    )
+    future = repository.insert_task(
+        make_task(
+            task_id=2,
+            series_id=series.id,
+            due_at=fixed_now() + timedelta(days=1),
+        )
+    )
+    completed = repository.insert_task(
+        make_task(
+            task_id=3,
+            series_id=series.id,
+            due_at=fixed_now() + timedelta(days=2),
+            completed_at=fixed_now(),
+        )
+    )
+    service = make_service(repository)
+
+    await service.update(USER_ID, series.id, title="New")
+
+    assert future.id in repository.saved_tasks
+    assert past.id not in repository.saved_tasks
+    assert completed.id not in repository.saved_tasks
+
+
+async def test_timezone_update_saves_template_reminder() -> None:
+    """Retargeting template reminders persists each changed reminder."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    template = repository.insert_reminder(
+        make_reminder(
+            reminder_id=1,
+            series_id=series.id,
+            kind=ReminderKind.SCHEDULED,
+            offset_minutes=None,
+            interval_days=1,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+        )
+    )
+    service = make_service(repository)
+
+    await service.update(USER_ID, series.id, timezone="Asia/Tokyo")
+
+    assert template.timezone == "Asia/Tokyo"
+    assert repository.saved_reminders == [template.id]
+
+
+async def test_detach_task_saves_cleared_series_link() -> None:
+    """Detaching persists the task after clearing its series reference."""
+    repository = FakeTaskManagementRepository()
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    current = repository.insert_task(
+        make_task(
+            task_id=1,
+            series_id=series.id,
+            due_at=fixed_now() + timedelta(days=1),
+        )
+    )
+    service = make_service(repository)
+
+    await service.detach_task(USER_ID, current, series)
+
+    assert current.series_id is None
+    assert repository.saved_tasks == [current.id]
+
+
+async def test_generation_uses_returned_task_ids_for_related_rows() -> None:
+    """Generated labels and reminders use the identifiers returned by the batch."""
+    repository = FakeTaskManagementRepository()
+    label = repository.insert_label(make_label())
+    series = repository.insert_series(
+        make_series(
+            series_id=1,
+            time_of_day=time(9, 0),
+            starts_on=fixed_now().date() - timedelta(days=1),
+        )
+    )
+    repository.series_labels.add((series.id, label.id))
+    repository.insert_reminder(
+        make_reminder(
+            series_id=series.id,
+            kind=ReminderKind.BEFORE_DUE,
+            offset_minutes=30,
+        )
+    )
+    service = make_service(repository)
+
+    await service.generate(fixed_now())
+
+    stored_ids = {task.id for task in repository.tasks.values() if task.series_id == series.id}
+    assert stored_ids
+    assert repository.task_labels == {(task_id, label.id) for task_id in stored_ids}
+    assert {
+        reminder.task_id for reminder in repository.reminders.values() if reminder.series_id is None
+    } == stored_ids
