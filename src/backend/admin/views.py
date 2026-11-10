@@ -10,10 +10,11 @@ from sqladmin.filters import (
     ForeignKeyFilter,
     OperationColumnFilter,
 )
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from starlette.requests import Request
 
+from backend.composition.task_management import build_palette_service
 from backend.core.errors import ConflictError
 from backend.models.auth_session import AuthSession
 from backend.models.color_palette import ColorPalette
@@ -138,23 +139,22 @@ class ColorPaletteAdmin(ModelView, model=ColorPalette):
                 deactivates the last active color.
 
         Notes:
-            - The active-color count excludes the model being changed and is
-              read through SQLAdmin's async session factory.
+            - The immutable-slug rule stays in the admin view.
+            - Deactivation checks delegate to
+              ``PaletteService.ensure_can_deactivate`` on a session created by
+              SQLAdmin's async session factory. The service conflict is
+              re-raised with the admin-specific message.
         """
         if not is_created and data.get("slug", model.slug) != model.slug:
             raise ConflictError("Palette color slug is immutable")
         if not is_created and data.get("is_active") is False:
             async with self.session_maker() as session:
-                result = await session.execute(
-                    select(func.count())
-                    .select_from(ColorPalette)
-                    .where(
-                        ColorPalette.is_active.is_(True),
-                        ColorPalette.id != model.id,
-                    )
-                )
-                if result.scalar_one() == 0:
-                    raise ConflictError("Cannot deactivate the last active palette color")
+                try:
+                    await build_palette_service(session).ensure_can_deactivate(model.id)
+                except ConflictError as error:
+                    raise ConflictError(
+                        "Cannot deactivate the last active palette color"
+                    ) from error
 
     async def on_model_delete(self, model: ColorPalette, request: Request) -> None:
         """
@@ -172,22 +172,20 @@ class ColorPaletteAdmin(ModelView, model=ColorPalette):
                 remains.
 
         Notes:
+            - Active colors are validated through
+              ``PaletteService.ensure_can_delete`` on a session created by
+              SQLAdmin's async session factory. The service conflict is
+              re-raised with the admin-specific message.
             - Inactive colors are deletable unless referenced, where the
               database foreign key still enforces ``ON DELETE RESTRICT``.
         """
         if not model.is_active:
             return
         async with self.session_maker() as session:
-            result = await session.execute(
-                select(func.count())
-                .select_from(ColorPalette)
-                .where(
-                    ColorPalette.is_active.is_(True),
-                    ColorPalette.id != model.id,
-                )
-            )
-            if result.scalar_one() == 0:
-                raise ConflictError("Cannot delete the last active palette color")
+            try:
+                await build_palette_service(session).ensure_can_delete(model.id)
+            except ConflictError as error:
+                raise ConflictError("Cannot delete the last active palette color") from error
 
     async def delete_model(self, request: Request, pk: Any) -> None:
         """
