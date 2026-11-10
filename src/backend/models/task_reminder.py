@@ -23,7 +23,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.db.base import Base
-from backend.task_management.enums import ReminderKind
+from backend.domain.enums import ReminderKind
 
 _KIND_CHECK = f"kind IN ({', '.join(repr(item.value) for item in ReminderKind)})"
 

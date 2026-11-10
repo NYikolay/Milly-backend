@@ -26,7 +26,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.db.base import Base
-from backend.task_management.enums import Priority, SeriesFrequency
+from backend.domain.enums import Priority, SeriesFrequency
 
 _PRIORITY_CHECK = f"priority IN ({', '.join(repr(item.value) for item in Priority)})"
 _FREQUENCY_CHECK = f"frequency IN ({', '.join(repr(item.value) for item in SeriesFrequency)})"

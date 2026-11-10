@@ -23,7 +23,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.db.base import Base
-from backend.task_management.enums import Priority
+from backend.domain.enums import Priority
 
 _PRIORITY_CHECK = f"priority IN ({', '.join(repr(item.value) for item in Priority)})"
 

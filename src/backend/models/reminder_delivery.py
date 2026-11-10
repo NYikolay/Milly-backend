@@ -20,7 +20,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.db.base import Base
-from backend.task_management.enums import DeliveryStatus
+from backend.domain.enums import DeliveryStatus
 
 _STATUS_CHECK = f"status IN ({', '.join(repr(item.value) for item in DeliveryStatus)})"
 
