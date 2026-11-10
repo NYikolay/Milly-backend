@@ -22,6 +22,16 @@ class SqlAlchemyUnitOfWork:
     """
 
     def __init__(self, session: AsyncSession) -> None:
+        """
+        Bind the unit of work to an existing session.
+
+        Purpose:
+            Reuse the caller-owned request- or job-scoped session instead of
+            opening another transaction.
+
+        Args:
+            session: Async session owning the transaction boundary.
+        """
         self._session = session
 
     async def flush(self) -> None:

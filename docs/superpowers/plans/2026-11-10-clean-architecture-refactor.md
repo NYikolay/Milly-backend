@@ -1302,7 +1302,7 @@ git commit -m "refactor: add API mappers and thin task routes"
 - Test: `tests/test_route_auth_matrix.py`
 
 **Interfaces:**
-- Produces: `user_response(User) -> UserResponse`, `profile_response(TelegramProfile) -> TelegramProfileResponse`, `auth_response(LoginResult, expires_in) -> AuthResponse`, `token_response(TokenPair) -> TokenResponse`.
+- Produces: `user_response(User) -> UserResponse`, `profile_response(TelegramProfile) -> TelegramProfileResponse`, `auth_response(LoginResult, expires_in) -> AuthResponse`, `token_response(TokenPair, expires_in) -> TokenResponse`.
 - Produces: `CurrentUserDep = Annotated[User, Depends(get_current_user)]`.
 - Consumes: domain auth entities, `AuthService`.
 

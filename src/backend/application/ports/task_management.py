@@ -1353,7 +1353,7 @@ class SeriesRepository(Protocol):
         Notes:
             - Locks the ``task_series`` row until the transaction ends.
             - A locked series is skipped until the next generation run.
-            - Flushes but does not commit.
+            - Does not flush or commit; the caller owns the transaction.
         """
         ...
 
@@ -1377,7 +1377,7 @@ class SeriesRepository(Protocol):
 
         Notes:
             - Locks the selected task rows until the transaction ends.
-            - Flushes but does not commit.
+            - Does not flush or commit; the caller owns the transaction.
         """
         ...
 
@@ -1746,7 +1746,7 @@ class ReminderRepository(Protocol):
 
         Notes:
             - Locks the ``task_reminders`` row until the transaction ends.
-            - Flushes but does not commit; the dispatcher commits the claim.
+            - Does not flush or commit; the dispatcher commits the claim.
         """
         ...
 

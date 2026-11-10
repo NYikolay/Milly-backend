@@ -209,6 +209,18 @@ def test_task_list_response_maps_page_and_encoded_cursor() -> None:
     assert response.next_cursor == "next-token"
 
 
+def test_task_list_response_rejects_dropped_cursor() -> None:
+    """Task-list mapping refuses to drop a domain next-page cursor."""
+    detail = _task_detail()
+    page = TaskPage(
+        items=[detail],
+        next_cursor=TaskListCursor(due_at=detail.task.due_at, task_id=detail.task.id),
+    )
+
+    with pytest.raises(AssertionError, match="next_cursor"):
+        task_list_response(page)
+
+
 def test_series_response_maps_domain_detail() -> None:
     """Series response mapping does not depend on ORM rows."""
     detail = _series_detail()

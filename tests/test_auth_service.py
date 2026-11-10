@@ -40,6 +40,16 @@ def make_auth_settings(**overrides: Any) -> AuthSettings:
     return AuthSettings(**values)
 
 
+def test_auth_settings_repr_hides_secrets() -> None:
+    """Auth settings never expose secret values through their representation."""
+    settings = make_auth_settings()
+
+    representation = repr(settings)
+
+    assert BOT_TOKEN not in representation
+    assert SECRET not in representation
+
+
 def _user_and_profile() -> tuple[User, TelegramProfile]:
     """Build an existing domain user with its Telegram profile."""
     user = User(id=7)

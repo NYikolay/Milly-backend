@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from backend.domain.entities import TelegramProfile, User
@@ -68,8 +68,8 @@ class TelegramIdentity:
 class AuthSettings:
     """Plain authentication configuration passed into the application layer."""
 
-    telegram_bot_token: str | None = None
-    auth_jwt_secret: str | None = None
+    telegram_bot_token: str | None = field(default=None, repr=False)
+    auth_jwt_secret: str | None = field(default=None, repr=False)
     auth_jwt_issuer: str = "milly"
     auth_jwt_leeway_seconds: int = 30
     telegram_init_data_max_age_seconds: int = 3600

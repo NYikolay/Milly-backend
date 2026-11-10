@@ -612,7 +612,7 @@ def _new_project_row(project: Project) -> ProjectRow:
         project: Domain project to insert.
 
     Returns:
-        ProjectRow: A detached ORM row populated with persisted fields.
+        ProjectRow: A transient ORM row populated with persisted fields.
 
     Notes:
         - The returned row is not added to a session and has no identifier.

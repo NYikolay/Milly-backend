@@ -35,7 +35,7 @@ backend/
 │   │   └── errors.py        # коды ошибок и исключения
 │   ├── db/                  # engine/session, declarative base, readiness
 │   ├── models/              # ORM: auth и управление задачами
-│   ├── task_management/     # compatibility-шимы application/domain
+│   ├── task_management/     # compatibility-шимы domain/application и адаптера
 │   └── tasks/               # broker, worker, scheduler, генерация и доставка
 ├── tests/                   # unit-тесты без инфраструктуры
 ├── compose.yml              # production-подобный стек
@@ -48,7 +48,9 @@ backend/
 `composition` выбирает concrete-адаптеры, а `main.py` собирает приложение.
 `domain` и `application` не импортируют FastAPI, Starlette, SQLAlchemy,
 Taskiq, ORM-модели и внешние слои; `api` не импортирует `backend.models`.
-Модули `auth/` и `task_management/` — тонкие compatibility-реэкспорты.
+Модули `auth/` и `task_management/` — тонкие compatibility-реэкспорты;
+`task_management/repository.py` реэкспортирует инфраструктурный
+SQLAlchemy-адаптер.
 Контракты слоёв и правила зависимостей —
 в `docs/superpowers/specs/2026-11-10-clean-architecture-refactor-design.md`.
 

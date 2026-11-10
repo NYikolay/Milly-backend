@@ -96,7 +96,18 @@ def task_list_response(page: TaskPage, *, next_cursor: str | None = None) -> Tas
 
     Returns:
         TaskListResponse: Task responses and the next-page cursor.
+
+    Raises:
+        AssertionError: If ``page.next_cursor`` is set but no encoded
+            ``next_cursor`` token is supplied.
+
+    Notes:
+        - Callers must encode ``page.next_cursor`` whenever it is not ``None``;
+          dropping it would silently truncate pagination for clients.
     """
+    assert page.next_cursor is None or next_cursor is not None, (
+        "page.next_cursor requires an encoded next_cursor token"
+    )
     return TaskListResponse(
         items=[task_response(detail) for detail in page.items],
         next_cursor=next_cursor,

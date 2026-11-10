@@ -167,10 +167,10 @@ class SqlAlchemyAuthRepository:
             LookupError: If the profile row is not present in the session.
 
         Notes:
-            - Only ``first_name``, ``last_name``, ``username``,
-              ``language_code``, ``is_premium``, ``added_to_attachment_menu``,
-              ``allows_write_to_pm``, and ``photo_url`` are changed.
-            - ``telegram_id``, ``user_id``, and ``is_bot`` remain untouched.
+            - ``apply_profile`` copies every profile column back onto the row;
+              immutable columns (``id``, ``user_id``, ``telegram_id``,
+              ``is_bot``) are expected to match because the domain entity was
+              mapped from this same row.
             - Flushes but does not commit.
         """
         row = await self._session.get(TelegramProfileRow, profile.id)

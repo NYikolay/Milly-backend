@@ -224,6 +224,8 @@ class SqlAlchemyTaskRepository:
         Notes:
             - Inserts a fresh ORM row and never copies the transient domain
               identifier, so the database identity generates the key.
+            - Does not write the generated identifier back onto the passed
+              domain entity; callers must use the returned task.
             - Flushes but does not commit.
         """
         row = _new_task_row(task)

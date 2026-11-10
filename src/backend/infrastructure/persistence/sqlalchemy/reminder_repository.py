@@ -412,7 +412,8 @@ class SqlAlchemyReminderRepository:
             None: The changes stay in the current unit of work.
 
         Notes:
-            - Loads series and task reminders in two batched queries.
+            - Loads project series, project tasks, and both reminder collections
+              in four batched queries.
             - Template series reminders are retargeted to the series timezone
               and keep ``next_run_at=None``.
             - Incomplete task reminders, including overdue tasks, are
