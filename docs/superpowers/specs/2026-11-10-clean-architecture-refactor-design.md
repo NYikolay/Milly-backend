@@ -368,7 +368,8 @@ task-label/reminder-строк — через `TaskRepository`/`ReminderReposito
 `task_management.py` и `auth.py` реэкспортируют его для удобства.
 
 **Collaborator-порты** (узкие интерфейсы вместо concrete-сервисов):
-- `ProjectReader`: `get_project`, `project_is_active`, `get_projects_by_ids`.
+- `ProjectReader`: `get_project`, `project_is_active`, `get_projects_by_ids`,
+  `today_progress`.
 - `LabelReader`: `get_label`, `get_labels_by_ids`.
 - `TaskReader`: `get_task`.
 - `SeriesReader`: `get_series`.
@@ -408,9 +409,12 @@ AccountRepository, UnitOfWork, Protocol)`, а старый
 - `SeriesService.generate`: `uow.commit()` после каждой серии,
   `uow.rollback()` при ошибке; candidate ids снимаются до обработки
   (`series.py:719-751`).
-- `ReminderDispatcher`: commit после claim, после `mark_delivery_sent` и
-  перед обновлением слота, после каждого outcome; rollback при неожиданной
-  ошибке (`reminders.py:676-791`).
+- `ReminderDispatcher`: claim фиксируется коммитом только для пропущенных
+  кандидатов (`claim_due_reminder` вернул `None` или `next_run_at is None`);
+  успешная отправка делает три коммита — после `mark_delivery_sending`, после
+  `mark_delivery_sent` и после обновления слота; остальные исходы коммитятся
+  после обработки; rollback при неожиданной ошибке
+  (`application/task_management/reminders.py:123-254`).
 - Auth refresh: `revoke_session`/`revoke_family`, затем `uow.commit()`, затем
   `raise` (`auth/service.py:232-260`). Нормальный login/logout не коммитит.
 - Lock order: series before tasks (`tasks.py:884-943`,
@@ -442,7 +446,7 @@ AccountRepository, UnitOfWork, Protocol)`, а старый
 
 - `api/mappers/task_management.py`:
   `task_response(TaskDetail) -> TaskResponse`,
-  `task_list_response(TaskPage) -> TaskListResponse`,
+  `task_list_response(TaskPage, *, next_cursor: str | None = None) -> TaskListResponse`,
   `series_response(SeriesDetail) -> SeriesResponse`,
   `project_response(ProjectSummary) -> ProjectResponse`,
   `label_response(Label, ColorPalette) -> LabelResponse`,
@@ -452,7 +456,7 @@ AccountRepository, UnitOfWork, Protocol)`, а старый
   `user_response(User) -> UserResponse`,
   `profile_response(TelegramProfile) -> TelegramProfileResponse`,
   `auth_response(LoginResult, expires_in) -> AuthResponse`,
-  `token_response(TokenPair) -> TokenResponse`.
+  `token_response(TokenPair, expires_in: int) -> TokenResponse`.
 - `api/queries/tasks.py`/`projects.py`: cursor parsing/encoding и
   fingerprint-политика, перенесённые из роутов без изменения формата.
 - Роуты: только dependency -> service -> mapper -> response. Никаких

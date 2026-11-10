@@ -8,18 +8,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend.api.pagination import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
-from backend.task_management.date_bounds import (
+from backend.domain.enums import Priority, ReminderKind, SeriesFrequency, TaskRecurrence
+from backend.domain.task_management.models import ReminderInput, TaskFilters
+from backend.domain.task_management.policies import (
     require_supported_date,
     require_supported_datetime,
 )
-from backend.task_management.enums import (
-    Priority,
-    ReminderKind,
-    SeriesFrequency,
-    TaskRecurrence,
-)
-from backend.task_management.reminders import ReminderInput
-from backend.task_management.tasks import TaskFilters
 
 
 class ColorResponse(BaseModel):

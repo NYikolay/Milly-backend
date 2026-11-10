@@ -28,7 +28,7 @@
 
 ## Review Focus
 
-- Reminder dispatch must keep the exact commit order: claim commit, `mark_delivery_sent` commit, slot-update commit, per-outcome commit, rollback on unexpected errors; batch 100 and soft deadline 240 s.
+- Reminder dispatch must keep the exact commit order: a claim is committed only when the candidate is skipped, a successful send commits after `mark_delivery_sending`, after `mark_delivery_sent`, and after the slot update, other outcomes commit after handling, and unexpected errors roll back; batch 100 and soft deadline 240 s.
 - Series generation must keep per-series commit/rollback, candidate-id snapshotting, `FOR UPDATE SKIP LOCKED`, and idempotency by `(series_id, due_at)`.
 - Auth refresh must keep reuse/grace/expiry behavior and commit revocation before raising `401`.
 - Tenant isolation must stay in every adapter query: cross-user reads return `None`/404 and mutations are no-ops.

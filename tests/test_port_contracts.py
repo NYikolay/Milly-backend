@@ -216,7 +216,12 @@ AGGREGATE_METHODS = {
 }
 
 COLLABORATOR_METHODS = {
-    "ProjectReader": {"get_project", "project_is_active", "get_projects_by_ids"},
+    "ProjectReader": {
+        "get_project",
+        "project_is_active",
+        "get_projects_by_ids",
+        "today_progress",
+    },
     "LabelReader": {"get_label", "get_labels_by_ids"},
     "TaskReader": {"get_task"},
     "SeriesReader": {"get_series"},

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Protocol, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -54,37 +53,6 @@ _PAST_DUE_DATE_DESCRIPTION = (
 )
 
 __all__ = ["TaskDetail", "TaskFilters", "TaskListCursor", "TaskPage", "TaskService"]
-
-
-class _TodayProgressReader(Protocol):
-    """Project aggregate lookup required by the today progress summary."""
-
-    async def today_progress(
-        self,
-        user_id: int,
-        start: datetime,
-        end: datetime,
-    ) -> tuple[int, int]:
-        """
-        Count all and completed tasks due within a time window.
-
-        Purpose:
-            Resolve the dashboard "today" counters without widening the
-            read-only project collaborator contract.
-
-        Args:
-            user_id: Owner identifier.
-            start: Inclusive lower bound for ``tasks.due_at``.
-            end: Exclusive upper bound for ``tasks.due_at``.
-
-        Returns:
-            tuple[int, int]: Total non-deleted task count and the subset with a
-                completion timestamp.
-
-        Notes:
-            - Performs no writes and does not commit.
-        """
-        ...
 
 
 class TaskService:
@@ -235,8 +203,7 @@ class TaskService:
         zone = await self._user_timezone(user_id)
         local_date = self._clock().astimezone(zone).date()
         start, end = self._local_day_bounds(zone, local_date)
-        progress_reader = cast(_TodayProgressReader, self._project_reader)
-        return await progress_reader.today_progress(user_id, start, end)
+        return await self._project_reader.today_progress(user_id, start, end)
 
     async def get(self, user_id: int, task_id: int) -> TaskDetail:
         """

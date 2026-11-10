@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date, time
+from datetime import date, datetime, time
 from typing import Protocol
 
 from backend.domain.entities import ColorPalette, Label, Project, Task, TaskSeries
@@ -98,6 +98,33 @@ class ProjectReader(Protocol):
 
         Notes:
             - Returns an empty mapping without a query for an empty input.
+            - Performs no writes and does not commit.
+        """
+        ...
+
+    async def today_progress(
+        self,
+        user_id: int,
+        start: datetime,
+        end: datetime,
+    ) -> tuple[int, int]:
+        """
+        Count all and completed tasks due within a time window.
+
+        Purpose:
+            Build the dashboard "today" progress summary from UTC bounds of the
+            user's local day.
+
+        Args:
+            user_id: Owner identifier.
+            start: Inclusive lower bound for ``tasks.due_at``.
+            end: Exclusive upper bound for ``tasks.due_at``.
+
+        Returns:
+            tuple[int, int]: Total non-deleted task count and the subset with a
+                completion timestamp.
+
+        Notes:
             - Performs no writes and does not commit.
         """
         ...

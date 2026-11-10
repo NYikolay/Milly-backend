@@ -20,13 +20,22 @@ backend/
 │   │   │                    # обработчики, middleware, OpenAPI-класс роутов
 │   │   └── routes/          # health, auth, palette, projects, labels,
 │   │                        # tasks, task-series
+│   ├── application/         # use cases и порты (без FastAPI/SQLAlchemy)
+│   │   ├── auth/
+│   │   ├── ports/
+│   │   └── task_management/
+│   ├── domain/              # сущности, enum'ы, DTO и доменные правила
+│   │   ├── auth/
+│   │   └── task_management/
+│   ├── infrastructure/      # SQLAlchemy-адаптеры, JWT, initData, Telegram
+│   ├── composition/         # выбор concrete-адаптеров и сборка сервисов
 │   ├── admin/               # SQLAdmin: вьюхи, вход, монтирование
-│   ├── auth/                # initData, JWT, refresh-сессии и cookie
+│   ├── auth/                # compatibility-шимы старого auth-слоя
 │   ├── core/                # настройки, логирование, middleware
 │   │   └── errors.py        # коды ошибок и исключения
 │   ├── db/                  # engine/session, declarative base, readiness
 │   ├── models/              # ORM: auth и управление задачами
-│   ├── task_management/     # сервисы, репозиторий и правила задач
+│   ├── task_management/     # compatibility-шимы application/domain
 │   └── tasks/               # broker, worker, scheduler, генерация и доставка
 ├── tests/                   # unit-тесты без инфраструктуры
 ├── compose.yml              # production-подобный стек
@@ -35,12 +44,13 @@ backend/
 └── .env.example             # шаблон локального окружения
 ```
 
-Правило зависимостей: `main.py` собирает приложение и подключает роутеры;
-`api` зависит от `core`, `db`, `models`, `auth` и `task_management`; `auth` —
-от `core` и `models`; `db` и `task_management` — от `core`, а
-`task_management` также использует `models`; `tasks` — от `auth`, `core`,
-`db` и `task_management`. `auth` не импортирует `api`. `api.errors` зависит
-от `core.errors` и FastAPI; `core.errors` не импортирует `api`.
+Слои направлены внутрь: `domain <- application <- infrastructure/api/tasks/admin`;
+`composition` выбирает concrete-адаптеры, а `main.py` собирает приложение.
+`domain` и `application` не импортируют FastAPI, Starlette, SQLAlchemy,
+Taskiq, ORM-модели и внешние слои; `api` не импортирует `backend.models`.
+Модули `auth/` и `task_management/` — тонкие compatibility-реэкспорты.
+Контракты слоёв и правила зависимостей —
+в `docs/superpowers/specs/2026-11-10-clean-architecture-refactor-design.md`.
 
 ## Быстрый старт
 
