@@ -7,21 +7,20 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from backend.api.auth.schemas import UserResponse as ApiUserResponse
 from backend.api.deps import CurrentAccessDep, get_auth_service, get_current_access
-from backend.auth.service import LoginResult, TokenPair
-from backend.auth.tokens import AccessTokenClaims
 from backend.core.config import Settings
 from backend.core.errors import UnauthorizedError
+from backend.domain.auth.models import AccessTokenClaims, LoginResult, TokenPair
+from backend.domain.entities import TelegramProfile, User
 from backend.main import create_app
-from backend.models.telegram_profile import TelegramProfile
-from backend.models.user import User
 
 NOW = datetime(2026, 11, 2, 12, 0, tzinfo=UTC)
 COOKIE_NAME = "milly_refresh"
 
 
 def _login_result() -> LoginResult:
-    """Build a login result backed by real ORM user and profile instances."""
+    """Build a login result backed by domain user and profile entities."""
     user = User(id=1, timezone="UTC", created_at=NOW, updated_at=NOW)
     profile = TelegramProfile(
         id=10,
@@ -30,7 +29,7 @@ def _login_result() -> LoginResult:
         first_name="Ivan",
         is_premium=False,
     )
-    profile.user = user
+    user.telegram_profile = profile
     return LoginResult(
         user=user,
         profile=profile,
@@ -397,3 +396,14 @@ async def test_auth_router_is_registered(auth_client: AsyncClient) -> None:
         json={"init_data": "valid"},
     )
     assert response.status_code != 404
+
+
+def test_api_schema_serializes_domain_user() -> None:
+    """The API schema validates domain user and profile entities."""
+    result = _login_result()
+
+    body = ApiUserResponse.model_validate(result.user)
+
+    assert body.id == 1
+    assert body.timezone == "UTC"
+    assert body.telegram_profile.telegram_id == 123

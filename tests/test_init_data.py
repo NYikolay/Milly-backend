@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from urllib.parse import urlencode
 
 import pytest
 
-from backend.auth.init_data import validate_init_data
+from backend.application.auth.errors import AuthNotConfiguredError
+from backend.core.config import Settings
 from backend.core.errors import UnauthorizedError
+from backend.domain.auth.models import TelegramUser
+from backend.infrastructure.auth.init_data import (
+    PydanticInitDataValidator,
+    validate_init_data,
+)
 from tests.auth_helpers import BOT_TOKEN, NOW, _hash, make_init_data
 
 
@@ -163,3 +170,37 @@ def test_accepts_missing_query_id() -> None:
         now=NOW,
     )
     assert result.id == 123
+
+
+def test_module_validator_returns_domain_user() -> None:
+    """Return a plain domain TelegramUser from valid signed init data."""
+    result = validate_init_data(
+        make_init_data(),
+        bot_token=BOT_TOKEN,
+        max_age_seconds=3600,
+        now=NOW,
+    )
+    assert isinstance(result, TelegramUser)
+    assert type(result) is TelegramUser
+
+
+def test_init_data_validator_returns_domain_user() -> None:
+    """The Pydantic adapter returns a domain TelegramUser."""
+    settings = Settings(_env_file=None, telegram_bot_token=BOT_TOKEN)
+    validator = PydanticInitDataValidator(settings)
+    fresh_init_data = make_init_data(auth_date=int(datetime.now(UTC).timestamp()))
+
+    user = validator.validate(fresh_init_data)
+
+    assert isinstance(user, TelegramUser)
+    assert type(user) is TelegramUser
+    assert user.id == 123
+    assert user.first_name == "Ivan"
+
+
+def test_init_data_validator_requires_bot_token() -> None:
+    """Reject validation when the adapter has no Telegram bot token."""
+    validator = PydanticInitDataValidator(Settings(_env_file=None))
+
+    with pytest.raises(AuthNotConfiguredError):
+        validator.validate(make_init_data())

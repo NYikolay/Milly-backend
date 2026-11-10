@@ -9,8 +9,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from backend.api.deps import get_auth_service
-from backend.auth.tokens import create_access_token
 from backend.core.config import Settings
+from backend.infrastructure.auth.tokens import create_access_token
 from backend.main import create_app
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)

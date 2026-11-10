@@ -6,19 +6,20 @@ from uuid import UUID
 
 import pytest
 
-from backend.auth.errors import AuthNotConfiguredError, RefreshTokenGraceError
-from backend.auth.init_data import TelegramUser
-from backend.auth.service import AuthService
-from backend.auth.tokens import decode_access_token, hash_refresh_token
-from backend.core.config import Settings
+from backend.application.auth.errors import (
+    AuthNotConfiguredError,
+    RefreshTokenGraceError,
+)
+from backend.application.auth.service import AuthService
 from backend.core.errors import BadRequestError, ErrorCode, UnauthorizedError
-from backend.models.auth_session import AuthSession
-from backend.models.telegram_profile import TelegramProfile
-from backend.models.user import User
-from tests.auth_helpers import BOT_TOKEN, make_init_data
+from backend.domain.auth.models import AuthSettings, TelegramIdentity, TelegramUser
+from backend.domain.auth.tokens import hash_refresh_token
+from backend.domain.entities import AuthSession as AuthSessionEntity
+from backend.domain.entities import TelegramProfile, User
 
 NOW = datetime(2026, 11, 2, 12, 0, tzinfo=UTC)
 SECRET = "a" * 32
+BOT_TOKEN = "test-bot-token"
 SESSION_ID = 77
 FAMILY_ID = UUID("00000000-0000-0000-0000-000000000001")
 
@@ -28,30 +29,29 @@ def clock() -> datetime:
     return NOW
 
 
-def _settings(**overrides: Any) -> Settings:
-    """Build auth settings with deterministic values."""
+def make_auth_settings(**overrides: Any) -> AuthSettings:
+    """Build plain auth settings with deterministic values."""
     values: dict[str, Any] = {
-        "_env_file": None,
         "telegram_bot_token": BOT_TOKEN,
         "auth_jwt_secret": SECRET,
         "telegram_init_data_max_age_seconds": 3600,
     }
     values.update(overrides)
-    return Settings(**values)
+    return AuthSettings(**values)
 
 
 def _user_and_profile() -> tuple[User, TelegramProfile]:
-    """Build an existing user with its Telegram profile."""
+    """Build an existing domain user with its Telegram profile."""
     user = User(id=7)
     profile = TelegramProfile(
         id=9,
-        user=user,
         user_id=7,
         telegram_id=123,
         is_bot=False,
         first_name="Ivan",
         is_premium=False,
     )
+    user.telegram_profile = profile
     return user, profile
 
 
@@ -63,9 +63,9 @@ def _session(
     refresh_token_hash: str | None = None,
     expires_at: datetime | None = None,
     revoked_at: datetime | None = None,
-) -> AuthSession:
+) -> AuthSessionEntity:
     """Build an auth session with deterministic refresh and logout defaults."""
-    return AuthSession(
+    return AuthSessionEntity(
         id=session_id,
         user_id=user_id,
         family_id=family_id,
@@ -79,24 +79,119 @@ def _session(
     )
 
 
+class FakeInitDataValidator:
+    """Init-data validator double returning a prepared domain user."""
+
+    def __init__(self, user: TelegramUser | None = None) -> None:
+        """
+        Store the prepared user and the optional rejection error.
+
+        Purpose:
+            Let service tests control validation outcomes without HMAC work.
+
+        Args:
+            user: User returned by successful validation. Defaults to the
+                standard test user.
+        """
+        self.user = user if user is not None else TelegramUser(id=123, first_name="Ivan")
+        self.error: Exception | None = None
+        self.calls: list[str] = []
+
+    def validate(self, raw_init_data: str) -> TelegramUser:
+        """Record the raw payload and return or raise the prepared outcome."""
+        self.calls.append(raw_init_data)
+        if self.error is not None:
+            raise self.error
+        return self.user
+
+
+class FakeTokenIssuer:
+    """Access-token issuer double that records every issuance request."""
+
+    def __init__(self, access_ttl_seconds: int = 900) -> None:
+        """
+        Store the access-token TTL used for returned expiry times.
+
+        Purpose:
+            Let tests assert the expiry propagated from the issued token pair.
+
+        Args:
+            access_ttl_seconds: Access-token lifetime in seconds.
+        """
+        self.access_ttl_seconds = access_ttl_seconds
+        self.calls: list[tuple[int, int, int, datetime]] = []
+
+    def issue_access_token(
+        self,
+        user_id: int,
+        session_id: int,
+        telegram_id: int,
+        *,
+        now: datetime,
+    ) -> tuple[str, datetime]:
+        """Record the issuance request and return a deterministic token pair."""
+        self.calls.append((user_id, session_id, telegram_id, now))
+        return "access-token", now + timedelta(seconds=self.access_ttl_seconds)
+
+
+class RecordingUnitOfWork:
+    """Unit-of-work double that records transaction calls in order."""
+
+    def __init__(self) -> None:
+        """
+        Initialize an empty transaction call log.
+
+        Purpose:
+            Observe commit boundaries performed explicitly by the auth service.
+        """
+        self.calls: list[str] = []
+
+    async def flush(self) -> None:
+        """Record a flush request."""
+        self.calls.append("flush")
+
+    async def commit(self) -> None:
+        """Record a commit request."""
+        self.calls.append("commit")
+
+    async def rollback(self) -> None:
+        """Record a rollback request."""
+        self.calls.append("rollback")
+
+
 class FakeAuthRepository:
     """In-memory auth repository double that records every call."""
 
     def __init__(
         self,
         *,
-        profile: TelegramProfile | None = None,
+        identity: TelegramIdentity | None = None,
         user: User | None = None,
         next_session_id: int = SESSION_ID,
         session_telegram_id: int = 123,
     ) -> None:
-        """Store prepared return values and initialize the call log."""
+        """
+        Store prepared return values and initialize the call log.
+
+        Purpose:
+            Provide deterministic identity, session, and user lookups while
+            recording repository interactions.
+
+        Args:
+            identity: Existing user/profile pair returned by identity lookup.
+            user: User returned by the authenticated-user lookup.
+            next_session_id: Identifier assigned to the next created session.
+            session_telegram_id: Telegram id returned for a session hash lookup.
+        """
         self.events: list[tuple[str, object]] = []
-        self.profile = profile
-        self.user = user
+        self.identity = identity
+        self.profile = identity.profile if identity is not None else None
+        self.user = user if user is not None else identity.user if identity is not None else None
         self.lock_ids: list[int] = []
         self.session_kwargs: dict[str, object] | None = None
-        self.session: AuthSession | None = None
+        self.session: AuthSessionEntity | None = None
+        self.revoked_sessions: list[AuthSessionEntity] = []
+        self.revoked_families: list[UUID] = []
         self.session_telegram_id = session_telegram_id
         self._next_session_id = next_session_id
 
@@ -110,27 +205,32 @@ class FakeAuthRepository:
         self.events.append(("acquire_telegram_lock", telegram_id))
         self.lock_ids.append(telegram_id)
 
-    async def get_profile_by_telegram_id(self, telegram_id: int) -> TelegramProfile | None:
-        """Record a profile lookup and return the prepared profile."""
-        self.events.append(("get_profile_by_telegram_id", telegram_id))
-        return self.profile
+    async def get_identity_by_telegram_id(
+        self,
+        telegram_id: int,
+    ) -> TelegramIdentity | None:
+        """Record an identity lookup and return the prepared identity."""
+        self.events.append(("get_identity_by_telegram_id", telegram_id))
+        return self.identity
 
-    async def create_user_with_profile(self, data: TelegramUser) -> TelegramProfile:
-        """Record user creation and return a new profile linked to a new user."""
+    async def create_user_with_profile(self, data: TelegramUser) -> TelegramIdentity:
+        """Record user creation and return a new identity linked to a new user."""
         self.events.append(("create_user_with_profile", data.id))
         user = User(id=42)
         profile = TelegramProfile(
             id=43,
-            user=user,
             user_id=42,
             telegram_id=data.id,
             is_bot=data.is_bot,
             first_name=data.first_name,
             is_premium=data.is_premium,
         )
+        user.telegram_profile = profile
+        identity = TelegramIdentity(user=user, profile=profile)
+        self.identity = identity
         self.user = user
         self.profile = profile
-        return profile
+        return identity
 
     async def update_profile(self, profile: TelegramProfile, data: TelegramUser) -> None:
         """Record a profile update request."""
@@ -143,7 +243,7 @@ class FakeAuthRepository:
         family_id: UUID,
         refresh_token_hash: str,
         expires_at: datetime,
-    ) -> AuthSession:
+    ) -> AuthSessionEntity:
         """Record session creation and return a session with a fixed identifier."""
         self.session_kwargs = {
             "user_id": user_id,
@@ -152,7 +252,7 @@ class FakeAuthRepository:
             "expires_at": expires_at,
         }
         self.events.append(("create_session", self.session_kwargs))
-        self.session = AuthSession(
+        self.session = AuthSessionEntity(
             id=self._next_session_id,
             user_id=user_id,
             family_id=family_id,
@@ -162,7 +262,10 @@ class FakeAuthRepository:
         self._next_session_id += 1
         return self.session
 
-    async def get_session_for_update(self, refresh_token_hash: str) -> AuthSession | None:
+    async def get_session_for_update(
+        self,
+        refresh_token_hash: str,
+    ) -> AuthSessionEntity | None:
         """Record a locking session lookup and return the prepared session."""
         self.events.append(("get_session_for_update", refresh_token_hash))
         return self.session
@@ -174,29 +277,23 @@ class FakeAuthRepository:
             return None
         return self.session_telegram_id
 
-    async def revoke_session(self, session: AuthSession, revoked_at: datetime) -> None:
+    async def revoke_session(
+        self,
+        session: AuthSessionEntity,
+        revoked_at: datetime,
+    ) -> None:
         """Record a session revocation request."""
         self.events.append(("revoke_session", (session, revoked_at)))
+        self.revoked_sessions.append(session)
 
     async def revoke_family(self, family_id: UUID, revoked_at: datetime) -> None:
         """Record a family revocation request."""
         self.events.append(("revoke_family", (family_id, revoked_at)))
+        self.revoked_families.append(family_id)
 
     async def revoke_user_sessions(self, user_id: int, revoked_at: datetime) -> None:
         """Record a bulk revocation of every active session of a user."""
         self.events.append(("revoke_user_sessions", (user_id, revoked_at)))
-
-    async def revoke_session_and_commit(
-        self,
-        session: AuthSession,
-        revoked_at: datetime,
-    ) -> None:
-        """Record a committing session revocation request."""
-        self.events.append(("revoke_session_and_commit", (session, revoked_at)))
-
-    async def revoke_family_and_commit(self, family_id: UUID, revoked_at: datetime) -> None:
-        """Record a committing family revocation request."""
-        self.events.append(("revoke_family_and_commit", (family_id, revoked_at)))
 
     async def get_user_with_profile(self, user_id: int) -> User | None:
         """Record a user lookup and return the prepared user."""
@@ -212,52 +309,73 @@ class FakeAuthRepository:
         return self.user
 
 
+def make_service(
+    repository: FakeAuthRepository,
+    *,
+    uow: RecordingUnitOfWork | None = None,
+    validator: FakeInitDataValidator | None = None,
+    token_issuer: FakeTokenIssuer | None = None,
+    settings: AuthSettings | None = None,
+) -> AuthService:
+    """Build the real auth service with deterministic doubles."""
+    return AuthService(
+        repository,
+        uow if uow is not None else RecordingUnitOfWork(),
+        validator if validator is not None else FakeInitDataValidator(),
+        token_issuer if token_issuer is not None else FakeTokenIssuer(),
+        settings if settings is not None else make_auth_settings(),
+        clock=clock,
+    )
+
+
 async def test_login_creates_user_with_profile() -> None:
     """Create a user and profile when the Telegram identity is new."""
     repository = FakeAuthRepository()
-    service = AuthService(repository, _settings(), clock=clock)
+    service = make_service(repository)
 
-    result = await service.login(make_init_data())
+    result = await service.login("raw-init-data")
 
     assert result.is_new is True
     assert "create_user_with_profile" in repository.call_names
     assert "update_profile" not in repository.call_names
-    assert result.user is result.profile.user
+    assert result.user is repository.user
+    assert result.profile is repository.profile
 
 
 async def test_login_updates_existing_profile() -> None:
     """Update an existing profile instead of creating a new user."""
     user, profile = _user_and_profile()
-    repository = FakeAuthRepository(profile=profile)
-    service = AuthService(repository, _settings(), clock=clock)
+    repository = FakeAuthRepository(identity=TelegramIdentity(user=user, profile=profile))
+    service = make_service(repository)
 
-    result = await service.login(make_init_data())
+    result = await service.login("raw-init-data")
 
     assert result.is_new is False
     assert result.user is user
+    assert result.profile is profile
     assert "update_profile" in repository.call_names
     assert "create_user_with_profile" not in repository.call_names
 
 
 async def test_login_acquires_telegram_lock() -> None:
-    """Acquire the Telegram advisory lock before looking up the profile."""
+    """Acquire the Telegram advisory lock before looking up the identity."""
     repository = FakeAuthRepository()
-    service = AuthService(repository, _settings(), clock=clock)
+    service = make_service(repository)
 
-    await service.login(make_init_data())
+    await service.login("raw-init-data")
 
     names = repository.call_names
-    assert names.index("acquire_telegram_lock") < names.index("get_profile_by_telegram_id")
+    assert names.index("acquire_telegram_lock") < names.index("get_identity_by_telegram_id")
     assert repository.lock_ids == [123]
 
 
 async def test_login_revokes_user_sessions_before_creating_new_session() -> None:
     """Revoke every active session of the user before creating the new one."""
-    _, profile = _user_and_profile()
-    repository = FakeAuthRepository(profile=profile)
-    service = AuthService(repository, _settings(), clock=clock)
+    user, profile = _user_and_profile()
+    repository = FakeAuthRepository(identity=TelegramIdentity(user=user, profile=profile))
+    service = make_service(repository)
 
-    result = await service.login(make_init_data())
+    result = await service.login("raw-init-data")
 
     assert ("revoke_user_sessions", (result.user.id, NOW)) in repository.events
     names = repository.call_names
@@ -266,11 +384,11 @@ async def test_login_revokes_user_sessions_before_creating_new_session() -> None
 
 async def test_login_creates_session_with_new_family() -> None:
     """Create a session with a new family, hashed token, and expected expiry."""
-    settings = _settings()
+    settings = make_auth_settings()
     repository = FakeAuthRepository()
-    service = AuthService(repository, settings, clock=clock)
+    service = make_service(repository, settings=settings)
 
-    result = await service.login(make_init_data())
+    result = await service.login("raw-init-data")
 
     assert repository.session_kwargs is not None
     family_id = repository.session_kwargs["family_id"]
@@ -287,9 +405,9 @@ async def test_login_creates_session_with_new_family() -> None:
 async def test_login_does_not_store_raw_refresh() -> None:
     """Pass only the refresh-token hash to the repository."""
     repository = FakeAuthRepository()
-    service = AuthService(repository, _settings(), clock=clock)
+    service = make_service(repository)
 
-    result = await service.login(make_init_data())
+    result = await service.login("raw-init-data")
 
     assert repository.session_kwargs is not None
     assert repository.session_kwargs["refresh_token_hash"] == hash_refresh_token(
@@ -298,31 +416,31 @@ async def test_login_does_not_store_raw_refresh() -> None:
     assert result.tokens.refresh_token not in repository.session_kwargs.values()
 
 
-async def test_login_issues_access_claims() -> None:
-    """Issue an access token carrying the created identity and session claims."""
-    settings = _settings()
+async def test_login_issues_access_token_through_token_issuer() -> None:
+    """Issue the access token for the persisted identity and session."""
+    token_issuer = FakeTokenIssuer()
+    settings = make_auth_settings()
     repository = FakeAuthRepository()
-    service = AuthService(repository, settings, clock=clock)
+    service = make_service(repository, token_issuer=token_issuer, settings=settings)
 
-    result = await service.login(make_init_data())
+    result = await service.login("raw-init-data")
 
-    claims = decode_access_token(result.tokens.access_token, settings=settings, now=NOW)
-    assert claims.user_id == result.user.id
-    assert claims.session_id == SESSION_ID
-    assert claims.telegram_id == 123
+    assert token_issuer.calls == [(result.user.id, SESSION_ID, 123, NOW)]
+    assert result.tokens.access_token == "access-token"
     assert result.tokens.access_expires_at == NOW + timedelta(
         seconds=settings.auth_access_ttl_seconds
     )
 
 
-async def test_login_rejects_bot_user() -> None:
-    """Reject bot users before touching the repository."""
+async def test_login_rejects_validator_failure_before_repository() -> None:
+    """Propagate validation failures before touching the repository."""
     repository = FakeAuthRepository()
-    service = AuthService(repository, _settings(), clock=clock)
-    raw_init_data = make_init_data(user={"id": 123, "first_name": "Bot", "is_bot": True})
+    validator = FakeInitDataValidator()
+    validator.error = UnauthorizedError("Invalid init data")
+    service = make_service(repository, validator=validator)
 
     with pytest.raises(UnauthorizedError):
-        await service.login(raw_init_data)
+        await service.login("tampered")
 
     assert repository.events == []
 
@@ -330,10 +448,10 @@ async def test_login_rejects_bot_user() -> None:
 async def test_login_requires_bot_token() -> None:
     """Reject login when the Telegram bot token is not configured."""
     repository = FakeAuthRepository()
-    service = AuthService(repository, _settings(telegram_bot_token=None), clock=clock)
+    service = make_service(repository, settings=make_auth_settings(telegram_bot_token=None))
 
     with pytest.raises(AuthNotConfiguredError):
-        await service.login(make_init_data())
+        await service.login("raw-init-data")
 
     assert repository.events == []
 
@@ -341,32 +459,30 @@ async def test_login_requires_bot_token() -> None:
 async def test_login_requires_jwt_secret() -> None:
     """Reject login when the JWT secret is not configured."""
     repository = FakeAuthRepository()
-    service = AuthService(repository, _settings(auth_jwt_secret=None), clock=clock)
+    service = make_service(repository, settings=make_auth_settings(auth_jwt_secret=None))
 
     with pytest.raises(AuthNotConfiguredError):
-        await service.login(make_init_data())
+        await service.login("raw-init-data")
 
     assert repository.events == []
 
 
-async def test_login_with_invalid_init_data_does_not_touch_repository() -> None:
-    """Reject tampered init data before any repository call."""
+async def test_login_does_not_commit() -> None:
+    """Leave the transaction boundary to the request unit of work."""
+    uow = RecordingUnitOfWork()
     repository = FakeAuthRepository()
-    service = AuthService(repository, _settings(), clock=clock)
-    raw_init_data = make_init_data()
-    tampered = f"{raw_init_data[:-1]}{'0' if raw_init_data[-1] != '0' else '1'}"
+    service = make_service(repository, uow=uow)
 
-    with pytest.raises(UnauthorizedError):
-        await service.login(tampered)
+    await service.login("raw-init-data")
 
-    assert repository.events == []
+    assert uow.calls == []
 
 
 async def test_get_user_delegates_to_repository() -> None:
     """Return the user loaded by the repository."""
     user = User(id=7)
     repository = FakeAuthRepository(user=user)
-    service = AuthService(repository, _settings(), clock=clock)
+    service = make_service(repository)
 
     result = await service.get_user(7)
 
@@ -376,12 +492,12 @@ async def test_get_user_delegates_to_repository() -> None:
 
 async def test_refresh_rotates_tokens_and_family() -> None:
     """Rotate refresh credentials and revoke the previous session."""
-    settings = _settings()
+    settings = make_auth_settings()
     user, _ = _user_and_profile()
     old_session = _session(session_id=70)
     repository = FakeAuthRepository(user=user)
     repository.session = old_session
-    service = AuthService(repository, settings, clock=clock)
+    service = make_service(repository, settings=settings)
 
     result = await service.refresh("old-refresh-token")
 
@@ -392,16 +508,30 @@ async def test_refresh_rotates_tokens_and_family() -> None:
     assert new_session.refresh_token_hash != old_session.refresh_token_hash
     assert new_session.refresh_token_hash == hash_refresh_token(result.refresh_token)
     assert ("revoke_session", (old_session, NOW)) in repository.events
-    claims = decode_access_token(result.access_token, settings=settings, now=NOW)
-    assert claims.session_id == new_session.id
     assert result.refresh_expires_at == NOW + timedelta(seconds=settings.auth_refresh_ttl_seconds)
+
+
+async def test_refresh_issues_access_token_for_rotated_session() -> None:
+    """Issue the new access token with the current identity and session."""
+    user, profile = _user_and_profile()
+    old_session = _session()
+    repository = FakeAuthRepository(user=user)
+    repository.session = old_session
+    token_issuer = FakeTokenIssuer()
+    service = make_service(repository, token_issuer=token_issuer)
+
+    result = await service.refresh("old-refresh-token")
+
+    assert repository.session is not None
+    assert token_issuer.calls == [(user.id, repository.session.id, profile.telegram_id, NOW)]
+    assert result.access_token == "access-token"
 
 
 async def test_refresh_locks_telegram_before_session_row() -> None:
     """Look up the Telegram identity and lock it before locking the session row."""
     repository = FakeAuthRepository(user=_user_and_profile()[0])
     repository.session = _session()
-    service = AuthService(repository, _settings(), clock=clock)
+    service = make_service(repository)
 
     await service.refresh("old-refresh-token")
 
@@ -420,7 +550,7 @@ async def test_refresh_locks_telegram_before_session_row() -> None:
 async def test_refresh_rejects_unknown_token() -> None:
     """Reject a refresh token that has no stored session."""
     repository = FakeAuthRepository()
-    service = AuthService(repository, _settings(), clock=clock)
+    service = make_service(repository)
 
     with pytest.raises(UnauthorizedError) as exc_info:
         await service.refresh("unknown-refresh-token")
@@ -430,27 +560,47 @@ async def test_refresh_rejects_unknown_token() -> None:
     assert repository.lock_ids == []
 
 
-async def test_refresh_rejects_expired_and_revokes() -> None:
-    """Revoke an expired session before rejecting the refresh request."""
+async def test_refresh_expired_session_is_revoked_and_committed() -> None:
+    """Revoke an expired session and commit before rejecting the request."""
     old_session = _session(expires_at=NOW)
     repository = FakeAuthRepository()
     repository.session = old_session
-    service = AuthService(repository, _settings(), clock=clock)
+    uow = RecordingUnitOfWork()
+    service = make_service(repository, uow=uow)
 
     with pytest.raises(UnauthorizedError) as exc_info:
         await service.refresh("old-refresh-token")
 
     assert str(exc_info.value) == "Invalid refresh token"
-    assert ("revoke_session_and_commit", (old_session, NOW)) in repository.events
+    assert repository.revoked_sessions == [old_session]
+    assert uow.calls == ["commit"]
+    assert "create_session" not in repository.call_names
+
+
+async def test_refresh_reuse_outside_grace_commits_revocation_before_raise() -> None:
+    """Reuse detection persists the family revocation before rejecting."""
+    old_session = _session(revoked_at=NOW - timedelta(seconds=31))
+    repository = FakeAuthRepository()
+    repository.session = old_session
+    uow = RecordingUnitOfWork()
+    service = make_service(repository, uow=uow)
+
+    with pytest.raises(UnauthorizedError) as exc_info:
+        await service.refresh("old-refresh-token")
+
+    assert type(exc_info.value) is UnauthorizedError
+    assert repository.revoked_families == [FAMILY_ID]
+    assert uow.calls == ["commit"]
     assert "create_session" not in repository.call_names
 
 
 async def test_refresh_reuse_within_grace_does_not_revoke_family() -> None:
-    """Reject a just-rotated token without revoking its family."""
+    """Reject a just-rotated token without revoking its family or committing."""
     old_session = _session(revoked_at=NOW - timedelta(seconds=10))
     repository = FakeAuthRepository()
     repository.session = old_session
-    service = AuthService(repository, _settings(), clock=clock)
+    uow = RecordingUnitOfWork()
+    service = make_service(repository, uow=uow)
 
     with pytest.raises(RefreshTokenGraceError) as exc_info:
         await service.refresh("old-refresh-token")
@@ -461,22 +611,19 @@ async def test_refresh_reuse_within_grace_does_not_revoke_family() -> None:
     assert error.headers == {"WWW-Authenticate": "Bearer"}
     assert not any(name.startswith("revoke") for name in repository.call_names)
     assert "create_session" not in repository.call_names
+    assert uow.calls == []
 
 
-async def test_refresh_reuse_outside_grace_revokes_family() -> None:
-    """Revoke the whole family when a stale rotated token is reused."""
-    old_session = _session(revoked_at=NOW - timedelta(seconds=31))
-    repository = FakeAuthRepository()
-    repository.session = old_session
-    service = AuthService(repository, _settings(), clock=clock)
+async def test_refresh_rotation_does_not_commit() -> None:
+    """Leave the successful rotation transaction to the request unit of work."""
+    repository = FakeAuthRepository(user=_user_and_profile()[0])
+    repository.session = _session()
+    uow = RecordingUnitOfWork()
+    service = make_service(repository, uow=uow)
 
-    with pytest.raises(UnauthorizedError) as exc_info:
-        await service.refresh("old-refresh-token")
+    await service.refresh("old-refresh-token")
 
-    assert type(exc_info.value) is UnauthorizedError
-    assert str(exc_info.value) == "Invalid refresh token"
-    assert ("revoke_family_and_commit", (old_session.family_id, NOW)) in repository.events
-    assert "create_session" not in repository.call_names
+    assert uow.calls == []
 
 
 async def test_refresh_keeps_family_id() -> None:
@@ -485,7 +632,7 @@ async def test_refresh_keeps_family_id() -> None:
     old_session = _session(family_id=family_id)
     repository = FakeAuthRepository(user=_user_and_profile()[0])
     repository.session = old_session
-    service = AuthService(repository, _settings(), clock=clock)
+    service = make_service(repository)
 
     await service.refresh("old-refresh-token")
 
@@ -495,28 +642,11 @@ async def test_refresh_keeps_family_id() -> None:
     assert repository.session.family_id == family_id
 
 
-async def test_refresh_loads_user_for_telegram_id() -> None:
-    """Issue the new access token with the user's current Telegram identity."""
-    user, profile = _user_and_profile()
-    old_session = _session()
-    repository = FakeAuthRepository(user=user)
-    repository.session = old_session
-    settings = _settings()
-    service = AuthService(repository, settings, clock=clock)
-
-    result = await service.refresh("old-refresh-token")
-
-    assert ("get_user_with_profile", old_session.user_id) in repository.events
-    claims = decode_access_token(result.access_token, settings=settings, now=NOW)
-    assert claims.telegram_id == profile.telegram_id
-    assert claims.user_id == user.id
-
-
 async def test_refresh_rejects_missing_user() -> None:
     """Reject refresh when the session user no longer exists."""
     repository = FakeAuthRepository()
     repository.session = _session()
-    service = AuthService(repository, _settings(), clock=clock)
+    service = make_service(repository)
 
     with pytest.raises(UnauthorizedError) as exc_info:
         await service.refresh("old-refresh-token")
@@ -529,7 +659,7 @@ async def test_refresh_rejects_user_without_telegram_profile() -> None:
     """Reject refresh when the user has no Telegram profile."""
     repository = FakeAuthRepository(user=User(id=7))
     repository.session = _session()
-    service = AuthService(repository, _settings(), clock=clock)
+    service = make_service(repository)
 
     with pytest.raises(UnauthorizedError) as exc_info:
         await service.refresh("old-refresh-token")
@@ -541,7 +671,7 @@ async def test_refresh_rejects_user_without_telegram_profile() -> None:
 async def test_refresh_requires_configuration_before_repository() -> None:
     """Reject refresh before repository work when authentication is unconfigured."""
     repository = FakeAuthRepository()
-    service = AuthService(repository, _settings(auth_jwt_secret=None), clock=clock)
+    service = make_service(repository, settings=make_auth_settings(auth_jwt_secret=None))
 
     with pytest.raises(AuthNotConfiguredError):
         await service.refresh("old-refresh-token")
@@ -554,7 +684,7 @@ async def test_logout_revokes_family_by_refresh_token() -> None:
     old_session = _session()
     repository = FakeAuthRepository()
     repository.session = old_session
-    service = AuthService(repository, _settings(), clock=clock)
+    service = make_service(repository)
 
     await service.logout("old-refresh-token")
 
@@ -567,7 +697,7 @@ async def test_logout_revokes_family_by_refresh_token() -> None:
 async def test_logout_with_unknown_token_is_idempotent() -> None:
     """Ignore logout for a refresh token that has no stored session."""
     repository = FakeAuthRepository()
-    service = AuthService(repository, _settings(), clock=clock)
+    service = make_service(repository)
 
     await service.logout("unknown-refresh-token")
 
@@ -577,18 +707,30 @@ async def test_logout_with_unknown_token_is_idempotent() -> None:
 async def test_logout_without_token_is_idempotent() -> None:
     """Skip repository work when logout has no refresh token."""
     repository = FakeAuthRepository()
-    service = AuthService(repository, _settings(), clock=clock)
+    service = make_service(repository)
 
     await service.logout(None)
 
     assert repository.events == []
 
 
+async def test_logout_does_not_commit() -> None:
+    """Leave the logout transaction to the request unit of work."""
+    repository = FakeAuthRepository()
+    repository.session = _session()
+    uow = RecordingUnitOfWork()
+    service = make_service(repository, uow=uow)
+
+    await service.logout("old-refresh-token")
+
+    assert uow.calls == []
+
+
 async def test_refresh_does_not_expose_raw_old_token() -> None:
     """Pass only hashes to the repository during rotation."""
     repository = FakeAuthRepository(user=_user_and_profile()[0])
     repository.session = _session()
-    service = AuthService(repository, _settings(), clock=clock)
+    service = make_service(repository)
 
     result = await service.refresh("old-refresh-token")
 
@@ -601,7 +743,7 @@ async def test_update_timezone_delegates_to_repository() -> None:
     """Validate the zone, persist it, and return the updated user."""
     user = User(id=7, timezone="UTC")
     repository = FakeAuthRepository(user=user)
-    service = AuthService(repository, _settings(), clock=clock)
+    service = make_service(repository)
 
     result = await service.update_timezone(7, "Europe/Moscow")
 
@@ -613,7 +755,7 @@ async def test_update_timezone_delegates_to_repository() -> None:
 async def test_update_timezone_rejects_invalid_zone() -> None:
     """Reject an unknown IANA zone before touching the repository."""
     repository = FakeAuthRepository(user=User(id=7))
-    service = AuthService(repository, _settings(), clock=clock)
+    service = make_service(repository)
 
     with pytest.raises(BadRequestError) as exc_info:
         await service.update_timezone(7, "Mars/Olympus")
@@ -625,7 +767,7 @@ async def test_update_timezone_rejects_invalid_zone() -> None:
 async def test_update_timezone_rejects_missing_user() -> None:
     """Reject a timezone update when the user no longer exists."""
     repository = FakeAuthRepository()
-    service = AuthService(repository, _settings(), clock=clock)
+    service = make_service(repository)
 
     with pytest.raises(UnauthorizedError):
         await service.update_timezone(7, "Europe/Moscow")

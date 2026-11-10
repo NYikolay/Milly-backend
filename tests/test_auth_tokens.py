@@ -8,15 +8,17 @@ from typing import Any
 import jwt
 import pytest
 
-from backend.auth.errors import AuthNotConfiguredError
-from backend.auth.tokens import (
+from backend.application.auth.errors import AuthNotConfiguredError
+from backend.core.config import Settings
+from backend.core.errors import UnauthorizedError
+from backend.domain.auth.models import AccessTokenClaims
+from backend.infrastructure.auth.tokens import (
+    JwtTokenIssuer,
     create_access_token,
     decode_access_token,
     generate_refresh_token,
     hash_refresh_token,
 )
-from backend.core.config import Settings
-from backend.core.errors import UnauthorizedError
 
 NOW = datetime(2026, 11, 2, 12, 0, tzinfo=UTC)
 SECRET = "a" * 32
@@ -264,3 +266,27 @@ def test_refresh_tokens_are_random_and_hashed() -> None:
     assert len(first) >= 43
     assert len(hash_refresh_token(first)) == 64
     assert hash_refresh_token(first) == hash_refresh_token(first)
+
+
+def test_jwt_token_issuer_issues_domain_claims() -> None:
+    """Issue an access token through the port adapter with the same claims."""
+    issuer = JwtTokenIssuer(_settings())
+
+    token, expires_at = issuer.issue_access_token(1, 2, 3, now=NOW)
+
+    claims = decode_access_token(token, settings=_settings(), now=NOW)
+    assert isinstance(claims, AccessTokenClaims)
+    assert claims.user_id == 1
+    assert claims.session_id == 2
+    assert claims.telegram_id == 3
+    assert claims.jti
+    assert claims.expires_at == expires_at
+    assert expires_at == NOW + timedelta(seconds=900)
+
+
+def test_jwt_token_issuer_requires_jwt_secret() -> None:
+    """Refuse to issue tokens through the adapter when the secret is missing."""
+    issuer = JwtTokenIssuer(Settings(_env_file=None, telegram_bot_token="token"))
+
+    with pytest.raises(AuthNotConfiguredError):
+        issuer.issue_access_token(1, 2, 3, now=NOW)
