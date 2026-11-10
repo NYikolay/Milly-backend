@@ -137,14 +137,20 @@ class FakeTokenIssuer:
 class RecordingUnitOfWork:
     """Unit-of-work double that records transaction calls in order."""
 
-    def __init__(self) -> None:
+    def __init__(self, order: list[str] | None = None) -> None:
         """
         Initialize an empty transaction call log.
 
         Purpose:
-            Observe commit boundaries performed explicitly by the auth service.
+            Observe commit boundaries performed explicitly by the auth service
+            and, when requested, append them to a log shared with the
+            repository so call ordering can be asserted.
+
+        Args:
+            order: Optional shared ordered event log receiving commit names.
         """
         self.calls: list[str] = []
+        self._order = order
 
     async def flush(self) -> None:
         """Record a flush request."""
@@ -153,6 +159,8 @@ class RecordingUnitOfWork:
     async def commit(self) -> None:
         """Record a commit request."""
         self.calls.append("commit")
+        if self._order is not None:
+            self._order.append("commit")
 
     async def rollback(self) -> None:
         """Record a rollback request."""
@@ -169,6 +177,7 @@ class FakeAuthRepository:
         user: User | None = None,
         next_session_id: int = SESSION_ID,
         session_telegram_id: int = 123,
+        order: list[str] | None = None,
     ) -> None:
         """
         Store prepared return values and initialize the call log.
@@ -182,6 +191,8 @@ class FakeAuthRepository:
             user: User returned by the authenticated-user lookup.
             next_session_id: Identifier assigned to the next created session.
             session_telegram_id: Telegram id returned for a session hash lookup.
+            order: Optional shared ordered event log receiving revocation
+                operations so commit ordering can be asserted.
         """
         self.events: list[tuple[str, object]] = []
         self.identity = identity
@@ -194,6 +205,7 @@ class FakeAuthRepository:
         self.revoked_families: list[UUID] = []
         self.session_telegram_id = session_telegram_id
         self._next_session_id = next_session_id
+        self._order = order
 
     @property
     def call_names(self) -> list[str]:
@@ -285,11 +297,15 @@ class FakeAuthRepository:
         """Record a session revocation request."""
         self.events.append(("revoke_session", (session, revoked_at)))
         self.revoked_sessions.append(session)
+        if self._order is not None:
+            self._order.append("revoke_session")
 
     async def revoke_family(self, family_id: UUID, revoked_at: datetime) -> None:
         """Record a family revocation request."""
         self.events.append(("revoke_family", (family_id, revoked_at)))
         self.revoked_families.append(family_id)
+        if self._order is not None:
+            self._order.append("revoke_family")
 
     async def revoke_user_sessions(self, user_id: int, revoked_at: datetime) -> None:
         """Record a bulk revocation of every active session of a user."""
@@ -550,7 +566,8 @@ async def test_refresh_locks_telegram_before_session_row() -> None:
 async def test_refresh_rejects_unknown_token() -> None:
     """Reject a refresh token that has no stored session."""
     repository = FakeAuthRepository()
-    service = make_service(repository)
+    uow = RecordingUnitOfWork()
+    service = make_service(repository, uow=uow)
 
     with pytest.raises(UnauthorizedError) as exc_info:
         await service.refresh("unknown-refresh-token")
@@ -558,39 +575,48 @@ async def test_refresh_rejects_unknown_token() -> None:
     assert str(exc_info.value) == "Invalid refresh token"
     assert repository.call_names == ["get_telegram_id_for_session"]
     assert repository.lock_ids == []
+    assert uow.calls == []
 
 
 async def test_refresh_expired_session_is_revoked_and_committed() -> None:
-    """Revoke an expired session and commit before rejecting the request."""
+    """Revoke an expired session, commit, then reject the request."""
+    order: list[str] = []
     old_session = _session(expires_at=NOW)
-    repository = FakeAuthRepository()
+    repository = FakeAuthRepository(order=order)
     repository.session = old_session
-    uow = RecordingUnitOfWork()
+    uow = RecordingUnitOfWork(order=order)
     service = make_service(repository, uow=uow)
 
     with pytest.raises(UnauthorizedError) as exc_info:
         await service.refresh("old-refresh-token")
+
+    order.append("raised")
 
     assert str(exc_info.value) == "Invalid refresh token"
     assert repository.revoked_sessions == [old_session]
     assert uow.calls == ["commit"]
+    assert order == ["revoke_session", "commit", "raised"]
     assert "create_session" not in repository.call_names
 
 
 async def test_refresh_reuse_outside_grace_commits_revocation_before_raise() -> None:
-    """Reuse detection persists the family revocation before rejecting."""
+    """Reuse detection persists the family revocation, commits, then rejects."""
+    order: list[str] = []
     old_session = _session(revoked_at=NOW - timedelta(seconds=31))
-    repository = FakeAuthRepository()
+    repository = FakeAuthRepository(order=order)
     repository.session = old_session
-    uow = RecordingUnitOfWork()
+    uow = RecordingUnitOfWork(order=order)
     service = make_service(repository, uow=uow)
 
     with pytest.raises(UnauthorizedError) as exc_info:
         await service.refresh("old-refresh-token")
 
+    order.append("raised")
+
     assert type(exc_info.value) is UnauthorizedError
     assert repository.revoked_families == [FAMILY_ID]
     assert uow.calls == ["commit"]
+    assert order == ["revoke_family", "commit", "raised"]
     assert "create_session" not in repository.call_names
 
 
@@ -743,13 +769,15 @@ async def test_update_timezone_delegates_to_repository() -> None:
     """Validate the zone, persist it, and return the updated user."""
     user = User(id=7, timezone="UTC")
     repository = FakeAuthRepository(user=user)
-    service = make_service(repository)
+    uow = RecordingUnitOfWork()
+    service = make_service(repository, uow=uow)
 
     result = await service.update_timezone(7, "Europe/Moscow")
 
     assert result is user
     assert user.timezone == "Europe/Moscow"
     assert repository.events == [("update_user_timezone", (7, "Europe/Moscow"))]
+    assert uow.calls == []
 
 
 async def test_update_timezone_rejects_invalid_zone() -> None:
