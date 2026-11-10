@@ -1723,28 +1723,80 @@ async def test_create_from_task_rejects_derived_start_outside_supported_range() 
     assert task.series_id is None
 
 
-async def test_generate_commits_each_series_and_rolls_back_failures() -> None:
-    """Generation keeps per-series commit boundaries."""
+async def test_generate_commits_successful_series_and_rolls_back_partial_failure() -> None:
+    """Generation commits successful series in order and discards failed rows."""
     repository = FakeTaskManagementRepository()
+    label = repository.insert_label(make_label())
+    failed_series_id = 2
     for series_id in (1, 2, 3):
-        repository.insert_series(
+        series = repository.insert_series(
             make_series(
                 series_id=series_id,
                 time_of_day=time(9, 0),
                 starts_on=fixed_now().date(),
             )
         )
+        repository.series_labels.add((series.id, label.id))
+        repository.insert_reminder(
+            make_reminder(
+                series_id=series.id,
+                kind=ReminderKind.BEFORE_DUE,
+                offset_minutes=30,
+            )
+        )
     service = make_series_service(repository)
-    repository.series_errors[2] = RuntimeError("boom")
+    repository.post_write_errors[failed_series_id] = RuntimeError("boom")
 
     await service.generate(fixed_now())
 
-    assert repository.commits >= 2
+    relevant_events = [
+        event
+        for event in repository.events
+        if event[0]
+        in {
+            "list_series_for_generation",
+            "claim_series_for_generation",
+            "add_tasks",
+            "add_reminders",
+            "save_series",
+            "commit",
+            "rollback",
+        }
+    ]
+    assert relevant_events == [
+        ("list_series_for_generation", None),
+        ("claim_series_for_generation", 1),
+        ("add_tasks", 1),
+        ("add_reminders", 1),
+        ("save_series", 1),
+        ("commit", None),
+        ("claim_series_for_generation", 2),
+        ("add_tasks", 2),
+        ("add_reminders", 2),
+        ("rollback", None),
+        ("claim_series_for_generation", 3),
+        ("add_tasks", 3),
+        ("add_reminders", 3),
+        ("save_series", 3),
+        ("commit", None),
+    ]
+    assert repository.commits == 2
     assert repository.rollbacks == 1
+    assert not any(task.series_id == failed_series_id for task in repository.tasks.values())
+    assert {task.series_id for task in repository.tasks.values()} == {1, 3}
+    assert all(task_id in repository.tasks for task_id, _ in repository.task_labels)
+    assert all(
+        reminder.task_id is None or reminder.task_id in repository.tasks
+        for reminder in repository.reminders.values()
+    )
+    assert repository.task_labels
+    assert repository.series[1].generated_through is not None
+    assert repository.series[failed_series_id].generated_through is None
+    assert repository.series[3].generated_through is not None
 
 
-async def test_create_from_task_flushes_before_generation() -> None:
-    """The new series link is saved and visible to due-slot dedupe."""
+async def test_create_from_task_saves_task_and_flushes() -> None:
+    """The converted task is saved and the unit of work flushed."""
     repository = FakeTaskManagementRepository()
     service = make_series_service(repository)
     task = repository.insert_task(

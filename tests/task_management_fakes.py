@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import replace
+from dataclasses import is_dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
@@ -109,15 +109,97 @@ class FakeTaskManagementRepository:
         self.claimed_series_ids: list[int] = []
         self.blocked_series_ids: set[int] = set()
         self.series_errors: dict[int, Exception] = {}
+        self.post_write_errors: dict[int, Exception] = {}
         self.task_errors: set[int] = set()
         self.on_claim: Callable[[], None] | None = None
+        self.events: list[tuple[str, int | None]] = []
         self._next_ids: dict[str, int] = {}
+        self._transaction_state: dict[str, Any] | None = None
 
     def _next_id(self, name: str, collection: dict[int, Any]) -> int:
         """Return the next identifier for a collection."""
         next_id = max(collection, default=0) + 1
         self._next_ids[name] = next_id
         return next_id
+
+    def _record(self, event: str, series_id: int | None = None) -> None:
+        """Record a repository call in execution order."""
+        self.events.append((event, series_id))
+
+    def _snapshot_state(self) -> dict[str, Any]:
+        """Capture mutable collections and dataclass fields for rollback."""
+        attributes: list[tuple[Any, dict[str, Any]]] = []
+        for collection in (
+            self.colors,
+            self.projects,
+            self.labels,
+            self.series,
+            self.tasks,
+            self.reminders,
+            self.deliveries,
+        ):
+            for entity in collection.values():
+                if is_dataclass(entity) and not isinstance(entity, type):
+                    attributes.append((entity, dict(entity.__dict__)))
+        return {
+            "colors": dict(self.colors),
+            "projects": dict(self.projects),
+            "labels": dict(self.labels),
+            "series": dict(self.series),
+            "tasks": dict(self.tasks),
+            "reminders": dict(self.reminders),
+            "deliveries": dict(self.deliveries),
+            "task_labels": set(self.task_labels),
+            "series_labels": set(self.series_labels),
+            "attributes": attributes,
+        }
+
+    def _begin_transaction(self) -> None:
+        """Capture the pre-transaction state before the first mutating call."""
+        if self._transaction_state is None:
+            self._transaction_state = self._snapshot_state()
+
+    def _restore_transaction_state(self) -> None:
+        """Restore the state captured before the current transaction began."""
+        state = self._transaction_state
+        if state is None:
+            return
+        for name in (
+            "colors",
+            "projects",
+            "labels",
+            "series",
+            "tasks",
+            "reminders",
+            "deliveries",
+        ):
+            target = getattr(self, name)
+            target.clear()
+            target.update(state[name])
+        self.task_labels.clear()
+        self.task_labels.update(state["task_labels"])
+        self.series_labels.clear()
+        self.series_labels.update(state["series_labels"])
+        for entity, attributes in state["attributes"]:
+            if is_dataclass(entity):
+                entity_state = vars(entity)
+                entity_state.clear()
+                entity_state.update(attributes)
+        self._transaction_state = None
+
+    def _series_ids_for_reminders(self, reminders: Sequence[Any]) -> set[int]:
+        """Return series ids linked directly or through instance tasks."""
+        series_ids: set[int] = set()
+        for reminder in reminders:
+            if reminder.series_id is not None:
+                series_ids.add(reminder.series_id)
+                continue
+            if reminder.task_id is None:
+                continue
+            task = self.tasks.get(reminder.task_id)
+            if task is not None and task.series_id is not None:
+                series_ids.add(task.series_id)
+        return series_ids
 
     def insert_color(self, color: Any) -> Any:
         """Insert a palette color and return it."""
@@ -579,15 +661,24 @@ class FakeTaskManagementRepository:
 
     async def add_task(self, task: Any) -> Any:
         """Persist a task."""
+        self._begin_transaction()
         return self.insert_task(task)
 
     async def add_tasks(self, tasks: Sequence[Any]) -> Sequence[Any]:
         """Persist multiple tasks in one batch and return their generated entities."""
+        self._begin_transaction()
+        series_ids = {task.series_id for task in tasks if task.series_id is not None}
+        if series_ids:
+            for series_id in sorted(series_ids):
+                self._record("add_tasks", series_id)
+        else:
+            self._record("add_tasks")
         self.bulk_calls.append("add_tasks")
         return [self.insert_task(replace(task, id=0)) for task in tasks]
 
     async def save_task(self, task: Any) -> None:
         """Persist changed task fields and record the save."""
+        self._begin_transaction()
         self.saved_tasks.append(task.id)
         self.tasks[task.id] = task
 
@@ -598,11 +689,13 @@ class FakeTaskManagementRepository:
         batch_id: UUID | None = None,
     ) -> None:
         """Soft-delete a task."""
+        self._begin_transaction()
         task.deleted_at = deleted_at
         task.deletion_batch_id = batch_id
 
     async def hard_delete_tasks(self, task_ids: Sequence[int], user_id: int) -> None:
         """Physically delete owned tasks with their labels, reminders, and deliveries."""
+        self._begin_transaction()
         owned_task_ids = {
             task_id
             for task_id in task_ids
@@ -631,12 +724,14 @@ class FakeTaskManagementRepository:
         label_ids: Sequence[int],
     ) -> None:
         """Assign labels to a task and record the owner argument."""
+        self._begin_transaction()
         self.task_label_calls.append((task_id, user_id, tuple(label_ids)))
         for label_id in label_ids:
             self.task_labels.add((task_id, label_id))
 
     async def add_task_label_rows(self, rows: Sequence[Any]) -> None:
         """Assign multiple task-label rows in one batch."""
+        self._begin_transaction()
         self.bulk_calls.append("add_task_label_rows")
         for row in rows:
             self.task_labels.add((row.task_id, row.label_id))
@@ -648,6 +743,7 @@ class FakeTaskManagementRepository:
         label_ids: Sequence[int],
     ) -> None:
         """Replace all labels assigned to a task."""
+        self._begin_transaction()
         self.task_labels = {pair for pair in self.task_labels if pair[0] != task_id}
         await self.add_task_labels(task_id, user_id, label_ids)
 
@@ -712,21 +808,35 @@ class FakeTaskManagementRepository:
 
     async def add_reminder(self, reminder: Any) -> Any:
         """Persist a reminder."""
+        self._begin_transaction()
         return self.insert_reminder(reminder)
 
     async def save_reminder(self, reminder: Any) -> None:
         """Persist changed reminder fields and record the save."""
+        self._begin_transaction()
         self.saved_reminders.append(reminder.id)
         self.reminders[reminder.id] = reminder
 
     async def add_reminders(self, reminders: Sequence[Any]) -> None:
-        """Persist multiple reminders in one batch."""
+        """Persist multiple reminders, then raise configured post-write errors."""
+        self._begin_transaction()
+        series_ids = self._series_ids_for_reminders(reminders)
+        if series_ids:
+            for series_id in sorted(series_ids):
+                self._record("add_reminders", series_id)
+        else:
+            self._record("add_reminders")
         self.bulk_calls.append("add_reminders")
         for reminder in reminders:
             self.insert_reminder(reminder)
+        for series_id in sorted(series_ids):
+            error = self.post_write_errors.get(series_id)
+            if error is not None:
+                raise error
 
     async def delete_task_reminders(self, user_id: int, task_id: int) -> None:
         """Delete task reminders and their deliveries."""
+        self._begin_transaction()
         reminder_ids = {
             reminder.id
             for reminder in self.reminders.values()
@@ -742,6 +852,7 @@ class FakeTaskManagementRepository:
 
     async def delete_series_reminders(self, user_id: int, series_id: int) -> None:
         """Delete series template reminders."""
+        self._begin_transaction()
         reminder_ids = {
             reminder.id
             for reminder in self.reminders.values()
@@ -752,6 +863,7 @@ class FakeTaskManagementRepository:
 
     async def cancel_task_reminders(self, user_id: int, task_id: int) -> None:
         """Clear task reminder slots and cancel active deliveries."""
+        self._begin_transaction()
         reminder_ids = {
             reminder.id
             for reminder in self.reminders.values()
@@ -763,6 +875,7 @@ class FakeTaskManagementRepository:
 
     async def cancel_series_reminders(self, user_id: int, series_id: int) -> None:
         """Clear series reminder slots and cancel active deliveries."""
+        self._begin_transaction()
         reminder_ids = {
             reminder.id
             for reminder in self.reminders.values()
@@ -889,10 +1002,13 @@ class FakeTaskManagementRepository:
 
     async def add_series(self, series: Any) -> Any:
         """Persist a series."""
+        self._begin_transaction()
         return self.insert_series(series)
 
     async def save_series(self, series: Any) -> None:
         """Persist changed series fields and record the save."""
+        self._begin_transaction()
+        self._record("save_series", series.id)
         self.saved_series.append(series.id)
         self.series[series.id] = series
 
@@ -903,6 +1019,7 @@ class FakeTaskManagementRepository:
         batch_id: UUID | None = None,
     ) -> None:
         """Soft-delete a series."""
+        self._begin_transaction()
         series.deleted_at = deleted_at
         series.deletion_batch_id = batch_id
 
@@ -913,6 +1030,7 @@ class FakeTaskManagementRepository:
         label_ids: Sequence[int],
     ) -> None:
         """Assign labels to a series."""
+        self._begin_transaction()
         for label_id in label_ids:
             self.series_labels.add((series_id, label_id))
 
@@ -923,6 +1041,7 @@ class FakeTaskManagementRepository:
         label_ids: Sequence[int],
     ) -> None:
         """Replace all labels assigned to a series."""
+        self._begin_transaction()
         self.series_labels = {pair for pair in self.series_labels if pair[0] != series_id}
         await self.add_series_labels(series_id, user_id, label_ids)
 
@@ -939,6 +1058,7 @@ class FakeTaskManagementRepository:
 
     async def list_series_for_generation(self, now: datetime) -> Any:
         """List active series that may need new instances."""
+        self._record("list_series_for_generation")
         threshold = now + timedelta(days=HORIZON_DAYS) - timedelta(days=1)
         utc_today = now.astimezone(UTC).date()
         return sorted(
@@ -959,6 +1079,7 @@ class FakeTaskManagementRepository:
         user_id: int,
     ) -> Any:
         """Return a series for generation unless the fake marks it locked."""
+        self._record("claim_series_for_generation", series_id)
         self.claimed_series_ids.append(series_id)
         if series_id in self.series_errors:
             raise self.series_errors[series_id]
@@ -1103,6 +1224,7 @@ class FakeTaskManagementRepository:
         next_run_at: datetime | None,
     ) -> None:
         """Update a reminder slot."""
+        self._begin_transaction()
         reminder.next_run_at = next_run_at
 
     async def get_delivery(
@@ -1194,12 +1316,16 @@ class FakeTaskManagementRepository:
         delivery.last_error = None
 
     async def commit(self) -> None:
-        """Record an explicit dispatcher or generation commit."""
+        """Record a commit and accept the current in-memory state."""
+        self._record("commit")
         self.commits += 1
+        self._transaction_state = None
 
     async def rollback(self) -> None:
-        """Record an explicit rollback."""
+        """Record a rollback and restore the state captured at transaction start."""
+        self._record("rollback")
         self.rollbacks += 1
+        self._restore_transaction_state()
 
     async def flush(self) -> None:
         """Record a flush in the in-memory implementation."""
