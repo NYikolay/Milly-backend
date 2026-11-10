@@ -4,16 +4,15 @@ from fastapi import Response, status
 
 from backend.api.deps import CurrentAccessDep, LabelServiceDep, PaletteServiceDep
 from backend.api.errors.openapi import StandardizedAPIRouter, document_errors
+from backend.api.mappers.task_management import label_response
 from backend.api.task_schemas import (
-    ColorResponse,
     LabelCreate,
     LabelListResponse,
     LabelResponse,
     LabelUpdate,
 )
-from backend.application.task_management.palette import PaletteService
 from backend.core.errors import ErrorCode
-from backend.domain.entities import Label
+from backend.domain.entities import ColorPalette
 
 router = StandardizedAPIRouter(prefix="/labels", tags=["labels"])
 
@@ -23,54 +22,6 @@ _ERRORS = {
     ErrorCode.BAD_REQUEST: "The label name or palette color is invalid.",
     ErrorCode.UNAUTHORIZED: "The bearer token is missing or invalid.",
 }
-
-
-def _label_response(label: Label, color: ColorResponse) -> LabelResponse:
-    """
-    Build a label response from a label and its resolved color.
-
-    Purpose:
-        Serialize label fields together with the stored palette color.
-
-    Args:
-        label: Label entity returned by the label service.
-        color: Resolved palette color.
-
-    Returns:
-        LabelResponse: Label fields with color data.
-    """
-    return LabelResponse(
-        id=label.id,
-        name=label.name,
-        color=color,
-        created_at=label.created_at,
-        updated_at=label.updated_at,
-    )
-
-
-async def _resolve_color(
-    service: PaletteService,
-    color_id: int,
-) -> ColorResponse:
-    """
-    Resolve the stored palette color of a label.
-
-    Purpose:
-        Return the selected color even when the palette entry is no longer
-        active.
-
-    Args:
-        service: Palette service resolving colors by identifier.
-        color_id: Palette color identifier referenced by the label.
-
-    Returns:
-        ColorResponse: The resolved palette color.
-
-    Raises:
-        NotFoundError: If the color does not exist.
-    """
-    color = await service.get_color(color_id)
-    return ColorResponse.model_validate(color)
 
 
 @router.get(
@@ -107,14 +58,14 @@ async def list_labels(
         - Each distinct color is resolved once per request.
     """
     labels = await service.list(claims.user_id)
-    colors: dict[int, ColorResponse] = {}
+    colors: dict[int, ColorPalette] = {}
     items: list[LabelResponse] = []
     for label in labels:
         color = colors.get(label.color_id)
         if color is None:
-            color = await _resolve_color(palette_service, label.color_id)
+            color = await palette_service.get_color(label.color_id)
             colors[label.color_id] = color
-        items.append(_label_response(label, color))
+        items.append(label_response(label, color))
     return LabelListResponse(items=items)
 
 
@@ -160,8 +111,8 @@ async def create_label(
         name=payload.name,
         color_id=payload.color_id,
     )
-    color = await _resolve_color(palette_service, label.color_id)
-    return _label_response(label, color)
+    color = await palette_service.get_color(label.color_id)
+    return label_response(label, color)
 
 
 @router.patch(
@@ -205,8 +156,8 @@ async def update_label(
     """
     changes = payload.model_dump(exclude_unset=True)
     label = await service.update(claims.user_id, label_id, **changes)
-    color = await _resolve_color(palette_service, label.color_id)
-    return _label_response(label, color)
+    color = await palette_service.get_color(label.color_id)
+    return label_response(label, color)
 
 
 @router.delete(

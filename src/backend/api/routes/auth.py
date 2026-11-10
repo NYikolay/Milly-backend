@@ -2,21 +2,21 @@ from __future__ import annotations
 
 from fastapi import Request, Response, status
 
-from backend.api.deps import AuthServiceDep, CurrentUserDep
-from backend.api.errors.openapi import StandardizedAPIRouter, document_errors
-from backend.auth.cookies import (
+from backend.api.auth.cookies import (
     clear_refresh_cookie,
     set_refresh_cookie,
     validate_auth_origin,
 )
-from backend.auth.schemas import (
+from backend.api.auth.schemas import (
     AuthResponse,
     TelegramAuthRequest,
-    TelegramProfileResponse,
     TimezoneUpdate,
     TokenResponse,
     UserResponse,
 )
+from backend.api.deps import AuthServiceDep, CurrentUserDep
+from backend.api.errors.openapi import StandardizedAPIRouter, document_errors
+from backend.api.mappers.auth import auth_response, token_response, user_response
 from backend.core.config import Settings
 from backend.core.errors import ErrorCode, UnauthorizedError
 
@@ -80,16 +80,7 @@ async def telegram_login(
     validate_auth_origin(request, settings)
     result = await service.login(payload.init_data)
     set_refresh_cookie(response, result.tokens.refresh_token, settings)
-    return AuthResponse(
-        access_token=result.tokens.access_token,
-        expires_in=settings.auth_access_ttl_seconds,
-        user=UserResponse(
-            id=result.user.id,
-            timezone=result.user.timezone,
-            created_at=result.user.created_at,
-            telegram_profile=TelegramProfileResponse.model_validate(result.profile),
-        ),
-    )
+    return auth_response(result, settings.auth_access_ttl_seconds)
 
 
 @router.post(
@@ -147,10 +138,7 @@ async def refresh_tokens(
         raise UnauthorizedError("Refresh token is missing")
     tokens = await service.refresh(raw_refresh_token)
     set_refresh_cookie(response, tokens.refresh_token, settings)
-    return TokenResponse(
-        access_token=tokens.access_token,
-        expires_in=settings.auth_access_ttl_seconds,
-    )
+    return token_response(tokens, settings.auth_access_ttl_seconds)
 
 
 @router.post(
@@ -227,7 +215,7 @@ async def read_current_user(user: CurrentUserDep) -> UserResponse:
             invalid, the user no longer exists, or the user has no Telegram
             profile.
     """
-    return UserResponse.model_validate(user)
+    return user_response(user)
 
 
 @router.patch(
@@ -275,4 +263,4 @@ async def update_timezone(
         - The request-scoped session commits after the response is built.
     """
     updated = await service.update_timezone(user.id, payload.timezone)
-    return UserResponse.model_validate(updated)
+    return user_response(updated)

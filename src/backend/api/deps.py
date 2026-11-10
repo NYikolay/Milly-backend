@@ -274,7 +274,8 @@ async def get_current_user(
         service: Authentication service used to load the user.
 
     Returns:
-        User: The user with ``telegram_profile`` loaded.
+        User: The domain user entity with ``telegram_profile`` loaded; never an
+            ORM row.
 
     Raises:
         UnauthorizedError: If the user no longer exists or has no Telegram

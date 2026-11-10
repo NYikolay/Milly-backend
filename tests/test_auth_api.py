@@ -2,13 +2,21 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import cast
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from backend.api.auth.schemas import UserResponse as ApiUserResponse
-from backend.api.deps import CurrentAccessDep, get_auth_service, get_current_access
+from backend.api.deps import (
+    CurrentAccessDep,
+    get_auth_service,
+    get_current_access,
+    get_current_user,
+)
+from backend.application.auth.service import AuthService
 from backend.core.config import Settings
 from backend.core.errors import UnauthorizedError
 from backend.domain.auth.models import AccessTokenClaims, LoginResult, TokenPair
@@ -407,3 +415,61 @@ def test_api_schema_serializes_domain_user() -> None:
     assert body.id == 1
     assert body.timezone == "UTC"
     assert body.telegram_profile.telegram_id == 123
+
+
+async def test_current_user_dependency_returns_domain_user() -> None:
+    """The authenticated principal is not an ORM row."""
+    service = FakeAuthService(_login_result())
+
+    user = await get_current_user(
+        claims=_claims(),
+        service=cast(AuthService, service),
+    )
+
+    assert isinstance(user, User)
+    assert service.get_user_calls == [1]
+
+
+def test_auth_mappers_serialize_domain_auth_results() -> None:
+    """Serialize login, token, user, and profile results through the mappers."""
+    from backend.api.mappers.auth import (
+        auth_response,
+        profile_response,
+        token_response,
+        user_response,
+    )
+
+    result = _login_result()
+
+    login_body = auth_response(result, expires_in=900)
+    assert login_body.access_token == "access-token"
+    assert login_body.token_type == "bearer"
+    assert login_body.expires_in == 900
+    assert login_body.user.id == 1
+    assert login_body.user.timezone == "UTC"
+    assert login_body.user.telegram_profile.telegram_id == 123
+
+    profile_body = profile_response(result.profile)
+    assert profile_body.telegram_id == 123
+    assert profile_body.first_name == "Ivan"
+    assert profile_body.is_premium is False
+
+    user_body = user_response(result.user)
+    assert user_body.id == 1
+    assert user_body.telegram_profile.telegram_id == 123
+
+    token_body = token_response(result.tokens, expires_in=900)
+    assert token_body.access_token == "access-token"
+    assert token_body.token_type == "bearer"
+    assert token_body.expires_in == 900
+
+
+def test_auth_route_uses_api_modules_and_mappers() -> None:
+    """Auth routes use HTTP-layer auth modules and shared response mappers."""
+    source = Path("src/backend/api/routes/auth.py").read_text(encoding="utf-8")
+
+    assert "from backend.api.auth.cookies import" in source
+    assert "from backend.api.auth.schemas import" in source
+    assert "from backend.api.mappers.auth import" in source
+    assert "backend.auth.cookies" not in source
+    assert "backend.auth.schemas" not in source

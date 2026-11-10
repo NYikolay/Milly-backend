@@ -2,16 +2,16 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from backend.api.deps import get_current_access, get_label_service, get_palette_service
-from backend.auth.tokens import AccessTokenClaims
 from backend.core.errors import ConflictError, NotFoundError
-from backend.models.color_palette import ColorPalette
-from backend.models.label import Label
+from backend.domain.auth.models import AccessTokenClaims
+from backend.domain.entities import ColorPalette, Label
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
 
@@ -410,3 +410,12 @@ async def test_label_routes_forward_the_claim_user_id(
     assert ("list", 1) in fake_label_service.user_calls
     assert ("update", 1) in fake_label_service.user_calls
     assert ("delete", 1) in fake_label_service.user_calls
+
+
+def test_label_route_does_not_import_orm() -> None:
+    """Label routes use mappers instead of ORM validation."""
+    source = Path("src/backend/api/routes/labels.py").read_text(encoding="utf-8")
+
+    assert "backend.models" not in source
+    assert "model_validate" not in source
+    assert "def _label_response" not in source
