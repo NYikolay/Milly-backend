@@ -8,6 +8,21 @@ from uuid import UUID
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.domain.entities import ColorPalette as ColorPaletteEntity
+from backend.domain.entities import Project as ProjectEntity
+from backend.infrastructure.persistence.sqlalchemy.account_repository import (
+    SqlAlchemyAccountRepository,
+)
+from backend.infrastructure.persistence.sqlalchemy.mappers import (
+    color_to_entity,
+    project_to_entity,
+)
+from backend.infrastructure.persistence.sqlalchemy.palette_repository import (
+    SqlAlchemyPaletteRepository,
+)
+from backend.infrastructure.persistence.sqlalchemy.project_repository import (
+    SqlAlchemyProjectRepository,
+)
 from backend.models.color_palette import ColorPalette
 from backend.models.project import Project
 from backend.models.task_label import TaskLabel
@@ -140,7 +155,12 @@ class RecordingResult:
 class RecordingSession:
     """Async session double that records statements without a database."""
 
-    def __init__(self, results: Sequence[RecordingResult] | None = None) -> None:
+    def __init__(
+        self,
+        results: Sequence[RecordingResult] | None = None,
+        *,
+        get_results: Sequence[Any] | None = None,
+    ) -> None:
         """
         Initialize the recording session.
 
@@ -150,11 +170,14 @@ class RecordingSession:
 
         Args:
             results: Results to return from successive ``execute`` calls.
+            get_results: ORM rows to return from successive primary-key
+                lookups.
         """
         self.statements: list[Any] = []
         self.added: list[Any] = []
         self.flush_count = 0
         self._results = list(results or [])
+        self._get_results = list(get_results or [])
 
     async def execute(self, statement: Any) -> RecordingResult:
         """
@@ -174,6 +197,25 @@ class RecordingSession:
         if self._results:
             return self._results.pop(0)
         return RecordingResult()
+
+    async def get(self, entity: Any, ident: Any) -> Any:
+        """
+        Return the next prepared ORM row for a primary-key lookup.
+
+        Purpose:
+            Support save methods that load the tracked row before applying
+            domain values.
+
+        Args:
+            entity: Mapped class requested by the repository.
+            ident: Primary-key value requested by the repository.
+
+        Returns:
+            Any: The next prepared row, or ``None``.
+        """
+        if self._get_results:
+            return self._get_results.pop(0)
+        return None
 
     def add(self, instance: Any) -> None:
         """
@@ -217,6 +259,21 @@ def make_repository(session: RecordingSession) -> SqlAlchemyTaskManagementReposi
     return SqlAlchemyTaskManagementRepository(cast(AsyncSession, session))
 
 
+def make_palette_repository(session: RecordingSession) -> SqlAlchemyPaletteRepository:
+    """Build a palette adapter bound to the recording session."""
+    return SqlAlchemyPaletteRepository(cast(AsyncSession, session))
+
+
+def make_account_repository(session: RecordingSession) -> SqlAlchemyAccountRepository:
+    """Build an account adapter bound to the recording session."""
+    return SqlAlchemyAccountRepository(cast(AsyncSession, session))
+
+
+def make_project_repository(session: RecordingSession) -> SqlAlchemyProjectRepository:
+    """Build a project adapter bound to the recording session."""
+    return SqlAlchemyProjectRepository(cast(AsyncSession, session))
+
+
 def compile_statement(statement: Any) -> str:
     """Compile one recorded statement with literal binds for PostgreSQL."""
     return str(
@@ -230,7 +287,7 @@ def compile_statement(statement: Any) -> str:
 async def test_list_projects_filters_and_orders_active_projects() -> None:
     """Active project listing is tenant-scoped, non-deleted, and deterministic."""
     session = RecordingSession()
-    repository = make_repository(session)
+    repository = make_project_repository(session)
 
     await repository.list_projects(
         USER_ID,
@@ -271,7 +328,7 @@ async def test_list_projects_filters_and_orders_active_projects() -> None:
 async def test_list_projects_applies_archived_name_id_cursor_and_limit() -> None:
     """Project pagination applies the archive rank, name key, id tiebreaker, and limit."""
     session = RecordingSession()
-    repository = make_repository(session)
+    repository = make_project_repository(session)
 
     await repository.list_projects(
         USER_ID,
@@ -295,10 +352,10 @@ async def test_list_projects_applies_archived_name_id_cursor_and_limit() -> None
 
 
 async def test_list_projects_returns_sql_lower_name_key() -> None:
-    """Project listing returns each project paired with the SQL lower-case key."""
+    """Project listing maps rows to domain projects paired with the SQL key."""
     project = Project(id=1, user_id=USER_ID, name="Ärger", color_id=1)
     session = RecordingSession(results=[RecordingResult(values=[(project, "ärger")])])
-    repository = make_repository(session)
+    repository = make_project_repository(session)
 
     rows = await repository.list_projects(
         USER_ID,
@@ -309,13 +366,73 @@ async def test_list_projects_returns_sql_lower_name_key() -> None:
         after_project_id=None,
     )
 
-    assert rows == [(project, "ärger")]
+    assert rows == [(project_to_entity(project), "ärger")]
+
+
+async def test_project_repository_returns_domain_and_scopes_tenant() -> None:
+    """Project reads return domain rows and always filter by user."""
+    session = RecordingSession(results=[RecordingResult(values=[])])
+    repository = make_project_repository(session)
+
+    projects = await repository.list_projects(
+        USER_ID,
+        include_archived=False,
+        limit=50,
+        after_archived=None,
+        after_name=None,
+        after_project_id=None,
+    )
+    sql = compile_statement(session.statements[-1])
+
+    assert projects == []
+    assert "projects.user_id = 7" in sql
+    assert "lower(projects.name) AS name_key" in sql
+
+
+async def test_project_save_issues_update() -> None:
+    """Saving a project applies the domain fields to the tracked row."""
+    row = Project(id=PROJECT_ID, user_id=USER_ID, name="Old", color_id=1)
+    session = RecordingSession(get_results=[row])
+    repository = make_project_repository(session)
+    project = ProjectEntity(
+        id=PROJECT_ID,
+        user_id=USER_ID,
+        name="New",
+        color_id=2,
+        description="Updated",
+    )
+
+    await repository.save_project(project)
+
+    assert row.name == "New"
+    assert row.color_id == 2
+    assert row.description == "Updated"
+    assert session.flush_count == 1
+    assert session.statements == []
+
+
+async def test_project_add_inserts_fresh_row_without_domain_id() -> None:
+    """New projects insert a fresh ORM row and never copy the transient id."""
+    session = RecordingSession()
+    repository = make_project_repository(session)
+    project = ProjectEntity(user_id=USER_ID, name="Work", color_id=2)
+
+    result = await repository.add_project(project)
+
+    assert len(session.added) == 1
+    row = session.added[0]
+    assert row.id is None
+    assert row.user_id == USER_ID
+    assert row.name == "Work"
+    assert row.color_id == 2
+    assert result.name == "Work"
+    assert session.flush_count == 1
 
 
 async def test_project_progress_for_projects_groups_by_project_id() -> None:
     """Batch progress counts non-deleted tasks grouped by project."""
     session = RecordingSession(results=[RecordingResult(values=[(5, 4, 2), (6, 1, 0)])])
-    repository = make_repository(session)
+    repository = make_project_repository(session)
 
     result = await repository.project_progress_for_projects(USER_ID, (5, 6))
     sql = compile_statement(session.statements[-1])
@@ -348,22 +465,44 @@ async def test_get_palette_colors_by_ids_uses_in() -> None:
         is_active=False,
     )
     session = RecordingSession(results=[RecordingResult(values=[first, second])])
-    repository = make_repository(session)
+    repository = make_palette_repository(session)
 
     result = await repository.get_palette_colors_by_ids((1, 3))
     sql = compile_statement(session.statements[-1])
 
-    assert result == {1: first, 3: second}
+    assert result == {1: color_to_entity(first), 3: color_to_entity(second)}
     assert "color_palette.id IN (1, 3)" in sql
+
+
+async def test_palette_repository_returns_domain_colors() -> None:
+    """Palette reads map ORM rows to domain colors in display order."""
+    row = ColorPalette(
+        id=1,
+        slug="blue",
+        name="Blue",
+        hex="#0000FF",
+        sort_order=1,
+        is_active=True,
+    )
+    session = RecordingSession(results=[RecordingResult(values=[row])])
+    repository = make_palette_repository(session)
+
+    colors = await repository.list_palette_colors()
+    sql = compile_statement(session.statements[-1])
+
+    assert list(colors) == [color_to_entity(row)]
+    assert isinstance(colors[0], ColorPaletteEntity)
+    assert "ORDER BY color_palette.sort_order, color_palette.id" in sql
 
 
 async def test_project_batch_methods_skip_empty_input() -> None:
     """Project batch methods return empty mappings without issuing queries."""
     session = RecordingSession()
-    repository = make_repository(session)
+    project_repository = make_project_repository(session)
+    palette_repository = make_palette_repository(session)
 
-    progress = await repository.project_progress_for_projects(USER_ID, ())
-    colors = await repository.get_palette_colors_by_ids(())
+    progress = await project_repository.project_progress_for_projects(USER_ID, ())
+    colors = await palette_repository.get_palette_colors_by_ids(())
 
     assert progress == {}
     assert colors == {}
@@ -378,7 +517,7 @@ async def test_project_name_exists_is_case_insensitive_active_and_excludes_id() 
             RecordingResult(scalar=None),
         ]
     )
-    repository = make_repository(session)
+    repository = make_project_repository(session)
 
     exists = await repository.project_name_exists(USER_ID, "Work", exclude_project_id=PROJECT_ID)
     without_exclusion = await repository.project_name_exists(USER_ID, "Work")
@@ -425,18 +564,19 @@ async def test_label_name_exists_is_case_insensitive_non_deleted_and_excludes_id
 async def test_get_project_and_label_are_tenant_scoped_and_can_lock() -> None:
     """Project and label lookups filter by owner, exclude deleted rows, and lock on demand."""
     session = RecordingSession()
-    repository = make_repository(session)
+    project_repository = make_project_repository(session)
+    label_repository = make_repository(session)
 
-    await repository.get_project(USER_ID, PROJECT_ID)
+    await project_repository.get_project(USER_ID, PROJECT_ID)
     project_sql = compile_statement(session.statements[-1])
 
-    await repository.get_project(USER_ID, PROJECT_ID, for_update=True)
+    await project_repository.get_project(USER_ID, PROJECT_ID, for_update=True)
     locked_project_sql = compile_statement(session.statements[-1])
 
-    await repository.get_label(USER_ID, 9)
+    await label_repository.get_label(USER_ID, 9)
     label_sql = compile_statement(session.statements[-1])
 
-    await repository.get_label(USER_ID, 9, for_update=True)
+    await label_repository.get_label(USER_ID, 9, for_update=True)
     locked_label_sql = compile_statement(session.statements[-1])
 
     assert "projects.id = 5" in project_sql
@@ -454,7 +594,7 @@ async def test_get_project_and_label_are_tenant_scoped_and_can_lock() -> None:
 async def test_list_active_palette_colors_filters_and_orders() -> None:
     """Active palette listing excludes inactive colors and orders deterministically."""
     session = RecordingSession()
-    repository = make_repository(session)
+    repository = make_palette_repository(session)
 
     await repository.list_active_palette_colors()
     sql = compile_statement(session.statements[-1])
@@ -466,7 +606,7 @@ async def test_list_active_palette_colors_filters_and_orders() -> None:
 async def test_get_default_palette_color_is_first_active() -> None:
     """The default palette color is the first active color by display order."""
     session = RecordingSession(results=[RecordingResult(scalar=None)])
-    repository = make_repository(session)
+    repository = make_palette_repository(session)
 
     await repository.get_default_palette_color()
     sql = compile_statement(session.statements[-1])
@@ -479,8 +619,8 @@ async def test_get_default_palette_color_is_first_active() -> None:
 async def test_soft_delete_project_emits_owner_scoped_cascade() -> None:
     """Project deletion updates the project tree and cancels active deliveries."""
     session = RecordingSession()
-    repository = make_repository(session)
-    project = Project(id=PROJECT_ID, user_id=USER_ID, name="Work", color_id=1)
+    repository = make_project_repository(session)
+    project = ProjectEntity(id=PROJECT_ID, user_id=USER_ID, name="Work", color_id=1)
 
     await repository.soft_delete_project(project, BATCH_ID, NOW)
 
@@ -525,7 +665,7 @@ async def test_soft_delete_project_emits_owner_scoped_cascade() -> None:
 async def test_planned_tasks_count_excludes_inactive_plans_and_completed_tasks() -> None:
     """Planned tasks exclude deleted, completed, and inactive-project tasks."""
     session = RecordingSession(results=[RecordingResult(scalar=4)])
-    repository = make_repository(session)
+    repository = make_project_repository(session)
 
     result = await repository.planned_tasks_count(USER_ID)
     sql = compile_statement(session.statements[-1])
@@ -543,7 +683,7 @@ async def test_planned_tasks_count_excludes_inactive_plans_and_completed_tasks()
 async def test_project_progress_counts_all_and_completed_tasks() -> None:
     """Project progress counts non-deleted tasks and completion timestamps."""
     session = RecordingSession(results=[RecordingResult(row=(5, 2))])
-    repository = make_repository(session)
+    repository = make_project_repository(session)
 
     result = await repository.project_progress(USER_ID, PROJECT_ID)
     sql = compile_statement(session.statements[-1])
@@ -560,7 +700,7 @@ async def test_today_progress_bounds_due_at_and_counts_completed_tasks() -> None
     """Today progress uses the due-at window and completion timestamps."""
     end = NOW.replace(hour=21, minute=0)
     session = RecordingSession(results=[RecordingResult(row=(3, 1))])
-    repository = make_repository(session)
+    repository = make_project_repository(session)
 
     result = await repository.today_progress(USER_ID, NOW, end)
     sql = compile_statement(session.statements[-1])
@@ -577,7 +717,7 @@ async def test_today_progress_bounds_due_at_and_counts_completed_tasks() -> None
 async def test_palette_color_is_used_checks_projects_and_labels() -> None:
     """Palette usage checks both project and label references."""
     session = RecordingSession(results=[RecordingResult(scalar=False)])
-    repository = make_repository(session)
+    repository = make_palette_repository(session)
 
     result = await repository.palette_color_is_used(4)
     sql = compile_statement(session.statements[-1])
@@ -895,7 +1035,7 @@ async def test_resume_project_reminders_batches_series_and_task_reminders() -> N
 async def test_get_telegram_id_reads_the_linked_profile() -> None:
     """Reminder targeting resolves the Telegram profile of the internal user."""
     session = RecordingSession(results=[RecordingResult(scalar=99)])
-    repository = make_repository(session)
+    repository = make_account_repository(session)
 
     telegram_id = await repository.get_telegram_id(USER_ID)
     sql = compile_statement(session.statements[-1])
@@ -903,6 +1043,29 @@ async def test_get_telegram_id_reads_the_linked_profile() -> None:
     assert telegram_id == 99
     assert "telegram_profiles.telegram_id" in sql
     assert "telegram_profiles.user_id = 7" in sql
+
+
+async def test_account_repository_reads_timezone_and_telegram_id() -> None:
+    """Account reads return the stored timezone and Telegram chat identifier."""
+    session = RecordingSession(
+        results=[
+            RecordingResult(scalar="Asia/Tokyo"),
+            RecordingResult(scalar=99),
+        ]
+    )
+    repository = make_account_repository(session)
+
+    timezone = await repository.get_user_timezone(USER_ID)
+    telegram_id = await repository.get_telegram_id(USER_ID)
+
+    timezone_sql = compile_statement(session.statements[0])
+    telegram_sql = compile_statement(session.statements[1])
+    assert timezone == "Asia/Tokyo"
+    assert telegram_id == 99
+    assert "users.timezone" in timezone_sql
+    assert "users.id = 7" in timezone_sql
+    assert "telegram_profiles.telegram_id" in telegram_sql
+    assert "telegram_profiles.user_id = 7" in telegram_sql
 
 
 async def test_resume_project_reminders_clears_slot_on_datetime_overflow() -> None:
