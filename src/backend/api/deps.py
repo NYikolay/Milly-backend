@@ -6,6 +6,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.application.auth.service import AuthService
+from backend.application.ports.auth import TokenVerifier
 from backend.application.task_management.labels import LabelService
 from backend.application.task_management.palette import PaletteService
 from backend.application.task_management.projects import ProjectService
@@ -23,7 +24,6 @@ from backend.db.probe import DatabaseProbe
 from backend.db.session import Database
 from backend.domain.auth.models import AccessTokenClaims
 from backend.domain.entities import User
-from backend.infrastructure.auth.tokens import decode_access_token
 
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
@@ -229,10 +229,10 @@ async def get_current_access(
 
     Purpose:
         Authenticate protected endpoints without opening a database session by
-        decoding the JWT with the application settings.
+        verifying the JWT through the application token verifier.
 
     Args:
-        request: Incoming request carrying the application settings.
+        request: Incoming request carrying the application token verifier.
         credentials: Parsed bearer credentials, or ``None`` when the header is
             missing or malformed.
 
@@ -247,12 +247,14 @@ async def get_current_access(
     Notes:
         - ``HTTPBearer(auto_error=False)`` lets the dependency raise the project
           error so the unified envelope and Bearer challenge are preserved.
+        - The verifier is built once during application assembly through the
+          composition root and stored on ``app.state.token_verifier``.
         - Raw tokens are never logged.
     """
     if credentials is None:
         raise UnauthorizedError("Authentication required")
-    settings: Settings = request.app.state.settings
-    return decode_access_token(credentials.credentials, settings=settings)
+    verifier: TokenVerifier = request.app.state.token_verifier
+    return verifier.verify_access_token(credentials.credentials)
 
 
 CurrentAccessDep = Annotated[AccessTokenClaims, Depends(get_current_access)]

@@ -319,6 +319,11 @@ def test_auth_collaborator_protocols_expose_expected_methods() -> None:
     assert _methods(auth_ports.TokenIssuer) == {"issue_access_token"}
 
 
+def test_token_verifier_is_a_narrow_port() -> None:
+    """Access-token verification is separate from issuance."""
+    assert _methods(auth_ports.TokenVerifier) == {"verify_access_token"}
+
+
 def test_every_port_method_documents_its_contract() -> None:
     """Every protocol method carries an English contract docstring."""
     protocols = [
@@ -334,6 +339,7 @@ def test_every_port_method_documents_its_contract() -> None:
         auth_ports.AuthRepository,
         auth_ports.InitDataValidator,
         auth_ports.TokenIssuer,
+        auth_ports.TokenVerifier,
     ]
     for protocol in protocols:
         for name in _methods(protocol):

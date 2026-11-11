@@ -19,6 +19,7 @@ from backend.api.errors.middleware import (
 )
 from backend.api.router import api_router
 from backend.api.routes import health
+from backend.composition.auth import build_token_verifier
 from backend.core.config import Settings, get_settings
 from backend.core.logging import configure_logging
 from backend.core.middleware import (
@@ -69,9 +70,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         None: Control returns to the server while the application runs.
 
     Notes:
-        - ``app.state.settings`` and ``app.state.db`` are set by ``create_app``
-          before startup; the database is created during application assembly,
-          not by the lifespan.
+        - ``app.state.settings``, ``app.state.token_verifier``, and
+          ``app.state.db`` are set by ``create_app`` before startup; the
+          database is created during application assembly, not by the lifespan.
         - The broker singleton is created when ``backend.tasks.broker`` is
           imported at the start of this lifespan. Scheduled task modules are
           imported only by the worker and scheduler entrypoints.
@@ -117,6 +118,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     Notes:
         - ``app.state.settings`` is populated eagerly so exception handlers can
           read the debug flag without relying on the lifespan.
+        - ``app.state.token_verifier`` is built eagerly through the composition
+          root so protected routes verify bearer tokens without importing
+          concrete infrastructure.
         - ``app.state.db`` is created during application assembly and disposed
           by the lifespan.
         - The admin panel is mounted only when both ``ADMIN_PASSWORD`` and
@@ -142,6 +146,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    app.state.token_verifier = build_token_verifier(settings)
 
     database = Database(settings)
     app.state.db = database

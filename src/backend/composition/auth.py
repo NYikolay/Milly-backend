@@ -8,10 +8,11 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.application.auth.service import AuthService
+from backend.application.ports.auth import TokenVerifier
 from backend.core.config import Settings
 from backend.domain.auth.models import AuthSettings
 from backend.infrastructure.auth.init_data import PydanticInitDataValidator
-from backend.infrastructure.auth.tokens import JwtTokenIssuer
+from backend.infrastructure.auth.tokens import JwtTokenIssuer, JwtTokenVerifier
 from backend.infrastructure.persistence.sqlalchemy.auth_repository import (
     SqlAlchemyAuthRepository,
 )
@@ -19,7 +20,7 @@ from backend.infrastructure.persistence.sqlalchemy.unit_of_work import (
     SqlAlchemyUnitOfWork,
 )
 
-__all__ = ["build_auth_service"]
+__all__ = ["build_auth_service", "build_token_verifier"]
 
 
 def _auth_settings(settings: Settings) -> AuthSettings:
@@ -98,3 +99,24 @@ def build_auth_service(
         _auth_settings(settings),
         clock,
     )
+
+
+def build_token_verifier(settings: Settings) -> TokenVerifier:
+    """
+    Build the access-token verifier from application settings.
+
+    Purpose:
+        Select the JWT verification adapter in the composition root so the API
+        layer never imports concrete infrastructure.
+
+    Args:
+        settings: Application settings with JWT configuration.
+
+    Returns:
+        TokenVerifier: Verifier bound to the supplied settings.
+
+    Notes:
+        - The verifier retains the settings object and reads the JWT secret,
+          issuer, and leeway on each verification; it performs no I/O.
+    """
+    return JwtTokenVerifier(settings)

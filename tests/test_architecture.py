@@ -144,6 +144,13 @@ def test_api_does_not_import_orm_models() -> None:
             assert not imported.startswith(f"{ORM_MODELS_MODULE}."), f"{path}: {imported}"
 
 
+def test_api_does_not_import_concrete_infrastructure() -> None:
+    """API dependencies choose concrete adapters only through composition."""
+    for path in Path("src/backend/api").rglob("*.py"):
+        for imported in _imports(path):
+            assert not imported.startswith("backend.infrastructure"), f"{path}: {imported}"
+
+
 def test_import_collector_checks_from_import_names(tmp_path: Path) -> None:
     """From-import aliases are checked as full module paths."""
     path = tmp_path / "src" / "backend" / "domain" / "sample.py"

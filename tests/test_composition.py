@@ -7,9 +7,11 @@ from pathlib import Path
 from typing import Any, cast
 
 from fastapi import Request
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.deps import (
+    get_current_access,
     get_label_service,
     get_palette_service,
     get_project_service,
@@ -23,7 +25,7 @@ from backend.application.task_management.palette import PaletteService
 from backend.application.task_management.projects import ProjectService
 from backend.application.task_management.series import SeriesService
 from backend.application.task_management.tasks import TaskService
-from backend.composition.auth import build_auth_service
+from backend.composition.auth import build_auth_service, build_token_verifier
 from backend.composition.task_management import (
     build_palette_service,
     build_reminder_dispatcher,
@@ -31,6 +33,7 @@ from backend.composition.task_management import (
     build_task_management_services,
 )
 from backend.core.config import Settings
+from backend.infrastructure.auth.tokens import JwtTokenVerifier, create_access_token
 from backend.infrastructure.persistence.sqlalchemy.account_repository import (
     SqlAlchemyAccountRepository,
 )
@@ -64,11 +67,12 @@ class RecordingSession:
 
 
 class FakeState:
-    """Application-state double exposing settings for dependency tests."""
+    """Application-state double exposing settings and the token verifier."""
 
     def __init__(self, settings: Settings) -> None:
-        """Store the settings read by the auth dependency."""
+        """Store the settings and verifier read by the auth dependencies."""
         self.settings = settings
+        self.token_verifier = build_token_verifier(settings)
 
 
 class FakeApp:
@@ -245,6 +249,34 @@ async def test_auth_dependency_uses_auth_composition() -> None:
     secret = settings.auth_jwt_secret
     assert secret is not None
     assert service._settings.auth_jwt_secret == secret.get_secret_value()
+
+
+def test_auth_composition_builds_a_token_verifier() -> None:
+    """Auth composition selects the JWT verifier adapter."""
+    verifier = build_token_verifier(make_settings())
+
+    assert isinstance(verifier, JwtTokenVerifier)
+
+
+async def test_current_access_uses_the_app_state_token_verifier() -> None:
+    """The bearer dependency verifies tokens through the composed port."""
+    settings = make_settings()
+    token, _ = create_access_token(
+        7,
+        11,
+        7007,
+        settings=settings,
+        now=datetime.now(UTC),
+    )
+
+    claims = await get_current_access(
+        make_request(settings),
+        HTTPAuthorizationCredentials(scheme="Bearer", credentials=token),
+    )
+
+    assert claims.user_id == 7
+    assert claims.session_id == 11
+    assert claims.telegram_id == 7007
 
 
 def test_taskiq_entrypoints_use_the_composition_root() -> None:

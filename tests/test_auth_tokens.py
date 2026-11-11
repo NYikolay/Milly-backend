@@ -14,6 +14,7 @@ from backend.core.errors import UnauthorizedError
 from backend.domain.auth.models import AccessTokenClaims
 from backend.infrastructure.auth.tokens import (
     JwtTokenIssuer,
+    JwtTokenVerifier,
     create_access_token,
     decode_access_token,
     generate_refresh_token,
@@ -290,3 +291,29 @@ def test_jwt_token_issuer_requires_jwt_secret() -> None:
 
     with pytest.raises(AuthNotConfiguredError):
         issuer.issue_access_token(1, 2, 3, now=NOW)
+
+
+def test_jwt_token_verifier_matches_decode_access_token() -> None:
+    """The verifier returns the same claims as the compatibility decoder."""
+    settings = _settings()
+    verifier = JwtTokenVerifier(settings)
+    token, _ = create_access_token(7, 11, 7007, now=datetime.now(UTC), settings=settings)
+
+    assert verifier.verify_access_token(token) == decode_access_token(token, settings=settings)
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "not-a-jwt",
+        _token_with({"iss": "other"}),
+        _token_with({"aud": "other"}),
+        _token_with({"exp": int((NOW - timedelta(days=1)).timestamp())}),
+    ],
+)
+def test_jwt_token_verifier_rejects_like_decode_access_token(token: str) -> None:
+    """The verifier preserves decoder rejections for malformed and invalid tokens."""
+    verifier = JwtTokenVerifier(_settings())
+
+    with pytest.raises(UnauthorizedError):
+        verifier.verify_access_token(token)

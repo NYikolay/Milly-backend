@@ -7,7 +7,11 @@ from typing import Protocol
 from uuid import UUID
 
 from backend.application.ports.unit_of_work import UnitOfWork as UnitOfWork
-from backend.domain.auth.models import TelegramIdentity, TelegramUser
+from backend.domain.auth.models import (
+    AccessTokenClaims,
+    TelegramIdentity,
+    TelegramUser,
+)
 from backend.domain.entities import AuthSession, TelegramProfile, User
 
 
@@ -368,5 +372,46 @@ class TokenIssuer(Protocol):
 
         Notes:
             - Does not persist anything; the caller stores the session.
+        """
+        ...
+
+
+class TokenVerifier(Protocol):
+    """
+    Access-token verification contract for request authentication.
+
+    Purpose:
+        Let the API verify bearer tokens through the application boundary
+        without importing the JWT adapter.
+
+    Notes:
+        - Implementations return validated domain claims and raise
+          ``UnauthorizedError`` for every invalid token.
+        - Raw tokens must never be logged or included in error details.
+    """
+
+    def verify_access_token(self, raw_token: str) -> AccessTokenClaims:
+        """
+        Verify an encoded access token and return its claims.
+
+        Purpose:
+            Validate the signature, issuer, required claims, token type, and
+            configured time bounds before a request is authenticated.
+
+        Args:
+            raw_token: Encoded bearer access token.
+
+        Returns:
+            AccessTokenClaims: Validated identity and session claims.
+
+        Raises:
+            AuthNotConfiguredError: If no JWT secret is configured.
+            UnauthorizedError: If the token is malformed, incorrectly signed,
+                expired beyond the leeway, issued too far in the future, has
+                the wrong issuer or audience, or contains invalid claims.
+
+        Notes:
+            - Implementations must not persist anything or open a database
+              session.
         """
         ...

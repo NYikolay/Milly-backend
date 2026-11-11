@@ -307,3 +307,49 @@ class JwtTokenIssuer:
             settings=self._settings,
             now=now,
         )
+
+
+class JwtTokenVerifier:
+    """Access-token verifier adapter backed by PyJWT and application settings."""
+
+    def __init__(self, settings: Settings) -> None:
+        """
+        Initialize the verifier with the application settings.
+
+        Purpose:
+            Read the JWT secret, issuer, and leeway needed to validate bearer
+            tokens.
+
+        Args:
+            settings: Application settings containing JWT configuration.
+        """
+        self._settings = settings
+
+    def verify_access_token(self, raw_token: str) -> AccessTokenClaims:
+        """
+        Verify a signed access token through the application port.
+
+        Purpose:
+            Keep PyJWT and settings handling in the infrastructure layer while
+            preserving the exact verification behavior of the module-level
+            decoder.
+
+        Args:
+            raw_token: Encoded bearer access token.
+
+        Returns:
+            AccessTokenClaims: Validated domain claims from the token.
+
+        Raises:
+            AuthNotConfiguredError: If no JWT secret is configured.
+            UnauthorizedError: If the token is malformed, incorrectly signed,
+                expired beyond the leeway, issued too far in the future, has
+                the wrong issuer, audience, or type, or contains invalid
+                claims.
+
+        Notes:
+            - Delegates to ``decode_access_token`` so the module-level
+              compatibility function and the adapter cannot drift.
+            - Uses the current UTC time for expiry and issue-time checks.
+        """
+        return decode_access_token(raw_token, settings=self._settings)
