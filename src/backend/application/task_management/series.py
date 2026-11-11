@@ -68,7 +68,8 @@ class SeriesService:
                 instance reminders.
             references: Project, label, and timezone reference validation.
             materializer: Occurrence generation for a single series.
-            unit_of_work: Transaction boundary used by materialization.
+            unit_of_work: Unit of work used for request-scoped flushes during
+                series mutations.
             clock: Current-time provider. Defaults to the current UTC time.
 
         Notes:

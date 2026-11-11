@@ -317,8 +317,8 @@ class JwtTokenVerifier:
         Initialize the verifier with the application settings.
 
         Purpose:
-            Read the JWT secret, issuer, and leeway needed to validate bearer
-            tokens.
+            Store the settings used to validate bearer tokens; the secret,
+            issuer, and leeway are read on each verification call.
 
         Args:
             settings: Application settings containing JWT configuration.

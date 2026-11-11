@@ -222,11 +222,12 @@ def build_series_service(
     clock: Clock | None = None,
 ) -> SeriesService:
     """
-    Build the recurring-series service for API request handling.
+    Build a compatibility series-service factory for tests.
 
     Purpose:
-        Give the API series entrypoint one factory that selects the aggregate
-        adapters and shared unit of work.
+        Provide a test-facing factory that selects the aggregate adapters and
+        shared unit of work; API request handling uses
+        ``build_task_management_services`` instead.
 
     Args:
         session: Request-scoped async session owning the transaction.
@@ -236,6 +237,7 @@ def build_series_service(
         SeriesService: Series service wired over the supplied session.
 
     Notes:
+        - Only tests call this factory; production request paths do not.
         - Series, task, reminder, account, project, and label adapters, the
           materializer, and the unit of work all share the same session through
           ``TaskManagementAdapters``.
@@ -309,7 +311,7 @@ def build_series_generation_service(
 
 def build_palette_service(session: AsyncSession) -> PaletteService:
     """
-    Build a palette service for admin and API consumers.
+    Build a palette service for the admin panel.
 
     Purpose:
         Select the palette adapter while binding the service to the caller's
@@ -322,6 +324,7 @@ def build_palette_service(session: AsyncSession) -> PaletteService:
         PaletteService: Palette service wired over the supplied session.
 
     Notes:
+        - Only ``admin/views.py`` consumes this factory.
         - The service never commits; the caller owns the transaction boundary.
     """
     return PaletteService(SqlAlchemyPaletteRepository(session))
