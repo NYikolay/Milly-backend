@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -47,6 +47,7 @@ class FakePaletteService:
         """Store prepared colors and initialize lookup tracking."""
         self.colors = {color.id: color for color in colors}
         self.get_calls: list[int] = []
+        self.batch_calls: list[list[int]] = []
 
     async def get_color(self, color_id: int) -> ColorPalette:
         """Record a lookup and return the matching prepared color."""
@@ -55,6 +56,16 @@ class FakePaletteService:
         if color is None:
             raise NotFoundError("Palette color not found")
         return color
+
+    async def get_colors(self, color_ids: Sequence[int]) -> dict[int, ColorPalette]:
+        """Record a batch lookup and return the matching prepared colors."""
+        self.batch_calls.append(list(color_ids))
+        colors = {
+            color_id: self.colors[color_id] for color_id in color_ids if color_id in self.colors
+        }
+        if len(colors) != len(set(color_ids)):
+            raise NotFoundError("Palette color not found")
+        return colors
 
 
 class FakeLabelService:
@@ -208,6 +219,40 @@ async def test_list_labels_returns_color_data(
             }
         ]
     }
+
+
+async def test_list_labels_resolves_colors_in_one_batch(
+    label_client: AsyncClient,
+    fake_label_service: FakeLabelService,
+    fake_palette_service: FakePaletteService,
+) -> None:
+    """Resolve every distinct label color with one sorted palette batch."""
+    fake_palette_service.colors[2] = ColorPalette(
+        id=2,
+        slug="green",
+        name="Green",
+        hex="#00AA00",
+        sort_order=2,
+        is_active=True,
+    )
+    for label_id, color_id in ((1, 1), (2, 1), (3, 2)):
+        fake_label_service.add_label(
+            Label(
+                id=label_id,
+                user_id=1,
+                name=f"Label {label_id}",
+                color_id=color_id,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+
+    response = await label_client.get("/api/v1/labels")
+
+    assert response.status_code == 200
+    assert [item["color"]["id"] for item in response.json()["items"]] == [1, 1, 2]
+    assert fake_palette_service.batch_calls == [[1, 2]]
+    assert fake_palette_service.get_calls == []
 
 
 async def test_create_label_defaults_color(

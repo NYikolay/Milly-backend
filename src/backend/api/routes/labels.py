@@ -12,7 +12,6 @@ from backend.api.task_schemas import (
     LabelUpdate,
 )
 from backend.core.errors import ErrorCode
-from backend.domain.entities import ColorPalette
 
 router = StandardizedAPIRouter(prefix="/labels", tags=["labels"])
 
@@ -55,18 +54,15 @@ async def list_labels(
         NotFoundError (HTTP 404): If a label references a missing color.
 
     Notes:
-        - Each distinct color is resolved once per request.
+        - Distinct colors are resolved in one batched palette lookup per
+          request.
     """
     labels = await service.list(claims.user_id)
-    colors: dict[int, ColorPalette] = {}
-    items: list[LabelResponse] = []
-    for label in labels:
-        color = colors.get(label.color_id)
-        if color is None:
-            color = await palette_service.get_color(label.color_id)
-            colors[label.color_id] = color
-        items.append(label_response(label, color))
-    return LabelListResponse(items=items)
+    color_ids = sorted({label.color_id for label in labels})
+    colors = await palette_service.get_colors(color_ids)
+    return LabelListResponse(
+        items=[label_response(label, colors[label.color_id]) for label in labels]
+    )
 
 
 @router.post(

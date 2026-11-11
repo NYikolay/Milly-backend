@@ -20,9 +20,7 @@ from backend.api.task_schemas import (
     ProjectResponse,
     ProjectUpdate,
 )
-from backend.application.task_management.projects import ProjectService
 from backend.core.errors import ErrorCode
-from backend.domain.task_management.models import ProjectSummary
 
 router = StandardizedAPIRouter(prefix="/projects", tags=["projects"])
 
@@ -40,32 +38,6 @@ class ProjectListQuery(BaseModel):
     include_archived: bool = False
     limit: int = Field(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE)
     cursor: str | None = None
-
-
-async def _load_summary(
-    service: ProjectService,
-    user_id: int,
-    project_id: int,
-) -> ProjectSummary:
-    """
-    Load the enriched representation of one project.
-
-    Purpose:
-        Combine project fields, progress counters, and color data after a read
-        or mutation without loading the project list.
-
-    Args:
-        service: Project service resolving summaries.
-        user_id: Owner identifier.
-        project_id: Project identifier.
-
-    Returns:
-        ProjectSummary: The matching summary.
-
-    Raises:
-        NotFoundError: If the project does not exist for this user.
-    """
-    return await service.get_summary(user_id, project_id)
 
 
 @router.get(
@@ -183,7 +155,7 @@ async def create_project(
         color_id=payload.color_id,
         icon=payload.icon,
     )
-    summary = await _load_summary(service, claims.user_id, project.id)
+    summary = await service.get_summary(claims.user_id, project.id)
     return project_response(summary)
 
 
@@ -219,7 +191,7 @@ async def read_project(
     Notes:
         - Another user's project is reported as not found.
     """
-    summary = await _load_summary(service, claims.user_id, project_id)
+    summary = await service.get_summary(claims.user_id, project_id)
     return project_response(summary)
 
 
@@ -263,7 +235,7 @@ async def update_project(
     """
     changes = payload.model_dump(exclude_unset=True)
     project = await service.update(claims.user_id, project_id, **changes)
-    summary = await _load_summary(service, claims.user_id, project.id)
+    summary = await service.get_summary(claims.user_id, project.id)
     return project_response(summary)
 
 
@@ -301,7 +273,7 @@ async def archive_project(
         - Archiving an already archived project keeps its original timestamp.
     """
     project = await service.archive(claims.user_id, project_id)
-    summary = await _load_summary(service, claims.user_id, project.id)
+    summary = await service.get_summary(claims.user_id, project.id)
     return project_response(summary)
 
 
@@ -340,7 +312,7 @@ async def unarchive_project(
         - Unarchiving an already active project changes nothing.
     """
     project = await service.unarchive(claims.user_id, project_id)
-    summary = await _load_summary(service, claims.user_id, project.id)
+    summary = await service.get_summary(claims.user_id, project.id)
     return project_response(summary)
 
 

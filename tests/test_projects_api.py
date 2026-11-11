@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 
 from backend.api.deps import get_current_access, get_project_service
 from backend.api.pagination import MAX_DB_ID, encode_cursor, filter_fingerprint
+from backend.api.routes import projects as projects_routes
 from backend.auth.tokens import AccessTokenClaims
 from backend.core.errors import ConflictError, NotFoundError
 from backend.domain.entities import ColorPalette, Project
@@ -461,6 +462,35 @@ async def test_project_read_uses_single_summary(
     assert fake_project_service.summary_calls == [(1, 1)]
     assert ("get", 1) not in fake_project_service.user_calls
     assert fake_project_service.list_calls == []
+
+
+async def test_project_read_has_no_passthrough_summary_helper(
+    project_client: AsyncClient,
+    fake_project_service: FakeProjectService,
+) -> None:
+    """Return an unchanged project body without a module-level summary helper."""
+    fake_project_service.add_summary(_summary(total=2, completed=1))
+
+    response = await project_client.get("/api/v1/projects/1")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": 1,
+        "name": "Work",
+        "description": "Plan",
+        "icon": "briefcase",
+        "color": {
+            "id": 1,
+            "slug": "blue",
+            "name": "Blue",
+            "hex": "#0000FF",
+        },
+        "progress": {"total": 2, "completed": 1, "remaining": 1},
+        "archived_at": None,
+        "created_at": "2026-11-04T12:00:00Z",
+        "updated_at": "2026-11-04T12:00:00Z",
+    }
+    assert not hasattr(projects_routes, "_load_summary")
 
 
 async def test_project_create_uses_single_summary(
