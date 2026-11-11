@@ -35,7 +35,7 @@ backend/
 │   │   └── errors.py        # коды ошибок и исключения
 │   ├── db/                  # engine/session, declarative base, readiness
 │   ├── models/              # ORM: auth и управление задачами
-│   ├── task_management/     # compatibility-шимы domain/application и адаптера
+│   ├── task_management/     # compatibility-реэкспорты domain/application
 │   └── tasks/               # broker, worker, scheduler, генерация и доставка
 ├── tests/                   # unit-тесты без инфраструктуры
 ├── compose.yml              # production-подобный стек
@@ -47,10 +47,16 @@ backend/
 Слои направлены внутрь: `domain <- application <- infrastructure/api/tasks/admin`;
 `composition` выбирает concrete-адаптеры, а `main.py` собирает приложение.
 `domain` и `application` не импортируют FastAPI, Starlette, SQLAlchemy,
-Taskiq, ORM-модели и внешние слои; `api` не импортирует `backend.models`.
-Модули `auth/` и `task_management/` — тонкие compatibility-реэкспорты;
-`task_management/repository.py` реэкспортирует инфраструктурный
-SQLAlchemy-адаптер.
+Taskiq, ORM-модели и внешние слои; `application` зависит только от портов,
+`domain` и общего ядра ошибок; `api` не импортирует `backend.models` и
+concrete `backend.infrastructure`; `infrastructure` не импортирует
+`composition`.
+Модули `auth/` и `task_management/` — тонкие `registry`-style
+compatibility-реэкспорты новых слоёв: только импорты и `__all__`, без
+собственной реализации. Мёртвый composite legacy-фасад
+(`application/ports/legacy.py`,
+`infrastructure/persistence/sqlalchemy/legacy.py`,
+`task_management/{ports,repository}.py`) удалён.
 Контракты слоёв и правила зависимостей —
 в `docs/superpowers/specs/2026-11-10-clean-architecture-refactor-design.md`.
 

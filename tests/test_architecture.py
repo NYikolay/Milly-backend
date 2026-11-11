@@ -191,3 +191,18 @@ def test_domain_does_not_import_core_errors() -> None:
         for imported in _imports(path):
             assert imported != "backend.core.errors", f"{path}: {imported}"
             assert not imported.startswith("backend.core.errors."), f"{path}: {imported}"
+
+
+def test_application_does_not_import_concrete_adapters() -> None:
+    """Application depends only on ports, domain, and shared kernel errors."""
+    for path in Path("src/backend/application").rglob("*.py"):
+        for imported in _imports(path):
+            assert not imported.startswith("backend.infrastructure"), f"{path}: {imported}"
+            assert not imported.startswith("backend.composition"), f"{path}: {imported}"
+
+
+def test_infrastructure_does_not_import_the_composition_root() -> None:
+    """Adapters never reach outward to the module that chooses them."""
+    for path in Path("src/backend/infrastructure").rglob("*.py"):
+        for imported in _imports(path):
+            assert not imported.startswith("backend.composition"), f"{path}: {imported}"

@@ -25,6 +25,7 @@ graphify update .
 - `src/backend/core/` — конфиг, логирование, общие middleware, реестр ошибок и исключения. `core.errors` не импортирует FastAPI/Starlette и не знает про HTTP.
 - `src/backend/api/` — FastAPI-слой: роуты, зависимости, Pydantic-схемы и транспорт ошибок. `api.errors` зависит от `core.errors` и FastAPI.
 - `src/backend/db/`, `src/backend/tasks/` — инфраструктура БД и Taskiq.
+- `src/backend/composition/` — единственный composition root: выбирает concrete-адаптеры и собирает сервисы; `application` и `infrastructure` не импортируют его.
 - `src/backend/main.py` — только сборка приложения; бизнес-логику туда не добавляй.
 
 ## 3. Ошибки API
