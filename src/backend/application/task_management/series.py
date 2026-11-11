@@ -4,18 +4,18 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from uuid import uuid4
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 import structlog
 
-from backend.application.ports.collaborators import LabelReader, ProjectReader
+from backend.application.ports.collaborators import ProjectReader
 from backend.application.ports.task_management import (
-    AccountRepository,
     ReminderRepository,
     SeriesRepository,
     TaskRepository,
 )
 from backend.application.ports.unit_of_work import UnitOfWork
+from backend.application.task_management.task_references import TaskReferences
 from backend.core.errors import BadRequestError, NotFoundError
 from backend.domain.entities import Task, TaskLabel, TaskReminder, TaskSeries
 from backend.domain.enums import Priority, ReminderKind, SeriesFrequency
@@ -37,12 +37,8 @@ from backend.domain.task_management.policies import (
 )
 
 _SERIES_NOT_FOUND = "Series not found"
-_PROJECT_NOT_FOUND = "Project not found"
-_LABEL_NOT_FOUND = "Label not found"
 _TITLE_REQUIRED = "Series title is required"
-_INVALID_TIMEZONE = "Invalid timezone"
 _INVALID_RANGE = "Series end date must not be before the start date"
-_PROJECT_ARCHIVED = "Project is archived"
 _TIME_OF_DAY_AWARE = "Time of day must be timezone-naive"
 _INVALID_FREQUENCY_INTERVAL = "Series frequency and interval are incompatible"
 
@@ -59,9 +55,8 @@ class SeriesService:
         repository: SeriesRepository,
         task_repository: TaskRepository,
         reminder_repository: ReminderRepository,
-        account_repository: AccountRepository,
         project_reader: ProjectReader,
-        label_reader: LabelReader,
+        references: TaskReferences,
         unit_of_work: UnitOfWork,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -77,9 +72,9 @@ class SeriesService:
             task_repository: Persistence operations for task instances.
             reminder_repository: Persistence operations for template and
                 instance reminders.
-            account_repository: User timezone lookups used by conversions.
-            project_reader: Project ownership and lifecycle validation.
-            label_reader: Label ownership and existence validation.
+            project_reader: Project ownership and lifecycle validation plus the
+                active-project gate for generation.
+            references: Project, label, and timezone reference validation.
             unit_of_work: Transaction boundary used by generation.
             clock: Current-time provider. Defaults to the current UTC time.
 
@@ -90,9 +85,8 @@ class SeriesService:
         self._repository = repository
         self._task_repository = task_repository
         self._reminder_repository = reminder_repository
-        self._account_repository = account_repository
         self._project_reader = project_reader
-        self._label_reader = label_reader
+        self._references = references
         self._unit_of_work = unit_of_work
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
 
@@ -243,14 +237,14 @@ class SeriesService:
         """
         normalized_title = self._normalize_title(title)
         self._validate_time_of_day(time_of_day)
-        zone = self._timezone(timezone)
+        zone = self._references.named_timezone(timezone)
         self._validate_range(starts_on, ends_on)
         resolved_frequency, resolved_interval_days = self._resolve_schedule(
             frequency=frequency,
             interval_days=interval_days,
         )
-        await self._validate_project(user_id, project_id)
-        owned_label_ids = await self._validate_labels(user_id, label_ids)
+        await self._references.validate_project(user_id, project_id)
+        owned_label_ids = await self._references.validate_labels(user_id, label_ids)
         try:
             validated_reminders = validate_reminder_inputs(reminders)
         except ReminderConfigurationError as error:
@@ -343,15 +337,14 @@ class SeriesService:
             frequency=frequency,
             interval_days=interval_days,
         )
-        timezone_name = await self._account_repository.get_user_timezone(user_id)
-        zone = self._timezone(timezone_name or "UTC")
+        zone = await self._references.user_timezone(user_id)
         local_due_at = task.due_at.astimezone(zone)
         starts_on = local_due_at.date()
         time_of_day = local_due_at.time()
         self._validate_range(starts_on, None)
-        await self._validate_project(user_id, task.project_id)
+        await self._references.validate_project(user_id, task.project_id)
         labels = await self._task_repository.list_task_labels(user_id, task.id)
-        owned_label_ids = await self._validate_labels(
+        owned_label_ids = await self._references.validate_labels(
             user_id,
             tuple(label.id for label in labels),
         )
@@ -487,14 +480,20 @@ class SeriesService:
             self._validate_time_of_day(time_of_day)
         previous_reminders_enabled = series.reminders_enabled
         normalized_title = self._normalize_title(title) if title is not None else series.title
-        zone = self._timezone(timezone) if timezone is not None else ZoneInfo(series.timezone)
+        zone = (
+            self._references.named_timezone(timezone)
+            if timezone is not None
+            else ZoneInfo(series.timezone)
+        )
         new_starts_on = starts_on if starts_on is not None else series.starts_on
         new_ends_on = series.ends_on if isinstance(ends_on, UnsetType) else ends_on
         self._validate_range(new_starts_on, new_ends_on)
         if not isinstance(project_id, UnsetType):
-            await self._validate_project(user_id, project_id)
+            await self._references.validate_project(user_id, project_id)
         owned_label_ids = (
-            await self._validate_labels(user_id, label_ids) if label_ids is not None else None
+            await self._references.validate_labels(user_id, label_ids)
+            if label_ids is not None
+            else None
         )
         if reminders is None:
             validated_reminders = None
@@ -824,7 +823,7 @@ class SeriesService:
             series.project_id,
         ):
             return 0
-        zone = self._timezone(series.timezone)
+        zone = self._references.named_timezone(series.timezone)
         try:
             due_times = series_due_times(
                 starts_on=series.starts_on,
@@ -1129,63 +1128,6 @@ class SeriesService:
         reminders = await self._reminder_repository.list_series_reminders(user_id, series.id)
         return SeriesDetail(series=series, labels=labels, reminders=reminders)
 
-    async def _validate_project(self, user_id: int, project_id: int | None) -> None:
-        """
-        Validate an optional project reference.
-
-        Purpose:
-            Reject missing, cross-user, deleted, and archived projects before
-            writing or generating instances.
-
-        Args:
-            user_id: Owner identifier.
-            project_id: Project identifier or ``None``.
-
-        Returns:
-            None: The project is valid or absent.
-
-        Raises:
-            NotFoundError: If the project does not exist for this user.
-            BadRequestError: If the project is archived.
-        """
-        if project_id is None:
-            return
-        project = await self._project_reader.get_project(user_id, project_id)
-        if project is None:
-            raise NotFoundError(_PROJECT_NOT_FOUND)
-        if project.archived_at is not None:
-            raise BadRequestError(_PROJECT_ARCHIVED)
-
-    async def _validate_labels(
-        self,
-        user_id: int,
-        label_ids: Sequence[int],
-    ) -> tuple[int, ...]:
-        """
-        Validate a label selection and remove duplicates.
-
-        Purpose:
-            Ensure every assigned label exists for the user before writing.
-
-        Args:
-            user_id: Owner identifier.
-            label_ids: Requested label identifiers.
-
-        Returns:
-            tuple[int, ...]: Unique owned label identifiers in input order.
-
-        Raises:
-            NotFoundError: If any label does not exist for this user.
-
-        Notes:
-            - Performs one batch ownership and existence query.
-        """
-        unique_ids = tuple(dict.fromkeys(label_ids))
-        labels = await self._label_reader.get_labels_by_ids(user_id, unique_ids)
-        if len(labels) != len(unique_ids):
-            raise NotFoundError(_LABEL_NOT_FOUND)
-        return unique_ids
-
     def _normalize_title(self, title: str) -> str:
         """
         Trim a series title and reject an empty result.
@@ -1226,27 +1168,6 @@ class SeriesService:
         """
         if time_of_day.tzinfo is not None or time_of_day.utcoffset() is not None:
             raise BadRequestError(_TIME_OF_DAY_AWARE)
-
-    def _timezone(self, name: str) -> ZoneInfo:
-        """
-        Resolve an IANA timezone name.
-
-        Purpose:
-            Validate series and reminder timezone configuration.
-
-        Args:
-            name: IANA timezone name.
-
-        Returns:
-            ZoneInfo: The resolved timezone.
-
-        Raises:
-            BadRequestError: If the timezone name is invalid.
-        """
-        try:
-            return ZoneInfo(name)
-        except (ZoneInfoNotFoundError, ValueError) as error:
-            raise BadRequestError(_INVALID_TIMEZONE) from error
 
     def _validate_range(self, starts_on: date, ends_on: date | None) -> None:
         """

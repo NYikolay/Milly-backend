@@ -14,6 +14,8 @@ from backend.application.task_management.palette import PaletteService
 from backend.application.task_management.projects import ProjectService
 from backend.application.task_management.reminders import ReminderDispatcher
 from backend.application.task_management.series import SeriesService
+from backend.application.task_management.task_details import TaskDetails
+from backend.application.task_management.task_references import TaskReferences
 from backend.application.task_management.tasks import TaskService
 from backend.infrastructure.persistence.sqlalchemy.account_repository import (
     SqlAlchemyAccountRepository,
@@ -106,13 +108,14 @@ def build_task_management_services(
         clock=clock,
     )
     labels = LabelService(label_repository, palette, clock=clock)
+    references = TaskReferences(project_repository, label_repository, account_repository)
+    details = TaskDetails(task_repository, series_repository, project_repository)
     series = SeriesService(
         series_repository,
         task_repository,
         reminder_repository,
-        account_repository,
         project_repository,
-        label_repository,
+        references,
         unit_of_work,
         clock=clock,
     )
@@ -120,9 +123,9 @@ def build_task_management_services(
         task_repository,
         series_repository,
         reminder_repository,
-        account_repository,
         project_repository,
-        label_repository,
+        references,
+        details,
         series,
         unit_of_work,
         clock=clock,
@@ -160,14 +163,17 @@ def build_series_service(
           unit of work all share the same session.
         - Does not commit, flush, or open a transaction.
     """
+    account_repository = SqlAlchemyAccountRepository(session)
+    project_repository = SqlAlchemyProjectRepository(session)
+    label_repository = SqlAlchemyLabelRepository(session)
+    references = TaskReferences(project_repository, label_repository, account_repository)
     unit_of_work = SqlAlchemyUnitOfWork(session)
     return SeriesService(
         SqlAlchemySeriesRepository(session),
         SqlAlchemyTaskRepository(session),
         SqlAlchemyReminderRepository(session),
-        SqlAlchemyAccountRepository(session),
-        SqlAlchemyProjectRepository(session),
-        SqlAlchemyLabelRepository(session),
+        project_repository,
+        references,
         unit_of_work,
         clock=clock,
     )

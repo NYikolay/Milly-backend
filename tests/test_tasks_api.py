@@ -10,6 +10,8 @@ from httpx import ASGITransport, AsyncClient
 
 from backend.api.deps import get_current_access, get_task_service
 from backend.api.pagination import MAX_DB_ID, encode_cursor, filter_fingerprint
+from backend.application.task_management.task_details import TaskDetails
+from backend.application.task_management.task_references import TaskReferences
 from backend.auth.tokens import AccessTokenClaims
 from backend.core.errors import NotFoundError
 from backend.domain.entities import Label, Task, TaskReminder
@@ -962,8 +964,7 @@ async def test_task_list_rejects_max_date_with_validation_error(app: FastAPI) ->
         repository,
         repository,
         repository,
-        repository,
-        repository,
+        TaskReferences(repository, repository, repository),
         repository,
         clock=fixed_now,
     )
@@ -972,8 +973,8 @@ async def test_task_list_rejects_max_date_with_validation_error(app: FastAPI) ->
         repository,
         repository,
         repository,
-        repository,
-        repository,
+        TaskReferences(repository, repository, repository),
+        TaskDetails(repository, repository, repository),
         series,
         repository,
         clock=fixed_now,
@@ -999,8 +1000,7 @@ async def test_task_list_rejects_min_date_in_positive_offset_zone(app: FastAPI) 
         repository,
         repository,
         repository,
-        repository,
-        repository,
+        TaskReferences(repository, repository, repository),
         repository,
         clock=fixed_now,
     )
@@ -1009,8 +1009,8 @@ async def test_task_list_rejects_min_date_in_positive_offset_zone(app: FastAPI) 
         repository,
         repository,
         repository,
-        repository,
-        repository,
+        TaskReferences(repository, repository, repository),
+        TaskDetails(repository, repository, repository),
         series,
         repository,
         clock=fixed_now,

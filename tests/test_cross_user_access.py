@@ -14,6 +14,8 @@ from backend.api.deps import (
     get_series_service,
     get_task_service,
 )
+from backend.application.task_management.task_details import TaskDetails
+from backend.application.task_management.task_references import TaskReferences
 from backend.auth.tokens import AccessTokenClaims
 from backend.task_management.labels import LabelService
 from backend.task_management.palette import PaletteService
@@ -193,8 +195,7 @@ def series_service(repository: FakeTaskManagementRepository) -> SeriesService:
         repository,
         repository,
         repository,
-        repository,
-        repository,
+        TaskReferences(repository, repository, repository),
         repository,
         clock=lambda: NOW,
     )
@@ -211,8 +212,8 @@ def task_service(
         repository,
         repository,
         repository,
-        repository,
-        repository,
+        TaskReferences(repository, repository, repository),
+        TaskDetails(repository, repository, repository),
         series_service,
         repository,
         clock=lambda: NOW,

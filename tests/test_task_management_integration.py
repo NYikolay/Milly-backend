@@ -11,6 +11,8 @@ from backend.application.ports.task_management import ReminderRepository
 from backend.application.task_management.projects import ProjectService
 from backend.application.task_management.reminders import ReminderDispatcher
 from backend.application.task_management.series import SeriesService
+from backend.application.task_management.task_details import TaskDetails
+from backend.application.task_management.task_references import TaskReferences
 from backend.application.task_management.tasks import TaskFilters, TaskService
 from backend.core.errors import NotFoundError
 from backend.domain.task_management.models import ReminderInput
@@ -65,13 +67,14 @@ def make_services(
         cast(ReminderRepository, repository),
         clock=fixed_now,
     )
+    references = TaskReferences(repository, repository, repository)
+    details = TaskDetails(repository, repository, repository)
     series = SeriesService(
         repository,
         repository,
         repository,
         repository,
-        repository,
-        repository,
+        references,
         repository,
         clock=fixed_now,
     )
@@ -80,8 +83,8 @@ def make_services(
         repository,
         repository,
         repository,
-        repository,
-        repository,
+        references,
+        details,
         series,
         repository,
         clock=fixed_now,

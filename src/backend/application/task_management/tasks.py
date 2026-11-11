@@ -3,20 +3,22 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from uuid import uuid4
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
-from backend.application.ports.collaborators import (
-    LabelReader,
-    ProjectReader,
-    SeriesOperations,
-)
+from backend.application.ports.collaborators import ProjectReader, SeriesOperations
 from backend.application.ports.task_management import (
-    AccountRepository,
     ReminderRepository,
     SeriesRepository,
     TaskRepository,
 )
 from backend.application.ports.unit_of_work import UnitOfWork
+from backend.application.task_management.task_details import TaskDetails
+from backend.application.task_management.task_inputs import (
+    normalize_task_title,
+    validate_recurrence_interval,
+    validate_task_due_at,
+)
+from backend.application.task_management.task_references import TaskReferences
 from backend.core.errors import BadRequestError, NotFoundError
 from backend.domain.entities import Task, TaskSeries
 from backend.domain.enums import Priority, SeriesFrequency, TaskRecurrence
@@ -36,17 +38,11 @@ from backend.domain.task_management.policies import (
     next_occurrence_after_date,
     rebuild_reminder_slot,
     reminder_input_from_row,
-    require_supported_datetime,
     validate_reminder_inputs,
 )
 
 _TASK_NOT_FOUND = "Task not found"
-_LABEL_NOT_FOUND = "Label not found"
-_TITLE_REQUIRED = "Task title is required"
-_INVALID_DUE_AT = "Task due time must include a timezone"
-_INVALID_TIMEZONE = "Invalid timezone"
 _INVALID_DATE_RANGE = "Date range is out of bounds"
-_PROJECT_ARCHIVED = "Project is archived"
 _INVALID_RECURRENCE_INTERVAL = "Task recurrence and interval are incompatible"
 _PAST_DUE_DATE = "Task due date is in the past"
 _PAST_DUE_DATE_DESCRIPTION = (
@@ -64,9 +60,9 @@ class TaskService:
         repository: TaskRepository,
         series_repository: SeriesRepository,
         reminder_repository: ReminderRepository,
-        account_repository: AccountRepository,
         project_reader: ProjectReader,
-        label_reader: LabelReader,
+        references: TaskReferences,
+        details: TaskDetails,
         series_operations: SeriesOperations,
         unit_of_work: UnitOfWork,
         clock: Callable[[], datetime] | None = None,
@@ -82,10 +78,10 @@ class TaskService:
             repository: Persistence operations for tasks and task-label rows.
             series_repository: Persistence reads for owning series.
             reminder_repository: Persistence operations for task reminders.
-            account_repository: User timezone lookups.
             project_reader: Project ownership and lifecycle validation plus the
                 today progress aggregate.
-            label_reader: Label ownership and existence validation.
+            references: Project, label, and timezone reference validation.
+            details: Shared task-detail assembly.
             series_operations: Series conversion, edit, detach, and delete rules.
             unit_of_work: Transaction boundary owned by the caller.
             clock: Current-time provider. Defaults to the current UTC time.
@@ -97,9 +93,9 @@ class TaskService:
         self._repository = repository
         self._series_repository = series_repository
         self._reminder_repository = reminder_repository
-        self._account_repository = account_repository
         self._project_reader = project_reader
-        self._label_reader = label_reader
+        self._references = references
+        self._details = details
         self._series_operations = series_operations
         self._unit_of_work = unit_of_work
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
@@ -148,7 +144,7 @@ class TaskService:
         date_start: datetime | None = None
         date_end: datetime | None = None
         if filters.date is not None:
-            zone = await self._user_timezone(user_id)
+            zone = await self._references.user_timezone(user_id)
             date_start, date_end = self._local_day_bounds(zone, filters.date)
         tasks = await self._repository.list_tasks(
             user_id,
@@ -172,7 +168,7 @@ class TaskService:
             else None
         )
         return TaskPage(
-            items=await self._details(user_id, page_tasks),
+            items=await self._details.details(user_id, page_tasks),
             next_cursor=next_cursor,
         )
 
@@ -201,7 +197,7 @@ class TaskService:
             - Local day bounds are converted to UTC before the repository query.
             - Performs no writes and does not commit.
         """
-        zone = await self._user_timezone(user_id)
+        zone = await self._references.user_timezone(user_id)
         local_date = self._clock().astimezone(zone).date()
         start, end = self._local_day_bounds(zone, local_date)
         return await self._project_reader.today_progress(user_id, start, end)
@@ -227,7 +223,7 @@ class TaskService:
         Notes:
             - Performs no writes and does not commit.
         """
-        return await self._detail(user_id, await self._require_task(user_id, task_id))
+        return await self._details.detail(user_id, await self._require_task(user_id, task_id))
 
     async def create(
         self,
@@ -279,15 +275,15 @@ class TaskService:
               and reminder ports.
             - Flushes through the unit of work but does not commit.
         """
-        normalized_title = self._normalize_title(title)
-        self._validate_due_at(due_at)
-        await self._validate_project(user_id, project_id)
-        owned_label_ids = await self._validate_labels(user_id, label_ids)
+        normalized_title = normalize_task_title(title)
+        validate_task_due_at(due_at)
+        await self._references.validate_project(user_id, project_id)
+        owned_label_ids = await self._references.validate_labels(user_id, label_ids)
         try:
             validated_reminders = validate_reminder_inputs(reminders)
         except ReminderConfigurationError as error:
             raise BadRequestError(str(error)) from error
-        zone = await self._user_timezone(user_id)
+        zone = await self._references.user_timezone(user_id)
         now = self._clock()
         task = Task(
             user_id=user_id,
@@ -317,7 +313,7 @@ class TaskService:
             if row is not None:
                 await self._reminder_repository.add_reminder(row)
         await self._unit_of_work.flush()
-        return await self._detail(user_id, task)
+        return await self._details.detail(user_id, task)
 
     async def update(
         self,
@@ -394,7 +390,7 @@ class TaskService:
             - Does not commit.
         """
         try:
-            self._validate_recurrence_interval(recurrence, interval_days)
+            validate_recurrence_interval(recurrence, interval_days)
             task, series = await self._lock_update_target(user_id, task_id)
 
             if series is None:
@@ -450,7 +446,7 @@ class TaskService:
                     )
                 await self._repository.save_task(task)
                 await self._unit_of_work.flush()
-                return await self._detail(user_id, task)
+                return await self._details.detail(user_id, task)
 
             if (
                 recurrence is None
@@ -608,7 +604,7 @@ class TaskService:
                 defer_reminder_rebuild=will_shift,
             )
             if will_shift:
-                zone = await self._user_timezone(user_id)
+                zone = await self._references.user_timezone(user_id)
                 await self._shift_overdue_task(
                     user_id,
                     task,
@@ -625,7 +621,7 @@ class TaskService:
                 interval_days=resolved_interval_days,
             )
             await self._unit_of_work.flush()
-            return await self._detail(user_id, task)
+            return await self._details.detail(user_id, task)
 
         await self._apply_task_update(
             user_id,
@@ -641,7 +637,7 @@ class TaskService:
         )
         await self._repository.save_task(task)
         await self._unit_of_work.flush()
-        return await self._detail(user_id, task)
+        return await self._details.detail(user_id, task)
 
     async def _apply_task_update(
         self,
@@ -702,20 +698,20 @@ class TaskService:
               the transaction flush.
         """
         if title is not None:
-            task.title = self._normalize_title(title)
+            task.title = normalize_task_title(title)
         if not isinstance(description, UnsetType):
             task.description = description
         if priority is not None:
             task.priority = priority.value
         due_changed = due_at is not None and due_at != task.due_at
         if due_at is not None:
-            self._validate_due_at(due_at)
+            validate_task_due_at(due_at)
             task.due_at = due_at
         if not isinstance(project_id, UnsetType):
-            await self._validate_project(user_id, project_id)
+            await self._references.validate_project(user_id, project_id)
             task.project_id = project_id
         if label_ids is not None:
-            owned_label_ids = await self._validate_labels(user_id, label_ids)
+            owned_label_ids = await self._references.validate_labels(user_id, label_ids)
             await self._repository.replace_task_labels(
                 task.id,
                 user_id,
@@ -768,7 +764,7 @@ class TaskService:
         await self._reminder_repository.cancel_task_reminders(user_id, task.id)
         await self._repository.save_task(task)
         await self._unit_of_work.flush()
-        return await self._detail(user_id, task)
+        return await self._details.detail(user_id, task)
 
     async def uncomplete(self, user_id: int, task_id: int) -> TaskDetail:
         """
@@ -850,7 +846,7 @@ class TaskService:
                 interval_days=series.interval_days,
             )
         await self._unit_of_work.flush()
-        return await self._detail(user_id, task)
+        return await self._details.detail(user_id, task)
 
     async def delete(self, user_id: int, task_id: int) -> None:
         """
@@ -1017,7 +1013,7 @@ class TaskService:
         """
         time_of_day: time | None = None
         if due_at is not None:
-            self._validate_due_at(due_at)
+            validate_task_due_at(due_at)
             local_due = due_at.astimezone(ZoneInfo(series.timezone))
             candidate = local_due.timetz().replace(tzinfo=None)
             if candidate != series.time_of_day:
@@ -1044,7 +1040,7 @@ class TaskService:
                 self._clock(),
             )
             refreshed = future_tasks[0] if future_tasks else task
-        return await self._detail(user_id, refreshed)
+        return await self._details.detail(user_id, refreshed)
 
     async def _shift_overdue_task(
         self,
@@ -1141,7 +1137,7 @@ class TaskService:
                 raise BadRequestError(str(error)) from error
         else:
             configs = tuple(reminder_input_from_row(reminder) for reminder in existing)
-        zone = await self._user_timezone(user_id)
+        zone = await self._references.user_timezone(user_id)
         now = self._clock()
         await self._reminder_repository.cancel_task_reminders(user_id, task.id)
         await self._reminder_repository.delete_task_reminders(user_id, task.id)
@@ -1159,147 +1155,6 @@ class TaskService:
                 raise BadRequestError(str(error)) from error
             if row is not None:
                 await self._reminder_repository.add_reminder(row)
-
-    async def _detail(self, user_id: int, task: Task) -> TaskDetail:
-        """
-        Load the labels, reminders, project, and recurrence of a task.
-
-        Purpose:
-            Build the shared task-detail response shape.
-
-        Args:
-            user_id: Owner identifier.
-            task: Task to enrich.
-
-        Returns:
-            TaskDetail: The task with its related data and recurrence mode.
-
-        Notes:
-            - Missing or archived projects still resolve as ``None`` only when
-              the repository hides them; existing projects are returned.
-            - The series is loaded including soft-deleted rows so history keeps
-              its ``regular``/``periodic`` classification.
-            - Performs no writes and does not commit.
-        """
-        labels = await self._repository.list_task_labels(user_id, task.id)
-        reminders = await self._reminder_repository.list_task_reminders(user_id, task.id)
-        project = (
-            await self._project_reader.get_project(user_id, task.project_id)
-            if task.project_id is not None
-            else None
-        )
-        series = (
-            await self._series_repository.get_series(
-                user_id,
-                task.series_id,
-                include_deleted=True,
-            )
-            if task.series_id is not None
-            else None
-        )
-        return TaskDetail(
-            task=task,
-            labels=labels,
-            reminders=reminders,
-            project=project,
-            recurrence=self._classify_recurrence(series),
-        )
-
-    async def _details(
-        self,
-        user_id: int,
-        tasks: Sequence[Task],
-    ) -> Sequence[TaskDetail]:
-        """
-        Load related data for a page of tasks with batch queries.
-
-        Purpose:
-            Avoid one label, reminder, project, or series query per task when
-            building a task list response.
-
-        Args:
-            user_id: Owner identifier.
-            tasks: Tasks belonging to the page.
-
-        Returns:
-            Sequence[TaskDetail]: The tasks with labels, reminders, projects,
-                and recurrence modes attached in the same order as ``tasks``.
-
-        Notes:
-            - Returns immediately without issuing batch queries for an empty
-              page.
-            - The series batch query is skipped when no task has a series
-              reference.
-            - Series are loaded including soft-deleted rows so history keeps its
-              ``regular``/``periodic`` classification.
-            - Performs no writes and does not commit.
-        """
-        if not tasks:
-            return []
-        task_ids = tuple(task.id for task in tasks)
-        project_ids = tuple(
-            sorted({task.project_id for task in tasks if task.project_id is not None})
-        )
-        series_ids = tuple(sorted({task.series_id for task in tasks if task.series_id is not None}))
-        labels_by_task = await self._repository.list_task_labels_for_tasks(user_id, task_ids)
-        reminders_by_task = await self._repository.list_task_reminders_for_tasks(
-            user_id,
-            task_ids,
-        )
-        projects_by_id = await self._project_reader.get_projects_by_ids(user_id, project_ids)
-        series_by_id = (
-            await self._series_repository.get_series_by_ids(
-                user_id,
-                series_ids,
-                include_deleted=True,
-            )
-            if series_ids
-            else {}
-        )
-        return [
-            TaskDetail(
-                task=task,
-                labels=labels_by_task.get(task.id, ()),
-                reminders=reminders_by_task.get(task.id, ()),
-                project=(
-                    projects_by_id.get(task.project_id) if task.project_id is not None else None
-                ),
-                recurrence=self._classify_recurrence(
-                    series_by_id.get(task.series_id) if task.series_id is not None else None
-                ),
-            )
-            for task in tasks
-        ]
-
-    def _classify_recurrence(self, series: TaskSeries | None) -> TaskRecurrence:
-        """
-        Classify a task recurrence mode from its optional series.
-
-        Purpose:
-            Map the stored series frequency to the client-facing recurrence
-            value while treating missing series as one-off.
-
-        Args:
-            series: Owning series including soft-deleted rows, or ``None``.
-
-        Returns:
-            TaskRecurrence: ``PERIODIC`` for periodic series, ``REGULAR`` for
-                daily series, and ``ONE_OFF`` without a series or with an
-                unexpected stored frequency.
-
-        Notes:
-            - The database check constraint limits frequencies to ``daily`` and
-              ``periodic``; unexpected values are classified defensively as
-              one-off instead of regular.
-            - Performs no writes and does not commit.
-        """
-        if series is None:
-            return TaskRecurrence.ONE_OFF
-        if series.frequency == SeriesFrequency.PERIODIC.value:
-            return TaskRecurrence.PERIODIC
-        if series.frequency == SeriesFrequency.DAILY.value:
-            return TaskRecurrence.REGULAR
-        return TaskRecurrence.ONE_OFF
 
     async def _require_task(
         self,
@@ -1337,82 +1192,6 @@ class TaskService:
             raise NotFoundError(_TASK_NOT_FOUND)
         return task
 
-    async def _validate_project(self, user_id: int, project_id: int | None) -> None:
-        """
-        Validate an optional project reference.
-
-        Purpose:
-            Reject missing, cross-user, deleted, or archived projects before
-            writing.
-
-        Args:
-            user_id: Owner identifier.
-            project_id: Project identifier or ``None``.
-
-        Returns:
-            None: The project is valid or absent.
-
-        Raises:
-            NotFoundError: If the project does not exist for this user.
-            BadRequestError: If the project is archived.
-        """
-        if project_id is None:
-            return
-        project = await self._project_reader.get_project(user_id, project_id)
-        if project is None:
-            raise NotFoundError("Project not found")
-        if project.archived_at is not None:
-            raise BadRequestError(_PROJECT_ARCHIVED)
-
-    async def _validate_labels(
-        self,
-        user_id: int,
-        label_ids: Sequence[int],
-    ) -> tuple[int, ...]:
-        """
-        Validate a label selection and remove duplicates.
-
-        Purpose:
-            Ensure every assigned label exists for the user before writing.
-
-        Args:
-            user_id: Owner identifier.
-            label_ids: Requested label identifiers.
-
-        Returns:
-            tuple[int, ...]: Unique owned label identifiers in input order.
-
-        Raises:
-            NotFoundError: If any label does not exist for this user.
-        """
-        unique_ids = tuple(dict.fromkeys(label_ids))
-        labels = await self._label_reader.get_labels_by_ids(user_id, unique_ids)
-        if len(labels) != len(unique_ids):
-            raise NotFoundError(_LABEL_NOT_FOUND)
-        return unique_ids
-
-    async def _user_timezone(self, user_id: int) -> ZoneInfo:
-        """
-        Resolve the user's IANA timezone.
-
-        Purpose:
-            Compute local task-day bounds and scheduled reminder slots.
-
-        Args:
-            user_id: Owner identifier.
-
-        Returns:
-            ZoneInfo: The user's timezone, defaulting to UTC when unset.
-
-        Raises:
-            BadRequestError: If the stored timezone is invalid.
-        """
-        name = await self._account_repository.get_user_timezone(user_id)
-        try:
-            return ZoneInfo(name or "UTC")
-        except (ZoneInfoNotFoundError, ValueError) as error:
-            raise BadRequestError(_INVALID_TIMEZONE) from error
-
     def _local_day_bounds(
         self,
         zone: ZoneInfo,
@@ -1448,83 +1227,3 @@ class TaskService:
         except OverflowError as error:
             raise BadRequestError(_INVALID_DATE_RANGE) from error
         return start, end
-
-    def _normalize_title(self, title: str) -> str:
-        """
-        Trim a task title and reject an empty result.
-
-        Purpose:
-            Apply the shared title rule before writes.
-
-        Args:
-            title: Candidate title.
-
-        Returns:
-            str: The trimmed title.
-
-        Raises:
-            BadRequestError: If the trimmed title is empty.
-        """
-        normalized = title.strip()
-        if not normalized:
-            raise BadRequestError(_TITLE_REQUIRED)
-        return normalized
-
-    def _validate_due_at(self, due_at: datetime) -> None:
-        """
-        Require a timezone-aware due instant inside the supported range.
-
-        Purpose:
-            Keep stored due times as unambiguous absolute instants that
-            schedule arithmetic can process safely.
-
-        Args:
-            due_at: Candidate due instant.
-
-        Returns:
-            None: The due instant is aware and supported.
-
-        Raises:
-            BadRequestError: If the due instant is naive or outside the
-                inclusive UTC bounds.
-        """
-        try:
-            require_supported_datetime(due_at)
-        except ValueError as error:
-            raise BadRequestError(_INVALID_DUE_AT) from error
-
-    def _validate_recurrence_interval(
-        self,
-        recurrence: TaskRecurrence | None,
-        interval_days: int | None,
-    ) -> None:
-        """
-        Validate a recurrence mode and interval pair before any write.
-
-        Purpose:
-            Reject impossible combinations early so a toggle never leaves
-            partially applied fields in the current unit of work.
-
-        Args:
-            recurrence: Requested recurrence mode, or ``None`` when unchanged.
-            interval_days: Requested days between periodic occurrences, or
-                ``None`` when omitted.
-
-        Returns:
-            None: The pair is valid.
-
-        Raises:
-            BadRequestError: If ``one_off`` carries an interval, ``regular``
-                carries an interval other than ``1``, or periodic carries an
-                interval below ``2``.
-        """
-        if recurrence is TaskRecurrence.ONE_OFF and interval_days is not None:
-            raise BadRequestError(_INVALID_RECURRENCE_INTERVAL)
-        if recurrence is TaskRecurrence.REGULAR and interval_days not in (None, 1):
-            raise BadRequestError(_INVALID_RECURRENCE_INTERVAL)
-        if (
-            recurrence is TaskRecurrence.PERIODIC
-            and interval_days is not None
-            and interval_days < 2
-        ):
-            raise BadRequestError(_INVALID_RECURRENCE_INTERVAL)

@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime, time, timedelta
 import pytest
 
 from backend.application.task_management.series import SeriesService
+from backend.application.task_management.task_references import TaskReferences
 from backend.core.errors import BadRequestError, ErrorCode, NotFoundError
 from backend.domain.task_management.models import ReminderInput
 from backend.models.task import Task
@@ -31,8 +32,7 @@ def make_series_service(repository: FakeTaskManagementRepository) -> SeriesServi
         repository,
         repository,
         repository,
-        repository,
-        repository,
+        TaskReferences(repository, repository, repository),
         repository,
         clock=fixed_now,
     )

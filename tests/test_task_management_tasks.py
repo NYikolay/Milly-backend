@@ -9,6 +9,8 @@ import pytest
 from backend.api.pagination import DEFAULT_PAGE_SIZE
 from backend.application.ports.collaborators import SeriesOperations
 from backend.application.task_management.series import SeriesService
+from backend.application.task_management.task_details import TaskDetails
+from backend.application.task_management.task_references import TaskReferences
 from backend.application.task_management.tasks import (
     TaskFilters,
     TaskListCursor,
@@ -34,6 +36,11 @@ from tests.task_management_fakes import (
 USER_ID = 7
 
 
+def make_references(repository: FakeTaskManagementRepository) -> TaskReferences:
+    """Build task references over the fake repository ports."""
+    return TaskReferences(repository, repository, repository)
+
+
 def make_series_service(repository: FakeTaskManagementRepository) -> SeriesService:
     """Build a real application series service over the fake repository ports."""
     return SeriesService(
@@ -41,8 +48,7 @@ def make_series_service(repository: FakeTaskManagementRepository) -> SeriesServi
         repository,
         repository,
         repository,
-        repository,
-        repository,
+        make_references(repository),
         repository,
         clock=fixed_now,
     )
@@ -60,8 +66,8 @@ def make_service(
         repository,
         repository,
         repository,
-        repository,
-        repository,
+        make_references(repository),
+        TaskDetails(repository, repository, repository),
         series_operations if series_operations is not None else make_series_service(repository),
         repository,
         clock=clock,
@@ -88,8 +94,7 @@ class RecordingSeriesService(SeriesService):
             repository,
             repository,
             repository,
-            repository,
-            repository,
+            make_references(repository),
             repository,
             clock=fixed_now,
         )
