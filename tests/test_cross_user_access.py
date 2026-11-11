@@ -15,6 +15,7 @@ from backend.api.deps import (
     get_task_mutation_service,
     get_task_service,
 )
+from backend.application.task_management.series_materializer import SeriesMaterializer
 from backend.application.task_management.task_details import TaskDetails
 from backend.application.task_management.task_mutations import TaskMutationService
 from backend.application.task_management.task_references import TaskReferences
@@ -192,12 +193,20 @@ def label_service(
 @pytest.fixture
 def series_service(repository: FakeTaskManagementRepository) -> SeriesService:
     """Build a series service backed by the in-memory repository."""
+    references = TaskReferences(repository, repository, repository)
     return SeriesService(
         repository,
         repository,
         repository,
-        repository,
-        TaskReferences(repository, repository, repository),
+        references,
+        SeriesMaterializer(
+            repository,
+            repository,
+            repository,
+            repository,
+            references,
+            repository,
+        ),
         repository,
         clock=lambda: NOW,
     )

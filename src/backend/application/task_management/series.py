@@ -8,16 +8,17 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
-from backend.application.ports.collaborators import ProjectReader
 from backend.application.ports.task_management import (
     ReminderRepository,
     SeriesRepository,
     TaskRepository,
 )
 from backend.application.ports.unit_of_work import UnitOfWork
+from backend.application.task_management.series_materializer import SeriesMaterializer
+from backend.application.task_management.series_reminders import build_instance_reminder
 from backend.application.task_management.task_references import TaskReferences
 from backend.core.errors import BadRequestError, NotFoundError
-from backend.domain.entities import Task, TaskLabel, TaskReminder, TaskSeries
+from backend.domain.entities import Task, TaskSeries
 from backend.domain.enums import Priority, ReminderKind, SeriesFrequency
 from backend.domain.task_management.errors import ReminderConfigurationError
 from backend.domain.task_management.models import (
@@ -29,10 +30,8 @@ from backend.domain.task_management.models import (
 from backend.domain.task_management.policies import (
     HORIZON_DAYS,
     build_series_reminder,
-    build_task_reminder,
     reminder_input_from_row,
     require_supported_date,
-    series_due_times,
     validate_reminder_inputs,
 )
 
@@ -55,8 +54,8 @@ class SeriesService:
         repository: SeriesRepository,
         task_repository: TaskRepository,
         reminder_repository: ReminderRepository,
-        project_reader: ProjectReader,
         references: TaskReferences,
+        materializer: SeriesMaterializer,
         unit_of_work: UnitOfWork,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -72,9 +71,8 @@ class SeriesService:
             task_repository: Persistence operations for task instances.
             reminder_repository: Persistence operations for template and
                 instance reminders.
-            project_reader: Project ownership and lifecycle validation plus the
-                active-project gate for generation.
             references: Project, label, and timezone reference validation.
+            materializer: Occurrence generation for a single series.
             unit_of_work: Transaction boundary used by generation.
             clock: Current-time provider. Defaults to the current UTC time.
 
@@ -85,8 +83,8 @@ class SeriesService:
         self._repository = repository
         self._task_repository = task_repository
         self._reminder_repository = reminder_repository
-        self._project_reader = project_reader
         self._references = references
+        self._materializer = materializer
         self._unit_of_work = unit_of_work
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
 
@@ -276,7 +274,7 @@ class SeriesService:
                 )
             )
         now = self._clock()
-        await self._generate_series(series, now)
+        await self._materializer.materialize(series, now)
         await self._unit_of_work.flush()
         return series
 
@@ -392,7 +390,7 @@ class SeriesService:
         task.series_id = series.id
         await self._task_repository.save_task(task)
         await self._unit_of_work.flush()
-        await self._generate_series(series, now)
+        await self._materializer.materialize(series, now)
         await self._unit_of_work.flush()
         return series
 
@@ -580,7 +578,7 @@ class SeriesService:
             series.generated_through = None
             await self._repository.save_series(series)
             await self._unit_of_work.flush()
-            await self._generate_series(series, now)
+            await self._materializer.materialize(series, now)
         else:
             await self._update_future_instances(
                 user_id,
@@ -738,6 +736,7 @@ class SeriesService:
               not require touching expired entities.
             - Unexpected per-series errors roll back and continue with the next
               series.
+            - Per-series materialization refuses archived or deleted projects.
             - Idempotent for slots already present in the repository.
             - Sets ``generated_through`` to the last generated due time; it only
               falls back to ``now`` while the series has no generation marker
@@ -761,16 +760,7 @@ class SeriesService:
                 if series.generated_through is not None and series.generated_through >= horizon:
                     await self._unit_of_work.commit()
                     continue
-                if (
-                    series.project_id is not None
-                    and not await self._project_reader.project_is_active(
-                        series.user_id,
-                        series.project_id,
-                    )
-                ):
-                    await self._unit_of_work.commit()
-                    continue
-                created += await self._generate_series(series, now)
+                created += await self._materializer.materialize(series, now)
                 await self._unit_of_work.commit()
             except Exception as error:
                 await self._unit_of_work.rollback()
@@ -780,196 +770,6 @@ class SeriesService:
                     error=type(error).__name__,
                 )
         return created
-
-    async def _generate_series(self, series: TaskSeries, now: datetime) -> int:
-        """
-        Generate missing instances for one series.
-
-        Purpose:
-            Share the materialization rule between series creation and the
-            periodic generation job.
-
-        Args:
-            series: Series to materialize.
-            now: Current instant used as the lower bound.
-
-        Returns:
-            int: Number of task instances created.
-
-        Raises:
-            BadRequestError: If the stored timezone is no longer valid or the
-                schedule overflows the datetime range.
-
-        Notes:
-            - Refuses to materialize instances when the series project is
-              archived or deleted.
-            - Uses the stored ``interval_days`` so periodic occurrences stay
-              anchored to the series phase.
-            - Copies snapshot fields, the series label set, and template
-              reminders into every new instance.
-            - Periodic series anchor scheduled instance reminders to each
-              instance's due date; daily series use the due-relative rule.
-            - Writes tasks, label rows, and instance reminders as three bulk
-              batches with at most one flush each.
-            - Leaves an existing ``generated_through`` unchanged when no new
-              slot is produced, so resuming never rewinds the marker.
-            - Persists a changed ``generated_through`` marker through
-              ``save_series``; the caller's commit ends the transaction.
-            - Flushes directly only when no task row is written.
-            - Does not commit.
-        """
-        if series.project_id is not None and not await self._project_reader.project_is_active(
-            series.user_id,
-            series.project_id,
-        ):
-            return 0
-        zone = self._references.named_timezone(series.timezone)
-        try:
-            due_times = series_due_times(
-                starts_on=series.starts_on,
-                ends_on=series.ends_on,
-                time_of_day=series.time_of_day,
-                timezone=zone,
-                now=now,
-                interval_days=series.interval_days,
-                generated_through=series.generated_through,
-            )
-        except OverflowError as error:
-            raise BadRequestError(_INVALID_RANGE) from error
-        if not due_times:
-            if series.generated_through is None:
-                series.generated_through = now
-                await self._repository.save_series(series)
-            await self._unit_of_work.flush()
-            return 0
-
-        existing_due_times = set(
-            await self._repository.list_series_due_times(series.id, series.user_id, now=now)
-        )
-        labels = await self._repository.list_series_labels(series.user_id, series.id)
-        template_reminders = await self._reminder_repository.list_series_reminders(
-            series.user_id,
-            series.id,
-        )
-        tasks: list[Task] = []
-        last_due_at: datetime | None = None
-        for due_at in due_times:
-            last_due_at = due_at
-            if due_at in existing_due_times:
-                continue
-            tasks.append(
-                Task(
-                    user_id=series.user_id,
-                    series_id=series.id,
-                    project_id=series.project_id,
-                    title=series.title,
-                    description=series.description,
-                    priority=series.priority,
-                    due_at=due_at,
-                    completed_at=None,
-                    reminders_enabled=series.reminders_enabled,
-                )
-            )
-        created = len(tasks)
-        if tasks:
-            tasks = list(await self._task_repository.add_tasks(tasks))
-            await self._task_repository.add_task_label_rows(
-                [
-                    TaskLabel(
-                        task_id=task.id,
-                        label_id=label.id,
-                        user_id=series.user_id,
-                    )
-                    for task in tasks
-                    for label in labels
-                ]
-            )
-            instance_reminders: list[TaskReminder] = []
-            for task in tasks:
-                for template in template_reminders:
-                    instance_reminder = self._instance_reminder(
-                        template,
-                        task_id=task.id,
-                        due_at=task.due_at,
-                        fallback_timezone=series.timezone,
-                        is_periodic=series.frequency == SeriesFrequency.PERIODIC.value,
-                        now=now,
-                    )
-                    if instance_reminder is None:
-                        continue
-                    instance_reminders.append(instance_reminder)
-            await self._reminder_repository.add_reminders(instance_reminders)
-
-        marker_changed = False
-        if created:
-            series.generated_through = last_due_at
-            marker_changed = True
-        elif series.generated_through is None:
-            series.generated_through = now
-            marker_changed = True
-        if marker_changed:
-            await self._repository.save_series(series)
-        if not tasks:
-            await self._unit_of_work.flush()
-        return created
-
-    def _instance_reminder(
-        self,
-        template: TaskReminder,
-        *,
-        task_id: int,
-        due_at: datetime,
-        fallback_timezone: str,
-        is_periodic: bool,
-        now: datetime,
-    ) -> TaskReminder | None:
-        """
-        Copy a series reminder template onto one generated instance.
-
-        Purpose:
-            Compute the instance-specific first slot while preserving the
-            configured reminder kind and parameters.
-
-        Args:
-            template: Series template reminder.
-            task_id: Generated task identifier.
-            due_at: Generated task due instant.
-            fallback_timezone: Series timezone used when the template lacks one.
-            is_periodic: Whether the parent series uses a periodic frequency.
-            now: Current instant used as the lower bound.
-
-        Returns:
-            TaskReminder | None: The instance reminder, or ``None`` when a
-                before-due moment has already passed.
-
-        Raises:
-            BadRequestError: If the reminder schedule overflows the datetime
-                range.
-
-        Notes:
-            - Periodic series anchor scheduled reminders to the instance's
-              local due date, so a reminder earlier than the due time stays on
-              the task day and advances by its own interval.
-            - Daily series keep the due-relative rule unchanged.
-        """
-        timezone_name = template.timezone or fallback_timezone
-        scheduled_starts_on = (
-            due_at.astimezone(ZoneInfo(timezone_name)).date()
-            if is_periodic and template.kind == ReminderKind.SCHEDULED.value
-            else None
-        )
-        try:
-            return build_task_reminder(
-                reminder_input_from_row(template),
-                user_id=template.user_id,
-                task_id=task_id,
-                due_at=due_at,
-                timezone_name=timezone_name,
-                now=now,
-                scheduled_starts_on=scheduled_starts_on,
-            )
-        except ReminderConfigurationError as error:
-            raise BadRequestError(str(error)) from error
 
     async def _update_future_instances(
         self,
@@ -1056,7 +856,7 @@ class SeriesService:
                 await self._reminder_repository.cancel_task_reminders(user_id, task.id)
                 await self._reminder_repository.delete_task_reminders(user_id, task.id)
                 for template in template_reminders:
-                    instance_reminder = self._instance_reminder(
+                    instance_reminder = build_instance_reminder(
                         template,
                         task_id=task.id,
                         due_at=task.due_at,

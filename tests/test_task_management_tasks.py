@@ -9,6 +9,7 @@ import pytest
 from backend.api.pagination import DEFAULT_PAGE_SIZE
 from backend.application.ports.collaborators import SeriesOperations
 from backend.application.task_management.series import SeriesService
+from backend.application.task_management.series_materializer import SeriesMaterializer
 from backend.application.task_management.task_details import TaskDetails
 from backend.application.task_management.task_mutations import TaskMutationService
 from backend.application.task_management.task_references import TaskReferences
@@ -93,12 +94,20 @@ class RecordingSeriesService(SeriesService):
 
     def __init__(self, repository: FakeTaskManagementRepository) -> None:
         """Build the service over the fake ports and initialize call logs."""
+        references = make_references(repository)
         super().__init__(
             repository,
             repository,
             repository,
-            repository,
-            make_references(repository),
+            references,
+            SeriesMaterializer(
+                repository,
+                repository,
+                repository,
+                repository,
+                references,
+                repository,
+            ),
             repository,
             clock=fixed_now,
         )

@@ -11,6 +11,7 @@ from backend.application.ports.task_management import ReminderRepository
 from backend.application.task_management.projects import ProjectService
 from backend.application.task_management.reminders import ReminderDispatcher
 from backend.application.task_management.series import SeriesService
+from backend.application.task_management.series_materializer import SeriesMaterializer
 from backend.application.task_management.task_details import TaskDetails
 from backend.application.task_management.task_references import TaskReferences
 from backend.application.task_management.tasks import TaskFilters, TaskService
@@ -73,8 +74,15 @@ def make_services(
         repository,
         repository,
         repository,
-        repository,
         references,
+        SeriesMaterializer(
+            repository,
+            repository,
+            repository,
+            repository,
+            references,
+            repository,
+        ),
         repository,
         clock=fixed_now,
     )

@@ -148,11 +148,16 @@ def test_series_builder_uses_the_account_and_aggregate_adapters() -> None:
     service = build_series_service(session, clock=fixed_now)
 
     references = cast(Any, service._references)
+    materializer = cast(Any, service._materializer)
     assert isinstance(service._repository, SqlAlchemySeriesRepository)
     assert isinstance(service._task_repository, SqlAlchemyTaskRepository)
     assert isinstance(service._reminder_repository, SqlAlchemyReminderRepository)
     assert isinstance(references._account_repository, SqlAlchemyAccountRepository)
-    assert isinstance(service._project_reader, SqlAlchemyProjectRepository)
+    assert isinstance(materializer._series_repository, SqlAlchemySeriesRepository)
+    assert isinstance(materializer._task_repository, SqlAlchemyTaskRepository)
+    assert isinstance(materializer._reminder_repository, SqlAlchemyReminderRepository)
+    assert isinstance(materializer._project_reader, SqlAlchemyProjectRepository)
+    assert materializer._references is references
     assert isinstance(references._label_reader, SqlAlchemyLabelRepository)
     assert isinstance(service._unit_of_work, SqlAlchemyUnitOfWork)
     assert service._unit_of_work._session is session

@@ -14,6 +14,7 @@ from backend.application.task_management.palette import PaletteService
 from backend.application.task_management.projects import ProjectService
 from backend.application.task_management.reminders import ReminderDispatcher
 from backend.application.task_management.series import SeriesService
+from backend.application.task_management.series_materializer import SeriesMaterializer
 from backend.application.task_management.task_details import TaskDetails
 from backend.application.task_management.task_mutations import TaskMutationService
 from backend.application.task_management.task_references import TaskReferences
@@ -114,12 +115,20 @@ def build_task_management_services(
     labels = LabelService(label_repository, palette, clock=clock)
     references = TaskReferences(project_repository, label_repository, account_repository)
     details = TaskDetails(task_repository, series_repository, project_repository)
-    series = SeriesService(
+    materializer = SeriesMaterializer(
         series_repository,
         task_repository,
         reminder_repository,
         project_repository,
         references,
+        unit_of_work,
+    )
+    series = SeriesService(
+        series_repository,
+        task_repository,
+        reminder_repository,
+        references,
+        materializer,
         unit_of_work,
         clock=clock,
     )
@@ -179,14 +188,25 @@ def build_series_service(
     account_repository = SqlAlchemyAccountRepository(session)
     project_repository = SqlAlchemyProjectRepository(session)
     label_repository = SqlAlchemyLabelRepository(session)
+    series_repository = SqlAlchemySeriesRepository(session)
+    task_repository = SqlAlchemyTaskRepository(session)
+    reminder_repository = SqlAlchemyReminderRepository(session)
     references = TaskReferences(project_repository, label_repository, account_repository)
     unit_of_work = SqlAlchemyUnitOfWork(session)
-    return SeriesService(
-        SqlAlchemySeriesRepository(session),
-        SqlAlchemyTaskRepository(session),
-        SqlAlchemyReminderRepository(session),
+    materializer = SeriesMaterializer(
+        series_repository,
+        task_repository,
+        reminder_repository,
         project_repository,
         references,
+        unit_of_work,
+    )
+    return SeriesService(
+        series_repository,
+        task_repository,
+        reminder_repository,
+        references,
+        materializer,
         unit_of_work,
         clock=clock,
     )
