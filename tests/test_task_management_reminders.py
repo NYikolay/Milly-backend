@@ -5,14 +5,12 @@ from typing import Any, cast
 
 import pytest
 
+from backend.application.task_management.reminder_presenter import build_reminder_text
 from backend.application.task_management.reminders import ReminderDispatcher
 from backend.domain.entities import Task, TaskReminder
 from backend.domain.enums import Priority, ReminderKind
 from backend.domain.task_management.models import ReminderContent
-from backend.domain.task_management.policies import (
-    build_reminder_text,
-    next_reminder_slot,
-)
+from backend.domain.task_management.policies import next_reminder_slot
 from tests.task_management_fakes import (
     FakeSender,
     FakeTaskManagementRepository,
@@ -188,6 +186,17 @@ def make_content(
         due_at=due_at,
         project_name=project_name,
     )
+
+
+def test_reminder_text_is_presented_by_application_not_domain() -> None:
+    """User-facing message rendering is an application presenter concern."""
+    import backend.domain.task_management.policies as policies
+    from backend.application.task_management.reminder_presenter import (
+        build_reminder_text as presenter_build_reminder_text,
+    )
+
+    assert not hasattr(policies, "build_reminder_text")
+    assert callable(presenter_build_reminder_text)
 
 
 def test_reminder_text_renders_full_card() -> None:

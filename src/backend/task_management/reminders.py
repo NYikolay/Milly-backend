@@ -1,14 +1,14 @@
 """Compatibility re-exports of reminder policies and the delivery dispatcher."""
 
 from backend.application.ports.collaborators import ReminderSender as ReminderSender
+from backend.application.task_management.reminder_presenter import (
+    build_reminder_text as build_reminder_text,
+)
 from backend.application.task_management.reminders import (
     ReminderDispatcher as ReminderDispatcher,
 )
 from backend.domain.task_management.models import ReminderContent as ReminderContent
 from backend.domain.task_management.models import ReminderInput as ReminderInput
-from backend.domain.task_management.policies import (
-    build_reminder_text as build_reminder_text,
-)
 from backend.domain.task_management.policies import (
     build_series_reminder as build_series_reminder,
 )

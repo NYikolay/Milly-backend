@@ -19,13 +19,11 @@ from backend.application.ports.task_management import (
     ReminderRepository,
 )
 from backend.application.ports.unit_of_work import UnitOfWork
+from backend.application.task_management.reminder_presenter import build_reminder_text
 from backend.domain.entities import ReminderDelivery, TaskReminder
 from backend.domain.enums import DeliveryStatus, ReminderKind
 from backend.domain.task_management.models import ReminderContent
-from backend.domain.task_management.policies import (
-    build_reminder_text,
-    next_reminder_slot,
-)
+from backend.domain.task_management.policies import next_reminder_slot
 
 _MAX_ATTEMPTS = 5
 _LOCK_LEASE = timedelta(minutes=5)
