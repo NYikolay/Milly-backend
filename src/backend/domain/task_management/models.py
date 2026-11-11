@@ -129,3 +129,13 @@ class ReminderContent:
     priority: str
     due_at: datetime | None
     project_name: str | None
+
+
+@dataclass(frozen=True)
+class ProjectReminderContext:
+    """Reminder rule with the project data needed to recompute its slot."""
+
+    reminder: TaskReminder
+    task_due_at: datetime | None
+    series_timezone: str | None
+    is_series: bool

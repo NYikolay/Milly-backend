@@ -64,7 +64,7 @@ ALL_AGGREGATE_METHODS = frozenset(
         "cancel_task_reminders",
         "cancel_series_reminders",
         "pause_project_reminders",
-        "resume_project_reminders",
+        "list_project_reminder_contexts",
         "project_is_active",
         "list_series",
         "get_series",
@@ -104,6 +104,7 @@ SAVE_METHODS = frozenset(
         "save_task",
         "save_series",
         "save_reminder",
+        "save_reminders",
         "save_delivery",
     }
 )
@@ -199,7 +200,8 @@ AGGREGATE_METHODS = {
         "cancel_task_reminders",
         "cancel_series_reminders",
         "pause_project_reminders",
-        "resume_project_reminders",
+        "list_project_reminder_contexts",
+        "save_reminders",
         "list_due_reminders",
         "claim_due_reminder",
         "update_reminder_next_run_at",
@@ -233,6 +235,7 @@ COLLABORATOR_METHODS = {
         "update",
         "detach_task",
     },
+    "ProjectReminderCommands": {"pause_project", "resume_project"},
     "PalettePolicy": {
         "get_color",
         "get_colors",
@@ -304,6 +307,19 @@ def test_collaborator_protocols_expose_expected_methods() -> None:
         assert _methods(getattr(collaborators, name)) == expected
 
 
+def test_project_reminder_contracts_are_split_from_the_aggregate() -> None:
+    """Project lifecycle commands stay narrow while reminder contexts stay read-only."""
+    assert _methods(collaborators.ProjectReminderCommands) == {
+        "pause_project",
+        "resume_project",
+    }
+    reminder_methods = _methods(ports.ReminderRepository)
+    assert "list_project_reminder_contexts" in reminder_methods
+    assert "save_reminders" in reminder_methods
+    assert "pause_project_reminders" in reminder_methods
+    assert "resume_project_reminders" not in reminder_methods
+
+
 def test_auth_repository_uses_the_final_identity_contract() -> None:
     """Auth persistence exposes identity operations and no commit-on-error helpers."""
     methods = _methods(auth_ports.AuthRepository)
@@ -334,6 +350,7 @@ def test_every_port_method_documents_its_contract() -> None:
         collaborators.TaskReader,
         collaborators.SeriesReader,
         collaborators.SeriesOperations,
+        collaborators.ProjectReminderCommands,
         collaborators.PalettePolicy,
         collaborators.ReminderSender,
         auth_ports.AuthRepository,

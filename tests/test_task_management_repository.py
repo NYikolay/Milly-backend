@@ -5,6 +5,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, cast
 from uuid import UUID
 
+import pytest
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1112,8 +1113,8 @@ async def test_pause_project_reminders_clears_slots_and_cancels_deliveries() -> 
     assert "reminder_deliveries.status IN ('pending', 'failed', 'sending')" in delivery_sql
 
 
-async def test_resume_project_reminders_rebuilds_incomplete_and_overdue_tasks() -> None:
-    """Resuming retargets templates and recomputes incomplete task slots."""
+async def test_list_project_reminder_contexts_reads_series_and_task_contexts() -> None:
+    """Context reads return mapped reminders without mutating or flushing."""
     from backend.task_management.enums import ReminderKind
 
     series = make_series(
@@ -1131,6 +1132,7 @@ async def test_resume_project_reminders_rebuilds_incomplete_and_overdue_tasks() 
         interval_days=1,
         time_of_day=time(9, 0),
         timezone="UTC",
+        next_run_at=NOW,
     )
     task = make_task(
         task_id=4,
@@ -1143,6 +1145,7 @@ async def test_resume_project_reminders_rebuilds_incomplete_and_overdue_tasks() 
         task_id=task.id,
         kind=ReminderKind.BEFORE_DUE,
         offset_minutes=30,
+        next_run_at=NOW,
     )
     session = RecordingSession(
         results=[
@@ -1154,7 +1157,7 @@ async def test_resume_project_reminders_rebuilds_incomplete_and_overdue_tasks() 
     )
     repository = make_reminder_repository(session)
 
-    await repository.resume_project_reminders(USER_ID, PROJECT_ID, NOW)
+    contexts = await repository.list_project_reminder_contexts(USER_ID, PROJECT_ID)
 
     series_sql, template_sql, task_sql, task_reminder_sql = (
         compile_statement(statement) for statement in session.statements
@@ -1168,17 +1171,24 @@ async def test_resume_project_reminders_rebuilds_incomplete_and_overdue_tasks() 
     assert "tasks.completed_at IS NULL" in task_sql
     assert "tasks.due_at >" not in task_sql
     assert "task_reminders.task_id IN (4)" in task_reminder_sql
-    assert template.next_run_at is None
-    assert template.timezone == "Asia/Tokyo"
-    assert task_reminder.next_run_at == task.due_at - timedelta(minutes=30)
+    assert [(context.is_series, context.series_timezone) for context in contexts] == [
+        (True, "Asia/Tokyo"),
+        (False, None),
+    ]
+    assert [context.task_due_at for context in contexts] == [None, task.due_at]
+    assert [context.reminder.id for context in contexts] == [template.id, task_reminder.id]
+    assert template.next_run_at == NOW
+    assert template.timezone == "UTC"
+    assert task_reminder.next_run_at == NOW
+    assert session.flush_count == 0
 
 
-async def test_resume_project_reminders_batches_series_and_task_reminders() -> None:
-    """Unarchiving loads series and task reminders in two batched statements."""
+async def test_list_project_reminder_contexts_batches_series_and_task_reminders() -> None:
+    """Project resume contexts load series and task reminders in two batched statements."""
     session = RecordingSession()
     repository = make_reminder_repository(session)
 
-    await repository.resume_project_reminders(USER_ID, PROJECT_ID, NOW)
+    contexts = await repository.list_project_reminder_contexts(USER_ID, PROJECT_ID)
 
     statements = "\n".join(str(statement) for statement in session.statements)
     reminder_sql = [
@@ -1186,12 +1196,14 @@ async def test_resume_project_reminders_batches_series_and_task_reminders() -> N
         for statement in session.statements
         if "FROM task_reminders" in str(statement)
     ]
+    assert contexts == []
     assert statements.count("FROM task_reminders") == 2
     assert len(reminder_sql) == 2
     assert all("task_reminders.user_id = 7" in sql for sql in reminder_sql)
     assert "IN (" in statements
     assert "task_reminders.series_id IN" in statements
     assert "task_reminders.task_id IN" in statements
+    assert session.flush_count == 0
 
 
 async def test_get_telegram_id_reads_the_linked_profile() -> None:
@@ -1230,35 +1242,64 @@ async def test_account_repository_reads_timezone_and_telegram_id() -> None:
     assert "telegram_profiles.user_id = 7" in telegram_sql
 
 
-async def test_resume_project_reminders_clears_slot_on_datetime_overflow() -> None:
-    """An extreme stored reminder is cleared instead of failing unarchive."""
-    from backend.task_management.enums import ReminderKind
-
-    task = make_task(
+async def test_save_reminders_applies_all_changes_with_one_flush() -> None:
+    """Batch reminder saves apply every entity and flush exactly once."""
+    first_row = make_reminder(reminder_id=2, task_id=4)
+    second_row = make_reminder(reminder_id=3, user_id=8, task_id=9)
+    session = RecordingSession(get_results=[first_row, second_row])
+    repository = make_reminder_repository(session)
+    first = TaskReminderEntity(
+        id=2,
+        user_id=USER_ID,
         task_id=4,
-        project_id=PROJECT_ID,
-        due_at=datetime.min.replace(tzinfo=UTC),
-        reminders_enabled=True,
+        kind="before_due",
+        offset_minutes=15,
+        next_run_at=NOW,
     )
-    reminder = make_reminder(
-        reminder_id=2,
-        task_id=task.id,
-        kind=ReminderKind.BEFORE_DUE,
-        offset_minutes=1,
+    second = TaskReminderEntity(
+        id=3,
+        user_id=8,
+        task_id=9,
+        kind="scheduled",
+        interval_days=2,
+        time_of_day=time(8, 0),
+        timezone="Asia/Tokyo",
+        next_run_at=None,
     )
-    session = RecordingSession(
-        results=[
-            RecordingResult(values=[]),
-            RecordingResult(values=[]),
-            RecordingResult(values=[task]),
-            RecordingResult(values=[reminder]),
-        ]
-    )
+
+    await repository.save_reminders([first, second])
+
+    assert first_row.offset_minutes == 15
+    assert first_row.next_run_at == NOW
+    assert second_row.interval_days == 2
+    assert second_row.time_of_day == time(8, 0)
+    assert second_row.timezone == "Asia/Tokyo"
+    assert second_row.next_run_at is None
+    assert session.statements == []
+    assert session.flush_count == 1
+
+
+async def test_save_reminders_raises_for_a_missing_row_without_flushing() -> None:
+    """Batch saves fail when one loaded reminder row is no longer available."""
+    session = RecordingSession(get_results=[None])
+    repository = make_reminder_repository(session)
+    reminder = TaskReminderEntity(id=2, user_id=USER_ID, task_id=4, kind="before_due")
+
+    with pytest.raises(LookupError):
+        await repository.save_reminders([reminder])
+
+    assert session.flush_count == 0
+
+
+async def test_save_reminders_flushes_an_empty_batch_once() -> None:
+    """An empty project resume batch keeps the previous single flush boundary."""
+    session = RecordingSession()
     repository = make_reminder_repository(session)
 
-    await repository.resume_project_reminders(USER_ID, PROJECT_ID, NOW)
+    await repository.save_reminders([])
 
-    assert reminder.next_run_at is None
+    assert session.statements == []
+    assert session.flush_count == 1
 
 
 async def test_task_repository_list_keeps_cursor_and_tenant_scope() -> None:

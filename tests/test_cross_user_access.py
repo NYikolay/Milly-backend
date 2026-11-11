@@ -15,6 +15,7 @@ from backend.api.deps import (
     get_task_mutation_service,
     get_task_service,
 )
+from backend.application.task_management.project_reminders import ProjectReminderService
 from backend.application.task_management.series_materializer import SeriesMaterializer
 from backend.application.task_management.task_details import TaskDetails
 from backend.application.task_management.task_mutations import TaskMutationService
@@ -178,7 +179,12 @@ def project_service(
     palette_service: PaletteService,
 ) -> ProjectService:
     """Build a project service backed by the in-memory repository."""
-    return ProjectService(repository, palette_service, repository, clock=lambda: NOW)
+    return ProjectService(
+        repository,
+        palette_service,
+        ProjectReminderService(repository),
+        clock=lambda: NOW,
+    )
 
 
 @pytest.fixture

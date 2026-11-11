@@ -1,19 +1,19 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import cast
 from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
 
 from backend.api.pagination import DEFAULT_PAGE_SIZE
+from backend.application.ports.collaborators import ProjectReminderCommands
 from backend.application.ports.task_management import (
     PaletteRepository,
     ProjectRepository,
-    ReminderRepository,
 )
 from backend.application.task_management.palette import PaletteService
+from backend.application.task_management.project_reminders import ProjectReminderService
 from backend.application.task_management.projects import ProjectService
 from backend.core.errors import BadRequestError, ConflictError, ErrorCode, NotFoundError
 from backend.domain.entities import ColorPalette, Project
@@ -45,8 +45,8 @@ def make_palette_repository() -> AsyncMock:
 
 
 def make_reminder_repository() -> AsyncMock:
-    """Build an async repository double constrained to the reminder port."""
-    return AsyncMock(spec=ReminderRepository)
+    """Build an async double constrained to the project reminder commands."""
+    return AsyncMock(spec=ProjectReminderCommands)
 
 
 def make_color(*, color_id: int = 1) -> ColorPalette:
@@ -502,7 +502,7 @@ async def test_archive_sets_archived_at() -> None:
     assert result is project
     assert project.archived_at == NOW
     repository.get_project.assert_awaited_once_with(USER_ID, project.id, for_update=True)
-    reminder_repository.pause_project_reminders.assert_awaited_once_with(USER_ID, project.id)
+    reminder_repository.pause_project.assert_awaited_once_with(USER_ID, project.id)
     repository.save_project.assert_awaited_once_with(project)
 
 
@@ -519,7 +519,7 @@ async def test_archive_keeps_existing_archive_timestamp() -> None:
     await service.archive(USER_ID, project.id)
 
     assert project.archived_at == older
-    reminder_repository.pause_project_reminders.assert_not_awaited()
+    reminder_repository.pause_project.assert_not_awaited()
     repository.save_project.assert_not_awaited()
 
 
@@ -539,7 +539,7 @@ async def test_project_archive_delegates_reminder_pause() -> None:
 
     assert archived.archived_at == fixed_now()
     assert repository.saved_projects == [project.id]
-    reminder_repository.pause_project_reminders.assert_awaited_once_with(USER_ID, project.id)
+    reminder_repository.pause_project.assert_awaited_once_with(USER_ID, project.id)
 
 
 async def test_unarchive_clears_archived_at() -> None:
@@ -561,7 +561,7 @@ async def test_unarchive_clears_archived_at() -> None:
         project.name,
         exclude_project_id=project.id,
     )
-    reminder_repository.resume_project_reminders.assert_awaited_once_with(
+    reminder_repository.resume_project.assert_awaited_once_with(
         USER_ID,
         project.id,
         NOW,
@@ -653,7 +653,7 @@ async def test_unarchive_rebuilds_every_series_and_task_reminder() -> None:
     service = ProjectService(
         repository,
         PaletteService(repository),
-        cast(ReminderRepository, repository),
+        ProjectReminderService(repository),
         clock=clock,
     )
 
@@ -666,6 +666,7 @@ async def test_unarchive_rebuilds_every_series_and_task_reminder() -> None:
     assert first_task_reminder.next_run_at == first_task.due_at - timedelta(minutes=30)
     assert second_task_reminder.next_run_at == second_task.due_at - timedelta(minutes=15)
     assert repository.saved_projects == [project.id]
+    assert repository.save_reminder_batches == 1
 
 
 async def test_unarchive_rejects_name_conflict_with_active_project() -> None:
@@ -683,7 +684,7 @@ async def test_unarchive_rejects_name_conflict_with_active_project() -> None:
 
     assert str(error.value) == "Project name already exists"
     assert project.archived_at == NOW
-    reminder_repository.resume_project_reminders.assert_not_awaited()
+    reminder_repository.resume_project.assert_not_awaited()
     repository.save_project.assert_not_awaited()
 
 
@@ -747,7 +748,7 @@ async def test_project_update_persists_mutated_domain_entity() -> None:
     service = ProjectService(
         repository,
         PaletteService(repository),
-        cast(ReminderRepository, repository),
+        ProjectReminderService(repository),
         clock=fixed_now,
     )
 

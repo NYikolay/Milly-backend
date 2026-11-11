@@ -130,6 +130,64 @@ class ProjectReader(Protocol):
         ...
 
 
+class ProjectReminderCommands(Protocol):
+    """
+    Project reminder lifecycle commands consumed by the project service.
+
+    Purpose:
+        Keep project archive and unarchive workflows independent of the full
+        reminder persistence contract and of the resume policy implementation.
+
+    Notes:
+        - Implementations own context reads and slot recomputation but never
+          commit; the request unit of work owns the transaction boundary.
+    """
+
+    async def pause_project(self, user_id: int, project_id: int) -> None:
+        """
+        Stop reminder delivery for an archived project.
+
+        Purpose:
+            Clear reminder slots and cancel active deliveries for the project's
+            tasks and series while the project is archived.
+
+        Args:
+            user_id: Owner identifier.
+            project_id: Project identifier.
+
+        Returns:
+            None: The changes stay in the current unit of work.
+
+        Notes:
+            - Performs one bulk repository write and no commit.
+        """
+        ...
+
+    async def resume_project(self, user_id: int, project_id: int, now: datetime) -> None:
+        """
+        Recompute future reminder slots for an unarchived project.
+
+        Purpose:
+            Restore delivery for the project's tasks and series without
+            backfilling slots missed while the project was archived.
+
+        Args:
+            user_id: Owner identifier.
+            project_id: Project identifier.
+            now: Current instant used as the lower bound for scheduled slots.
+
+        Returns:
+            None: The changes stay in the current unit of work.
+
+        Notes:
+            - Template series reminders keep ``next_run_at=None`` and scheduled
+              templates adopt the series timezone.
+            - Task slots are recomputed from the task due time.
+            - Saves all changed reminders in one batch and does not commit.
+        """
+        ...
+
+
 class LabelReader(Protocol):
     """
     Read-only label contract consumed by task and series services.

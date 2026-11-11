@@ -7,7 +7,7 @@ from typing import Any, cast
 import pytest
 
 from backend.api.pagination import DEFAULT_PAGE_SIZE
-from backend.application.ports.task_management import ReminderRepository
+from backend.application.task_management.project_reminders import ProjectReminderService
 from backend.application.task_management.projects import ProjectService
 from backend.application.task_management.reminders import ReminderDispatcher
 from backend.application.task_management.series import SeriesService
@@ -75,7 +75,7 @@ def make_services(
     projects = ProjectService(
         repository,
         cast(Any, palette),
-        cast(ReminderRepository, repository),
+        ProjectReminderService(repository),
         clock=fixed_now,
     )
     references = TaskReferences(repository, repository, repository)

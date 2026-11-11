@@ -4,11 +4,11 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from backend.application.ports.collaborators import PalettePolicy
-from backend.application.ports.task_management import (
-    ProjectRepository,
-    ReminderRepository,
+from backend.application.ports.collaborators import (
+    PalettePolicy,
+    ProjectReminderCommands,
 )
+from backend.application.ports.task_management import ProjectRepository
 from backend.core.errors import BadRequestError, ConflictError, NotFoundError
 from backend.domain.entities import Project
 from backend.domain.task_management.models import (
@@ -32,7 +32,7 @@ class ProjectService:
         self,
         repository: ProjectRepository,
         palette_service: PalettePolicy,
-        reminder_repository: ReminderRepository,
+        reminder_commands: ProjectReminderCommands,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         """
@@ -45,7 +45,7 @@ class ProjectService:
         Args:
             repository: Persistence operations for projects and progress.
             palette_service: Palette validation and default resolution.
-            reminder_repository: Project-wide reminder pause and resume commands.
+            reminder_commands: Project-wide reminder pause and resume commands.
             clock: Current-time provider. Defaults to the current UTC time.
 
         Notes:
@@ -54,7 +54,7 @@ class ProjectService:
         """
         self._repository = repository
         self._palette_service = palette_service
-        self._reminder_repository = reminder_repository
+        self._reminder_commands = reminder_commands
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
 
     async def list(
@@ -335,7 +335,7 @@ class ProjectService:
         if project.archived_at is None:
             project.archived_at = self._clock()
             await self._repository.save_project(project)
-            await self._reminder_repository.pause_project_reminders(user_id, project.id)
+            await self._reminder_commands.pause_project(user_id, project.id)
         return project
 
     async def unarchive(self, user_id: int, project_id: int) -> Project:
@@ -375,7 +375,7 @@ class ProjectService:
             raise ConflictError(_PROJECT_NAME_EXISTS)
         project.archived_at = None
         await self._repository.save_project(project)
-        await self._reminder_repository.resume_project_reminders(
+        await self._reminder_commands.resume_project(
             user_id,
             project.id,
             self._clock(),

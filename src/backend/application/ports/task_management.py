@@ -18,6 +18,7 @@ from backend.domain.entities import (
     TaskReminder,
     TaskSeries,
 )
+from backend.domain.task_management.models import ProjectReminderContext
 
 
 class PaletteRepository(Protocol):
@@ -1561,6 +1562,30 @@ class ReminderRepository(Protocol):
         """
         ...
 
+    async def save_reminders(self, reminders: Sequence[TaskReminder]) -> None:
+        """
+        Persist changes to a batch of existing reminders.
+
+        Purpose:
+            Apply project resume slot changes to every loaded reminder with one
+            flush instead of one flush per reminder.
+
+        Args:
+            reminders: Reminders whose persisted fields changed.
+
+        Returns:
+            None: The changes stay in the current unit of work.
+
+        Raises:
+            LookupError: If any reminder row is not present in the session.
+
+        Notes:
+            - Empty input still flushes once so the project resume transaction
+              keeps its previous flush count.
+            - Flushes once but does not commit.
+        """
+        ...
+
     async def delete_task_reminders(self, user_id: int, task_id: int) -> None:
         """
         Delete every reminder attached to a task.
@@ -1662,37 +1687,30 @@ class ReminderRepository(Protocol):
         """
         ...
 
-    async def resume_project_reminders(
+    async def list_project_reminder_contexts(
         self,
         user_id: int,
         project_id: int,
-        now: datetime,
-    ) -> None:
+    ) -> Sequence[ProjectReminderContext]:
         """
-        Recompute reminder slots for a project after unarchiving.
+        List reminder contexts for an archived project.
 
         Purpose:
-            Resume delivery when an archived project becomes active again
-            without backfilling slots missed while it was paused.
+            Load the project series and task reminders together with the data
+            the application resume policy needs to recompute their slots.
 
         Args:
             user_id: Owner identifier.
             project_id: Project identifier.
-            now: Current instant used as the lower bound for scheduled slots.
 
         Returns:
-            None: The changes stay in the current unit of work.
+            Sequence[ProjectReminderContext]: Reminder contexts for non-deleted
+                project series and incomplete non-deleted project tasks.
 
         Notes:
-            - Template series reminders are retargeted to the series timezone
-              and keep ``next_run_at=None``.
-            - Incomplete task reminders, including overdue tasks, are
-              recomputed: before-due slots come from ``due_at`` and become
-              ``None`` when past; scheduled slots advance to the first suitable
-              slot after ``now``.
-            - Cancelled deliveries are left for the dispatcher to reactivate
-              when their recomputed slot becomes current.
-            - Flushes but does not commit.
+            - Loads project series, project tasks, and both reminder
+              collections in four batched queries.
+            - Performs no writes, does not flush, and does not commit.
         """
         ...
 

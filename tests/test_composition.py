@@ -22,6 +22,7 @@ from backend.application.auth.service import AuthService
 from backend.application.ports.collaborators import ReminderSender
 from backend.application.task_management.labels import LabelService
 from backend.application.task_management.palette import PaletteService
+from backend.application.task_management.project_reminders import ProjectReminderService
 from backend.application.task_management.projects import ProjectService
 from backend.application.task_management.series import SeriesService
 from backend.application.task_management.series_generation import (
@@ -133,6 +134,10 @@ def test_task_composition_uses_one_session_and_shared_uow() -> None:
     assert tasks._repository._session is session
     assert series._repository._session is session
     assert projects._repository._session is session
+    reminder_commands = cast(Any, projects._reminder_commands)
+    assert isinstance(reminder_commands, ProjectReminderService)
+    assert isinstance(reminder_commands._repository, SqlAlchemyReminderRepository)
+    assert reminder_commands._repository._session is session
     assert labels._repository._session is session
     assert palette._repository._session is session
 

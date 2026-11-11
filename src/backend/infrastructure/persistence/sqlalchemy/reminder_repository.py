@@ -5,14 +5,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfoNotFoundError
 
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.domain.entities import ReminderDelivery, TaskReminder
-from backend.domain.enums import DeliveryStatus, ReminderKind
-from backend.domain.task_management.policies import rebuild_reminder_slot
+from backend.domain.enums import DeliveryStatus
+from backend.domain.task_management.models import ProjectReminderContext
 from backend.infrastructure.persistence.sqlalchemy.mappers import (
     apply_delivery,
     apply_reminder,
@@ -199,6 +198,38 @@ class SqlAlchemyReminderRepository:
         if row is None:
             raise LookupError(f"Reminder {reminder.id} is not present in the session")
         apply_reminder(reminder, row)
+        await self._session.flush()
+
+    async def save_reminders(self, reminders: Sequence[TaskReminder]) -> None:
+        """
+        Persist changes to a batch of existing reminders.
+
+        Purpose:
+            Apply project resume slot changes to every loaded reminder with one
+            flush instead of one flush per reminder.
+
+        Args:
+            reminders: Reminders whose persisted fields changed.
+
+        Returns:
+            None: The changes stay in the current unit of work.
+
+        Raises:
+            LookupError: If any reminder row is not present in the session.
+
+        Notes:
+            - Resolves every tracked row by primary key; the caller is
+              responsible for loading the entities through a tenant-scoped
+              read.
+            - Empty input still flushes once so the project resume transaction
+              keeps its previous flush count.
+            - Flushes once but does not commit.
+        """
+        for reminder in reminders:
+            row = await self._session.get(TaskReminderRow, reminder.id)
+            if row is None:
+                raise LookupError(f"Reminder {reminder.id} is not present in the session")
+            apply_reminder(reminder, row)
         await self._session.flush()
 
     async def delete_task_reminders(self, user_id: int, task_id: int) -> None:
@@ -389,39 +420,30 @@ class SqlAlchemyReminderRepository:
         await self._cancel_reminder_slots(user_id, reminder_ids)
         await self._session.flush()
 
-    async def resume_project_reminders(
+    async def list_project_reminder_contexts(
         self,
         user_id: int,
         project_id: int,
-        now: datetime,
-    ) -> None:
+    ) -> Sequence[ProjectReminderContext]:
         """
-        Recompute reminder slots for a project after unarchiving.
+        List reminder contexts for an archived project.
 
         Purpose:
-            Resume delivery when an archived project becomes active again
-            without backfilling slots missed while it was paused.
+            Load the project series and task reminders together with the data
+            the application resume policy needs to recompute their slots.
 
         Args:
             user_id: Owner identifier.
             project_id: Project identifier.
-            now: Current instant used as the lower bound for scheduled slots.
 
         Returns:
-            None: The changes stay in the current unit of work.
+            Sequence[ProjectReminderContext]: Reminder contexts for non-deleted
+                project series and incomplete non-deleted project tasks.
 
         Notes:
-            - Loads project series, project tasks, and both reminder collections
-              in four batched queries.
-            - Template series reminders are retargeted to the series timezone
-              and keep ``next_run_at=None``.
-            - Incomplete task reminders, including overdue tasks, are
-              recomputed: before-due slots come from ``due_at`` and become
-              ``None`` when past; scheduled slots advance to the first suitable
-              slot after ``now``.
-            - Cancelled deliveries are left for the dispatcher to reactivate
-              when their recomputed slot becomes current.
-            - Flushes but does not commit.
+            - Loads project series, project tasks, and both reminder
+              collections in four batched queries.
+            - Does not mutate entities, does not flush, and does not commit.
         """
         series_result = await self._session.execute(
             select(TaskSeriesRow).where(
@@ -430,28 +452,27 @@ class SqlAlchemyReminderRepository:
                 TaskSeriesRow.deleted_at.is_(None),
             )
         )
-        series_items = [(series_to_entity(row), row) for row in series_result.scalars().all()]
-        series_ids = [series.id for series, _ in series_items]
+        series_by_id = {
+            series.id: series for series in map(series_to_entity, series_result.scalars().all())
+        }
         series_reminders_result = await self._session.execute(
             select(TaskReminderRow)
             .where(
                 TaskReminderRow.user_id == user_id,
-                TaskReminderRow.series_id.in_(series_ids),
+                TaskReminderRow.series_id.in_(list(series_by_id)),
             )
             .order_by(TaskReminderRow.id)
         )
-        series_reminders: dict[int, list[tuple[TaskReminder, TaskReminderRow]]] = {}
-        for row in series_reminders_result.scalars().all():
-            if row.series_id is not None:
-                series_reminders.setdefault(row.series_id, []).append(
-                    (reminder_to_entity(row), row)
-                )
-        for series, _ in series_items:
-            for reminder, row in series_reminders.get(series.id, []):
-                reminder.next_run_at = None
-                if reminder.kind == ReminderKind.SCHEDULED.value:
-                    reminder.timezone = series.timezone
-                apply_reminder(reminder, row)
+        series_contexts = [
+            ProjectReminderContext(
+                reminder=reminder_to_entity(row),
+                task_due_at=None,
+                series_timezone=series_by_id[row.series_id].timezone,
+                is_series=True,
+            )
+            for row in series_reminders_result.scalars().all()
+            if row.series_id is not None
+        ]
 
         task_result = await self._session.execute(
             select(TaskRow).where(
@@ -461,32 +482,26 @@ class SqlAlchemyReminderRepository:
                 TaskRow.completed_at.is_(None),
             )
         )
-        task_items = [(task_to_entity(row), row) for row in task_result.scalars().all()]
-        task_ids = [task.id for task, _ in task_items]
+        task_by_id = {task.id: task for task in map(task_to_entity, task_result.scalars().all())}
         task_reminders_result = await self._session.execute(
             select(TaskReminderRow)
             .where(
                 TaskReminderRow.user_id == user_id,
-                TaskReminderRow.task_id.in_(task_ids),
+                TaskReminderRow.task_id.in_(list(task_by_id)),
             )
             .order_by(TaskReminderRow.id)
         )
-        task_reminders: dict[int, list[tuple[TaskReminder, TaskReminderRow]]] = {}
-        for row in task_reminders_result.scalars().all():
-            if row.task_id is not None:
-                task_reminders.setdefault(row.task_id, []).append((reminder_to_entity(row), row))
-        for task, _ in task_items:
-            for reminder, row in task_reminders.get(task.id, []):
-                try:
-                    reminder.next_run_at = rebuild_reminder_slot(
-                        reminder,
-                        due_at=task.due_at,
-                        now=now,
-                    )
-                except (ZoneInfoNotFoundError, ValueError):  # fmt: skip
-                    reminder.next_run_at = None
-                apply_reminder(reminder, row)
-        await self._session.flush()
+        task_contexts = [
+            ProjectReminderContext(
+                reminder=reminder_to_entity(row),
+                task_due_at=task_by_id[row.task_id].due_at,
+                series_timezone=None,
+                is_series=False,
+            )
+            for row in task_reminders_result.scalars().all()
+            if row.task_id is not None
+        ]
+        return [*series_contexts, *task_contexts]
 
     async def list_due_reminders(
         self,

@@ -8,6 +8,7 @@ import pytest
 
 from backend.api.pagination import DEFAULT_PAGE_SIZE
 from backend.application.ports.collaborators import SeriesOperations
+from backend.application.task_management.project_reminders import ProjectReminderService
 from backend.application.task_management.series import SeriesService
 from backend.application.task_management.series_materializer import SeriesMaterializer
 from backend.application.task_management.task_details import TaskDetails
@@ -817,7 +818,7 @@ async def test_archive_project_pauses_task_reminders_and_deliveries() -> None:
     service = ProjectService(
         repository,
         PaletteService(repository),
-        repository,
+        ProjectReminderService(repository),
         clock=fixed_now,
     )
 
@@ -902,7 +903,7 @@ async def test_unarchive_resumes_reminders_without_catching_up() -> None:
     service = ProjectService(
         repository,
         PaletteService(repository),
-        repository,
+        ProjectReminderService(repository),
         clock=fixed_now,
     )
 
@@ -975,7 +976,7 @@ async def test_unarchive_resumes_scheduled_reminder_for_overdue_task() -> None:
     service = ProjectService(
         repository,
         PaletteService(repository),
-        repository,
+        ProjectReminderService(repository),
         clock=fixed_now,
     )
 

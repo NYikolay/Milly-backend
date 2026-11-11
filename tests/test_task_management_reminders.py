@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, cast
 
 import pytest
 
+from backend.application.task_management.project_reminders import ProjectReminderService
 from backend.application.task_management.reminder_presenter import build_reminder_text
 from backend.application.task_management.reminders import ReminderDispatcher
 from backend.domain.entities import Task, TaskReminder
@@ -1174,3 +1175,117 @@ def test_domain_reminder_validation_uses_domain_error() -> None:
 
     with pytest.raises(ReminderConfigurationError):
         validate_reminder_inputs([ReminderInput(kind=ReminderKind.BEFORE_DUE, enabled=True)])
+
+
+async def test_project_reminder_service_recomputes_slots_and_saves_once() -> None:
+    """Resume recomputes task slots and retargets templates in one batch save."""
+    repository = FakeTaskManagementRepository()
+    project = repository.insert_project(make_project())
+    series = repository.insert_series(
+        make_series(
+            project_id=project.id,
+            time_of_day=time(9, 0),
+            timezone="Asia/Tokyo",
+            starts_on=date(2026, 11, 1),
+        )
+    )
+    template = repository.insert_reminder(
+        make_reminder(
+            series_id=series.id,
+            kind=ReminderKind.SCHEDULED,
+            offset_minutes=None,
+            interval_days=1,
+            time_of_day=time(9, 0),
+            timezone="UTC",
+            next_run_at=fixed_now(),
+        )
+    )
+    task = repository.insert_task(
+        make_task(
+            project_id=project.id,
+            due_at=fixed_now() + timedelta(days=1),
+            reminders_enabled=True,
+        )
+    )
+    task_reminder = repository.insert_reminder(
+        make_reminder(
+            task_id=task.id,
+            kind=ReminderKind.BEFORE_DUE,
+            offset_minutes=30,
+            next_run_at=fixed_now(),
+        )
+    )
+    service = ProjectReminderService(repository)
+
+    await service.resume_project(USER_ID, project.id, fixed_now())
+
+    assert task_reminder.next_run_at == task.due_at - timedelta(minutes=30)
+    assert template.next_run_at is None
+    assert template.timezone == "Asia/Tokyo"
+    assert repository.save_reminder_batches == 1
+
+
+async def test_project_reminder_service_clears_unresolvable_slots() -> None:
+    """Unknown zones and datetime overflow clear slots instead of failing resume."""
+    repository = FakeTaskManagementRepository()
+    project = repository.insert_project(make_project())
+    zone_task = repository.insert_task(
+        make_task(
+            project_id=project.id,
+            due_at=fixed_now() + timedelta(days=1),
+            reminders_enabled=True,
+        )
+    )
+    zone_reminder = repository.insert_reminder(
+        make_reminder(
+            task_id=zone_task.id,
+            kind=ReminderKind.SCHEDULED,
+            offset_minutes=None,
+            interval_days=1,
+            time_of_day=time(9, 0),
+            timezone="Missing/Zone",
+            next_run_at=fixed_now(),
+        )
+    )
+    overflow_task = repository.insert_task(
+        make_task(
+            project_id=project.id,
+            due_at=datetime.min.replace(tzinfo=UTC),
+            reminders_enabled=True,
+        )
+    )
+    overflow_reminder = repository.insert_reminder(
+        make_reminder(
+            task_id=overflow_task.id,
+            kind=ReminderKind.BEFORE_DUE,
+            offset_minutes=1,
+            next_run_at=fixed_now(),
+        )
+    )
+    service = ProjectReminderService(repository)
+
+    await service.resume_project(USER_ID, project.id, fixed_now())
+
+    assert zone_reminder.next_run_at is None
+    assert overflow_reminder.next_run_at is None
+    assert repository.save_reminder_batches == 1
+
+
+async def test_project_reminder_service_pause_keeps_the_bulk_pause() -> None:
+    """Pause delegates to the bulk repository call without saving contexts."""
+    repository = FakeTaskManagementRepository()
+    project = repository.insert_project(make_project())
+    task = repository.insert_task(
+        make_task(
+            project_id=project.id,
+            due_at=fixed_now() + timedelta(days=1),
+            reminders_enabled=True,
+        )
+    )
+    reminder = repository.insert_reminder(make_reminder(task_id=task.id, next_run_at=fixed_now()))
+    service = ProjectReminderService(repository)
+
+    await service.pause_project(USER_ID, project.id)
+
+    assert reminder.next_run_at is None
+    assert repository.save_reminder_batches == 0

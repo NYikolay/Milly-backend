@@ -15,7 +15,8 @@ from backend.domain.entities import (
     TaskReminder,
     TaskSeries,
 )
-from backend.domain.task_management.policies import HORIZON_DAYS, rebuild_reminder_slot
+from backend.domain.task_management.models import ProjectReminderContext
+from backend.domain.task_management.policies import HORIZON_DAYS
 from backend.task_management.enums import DeliveryStatus, ReminderKind, SeriesFrequency
 
 _ACTIVE_DELIVERY_STATUSES = {
@@ -106,6 +107,7 @@ class FakeTaskManagementRepository:
         self.saved_tasks: list[int] = []
         self.saved_series: list[int] = []
         self.saved_reminders: list[int] = []
+        self.save_reminder_batches = 0
         self.claimed_series_ids: list[int] = []
         self.blocked_series_ids: set[int] = set()
         self.series_errors: dict[int, Exception] = {}
@@ -907,26 +909,31 @@ class FakeTaskManagementRepository:
             self.reminders[reminder_id].next_run_at = None
         self._cancel_deliveries(reminder_ids)
 
-    async def resume_project_reminders(
+    async def list_project_reminder_contexts(
         self,
         user_id: int,
         project_id: int,
-        now: datetime,
-    ) -> None:
-        """Recompute future reminder slots for a reactivated project."""
-        for series in self.series.values():
+    ) -> list[ProjectReminderContext]:
+        """Return read-only reminder contexts for a project's series and tasks."""
+        contexts: list[ProjectReminderContext] = []
+        for series in sorted(self.series.values(), key=lambda item: item.id):
             if (
                 series.user_id != user_id
                 or series.project_id != project_id
                 or series.deleted_at is not None
             ):
                 continue
-            for reminder in self.reminders.values():
+            for reminder in sorted(self.reminders.values(), key=lambda item: item.id):
                 if reminder.user_id == user_id and reminder.series_id == series.id:
-                    reminder.next_run_at = None
-                    if reminder.kind == ReminderKind.SCHEDULED.value:
-                        reminder.timezone = series.timezone
-        for task in self.tasks.values():
+                    contexts.append(
+                        ProjectReminderContext(
+                            reminder=reminder,
+                            task_due_at=None,
+                            series_timezone=series.timezone,
+                            is_series=True,
+                        )
+                    )
+        for task in sorted(self.tasks.values(), key=lambda item: item.id):
             if (
                 task.user_id != user_id
                 or task.project_id != project_id
@@ -934,14 +941,25 @@ class FakeTaskManagementRepository:
                 or task.completed_at is not None
             ):
                 continue
-            for reminder in self.reminders.values():
-                if reminder.user_id != user_id or reminder.task_id != task.id:
-                    continue
-                reminder.next_run_at = rebuild_reminder_slot(
-                    reminder,
-                    due_at=task.due_at,
-                    now=now,
-                )
+            for reminder in sorted(self.reminders.values(), key=lambda item: item.id):
+                if reminder.user_id == user_id and reminder.task_id == task.id:
+                    contexts.append(
+                        ProjectReminderContext(
+                            reminder=reminder,
+                            task_due_at=task.due_at,
+                            series_timezone=None,
+                            is_series=False,
+                        )
+                    )
+        return contexts
+
+    async def save_reminders(self, reminders: Sequence[Any]) -> None:
+        """Persist changed reminders as one batch and record the batch."""
+        self._begin_transaction()
+        self.save_reminder_batches += 1
+        for reminder in reminders:
+            self.saved_reminders.append(reminder.id)
+            self.reminders[reminder.id] = reminder
 
     async def project_is_active(self, user_id: int, project_id: int) -> bool:
         """Return whether a project exists and is neither archived nor deleted."""

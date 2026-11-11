@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.application.ports.collaborators import ReminderSender
 from backend.application.task_management.labels import LabelService
 from backend.application.task_management.palette import PaletteService
+from backend.application.task_management.project_reminders import ProjectReminderService
 from backend.application.task_management.projects import ProjectService
 from backend.application.task_management.reminders import ReminderDispatcher
 from backend.application.task_management.series import SeriesService
@@ -113,7 +114,7 @@ def build_task_management_services(
     projects = ProjectService(
         project_repository,
         palette,
-        reminder_repository,
+        ProjectReminderService(reminder_repository),
         clock=clock,
     )
     labels = LabelService(label_repository, palette, clock=clock)
