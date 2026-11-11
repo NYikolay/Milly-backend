@@ -9,6 +9,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from taskiq.exceptions import TaskiqError
 
 from backend.api.errors.schemas import ValidationCode
+from backend.api.errors.status import status_code_for
 from backend.api.errors.validation import normalize_validation_errors
 from backend.core.errors import AppError, ErrorCode, get_error_spec
 
@@ -54,8 +55,9 @@ def payload_from_app_error(exc: AppError) -> ErrorPayload:
     Build an error payload from an application error.
 
     Purpose:
-        Use the error's registry-backed status while preserving per-instance
-        message, description, log level, details, and headers.
+        Resolve the HTTP status from the API-layer mapping while preserving
+        the error's per-instance message, description, log level, details, and
+        headers.
 
     Args:
         exc: Expected application failure.
@@ -63,9 +65,8 @@ def payload_from_app_error(exc: AppError) -> ErrorPayload:
     Returns:
         ErrorPayload: Payload describing the failure.
     """
-    spec = get_error_spec(exc.code)
     return ErrorPayload(
-        status_code=spec.status_code,
+        status_code=status_code_for(exc.code),
         code=exc.code,
         message=exc.message,
         description=exc.description,
@@ -101,7 +102,7 @@ def payload_from_sqlalchemy_error(exc: sqlalchemy_exc.SQLAlchemyError) -> ErrorP
     )
     spec = get_error_spec(code)
     return ErrorPayload(
-        status_code=spec.status_code,
+        status_code=status_code_for(code),
         code=code,
         message=spec.message,
         description=spec.description,
@@ -128,7 +129,7 @@ def payload_from_taskiq_error(exc: TaskiqError) -> ErrorPayload:
     """
     spec = get_error_spec(ErrorCode.TASK_ENQUEUE_FAILED)
     return ErrorPayload(
-        status_code=spec.status_code,
+        status_code=status_code_for(ErrorCode.TASK_ENQUEUE_FAILED),
         code=ErrorCode.TASK_ENQUEUE_FAILED,
         message=spec.message,
         description=spec.description,
@@ -200,7 +201,7 @@ def payload_from_validation_error(exc: RequestValidationError) -> ErrorPayload:
     code = ErrorCode.BAD_REQUEST if has_invalid_json else ErrorCode.VALIDATION_ERROR
     spec = get_error_spec(code)
     return ErrorPayload(
-        status_code=spec.status_code,
+        status_code=status_code_for(code),
         code=code,
         message=spec.message,
         description=spec.description,
@@ -232,7 +233,7 @@ def payload_from_unexpected_error(exc: Exception, *, debug: bool) -> ErrorPayloa
     if debug:
         details = {"exception": type(exc).__name__, "message": str(exc)}
     return ErrorPayload(
-        status_code=spec.status_code,
+        status_code=status_code_for(ErrorCode.INTERNAL_ERROR),
         code=ErrorCode.INTERNAL_ERROR,
         message=spec.message,
         description=spec.description,

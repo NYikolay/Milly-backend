@@ -20,6 +20,7 @@ from backend.api.errors.mapping import (
     payload_from_sqlalchemy_error,
     payload_from_taskiq_error,
 )
+from backend.api.errors.status import status_code_for
 from backend.core.errors import ErrorCode, get_error_spec
 
 
@@ -112,7 +113,7 @@ def test_connectivity_errors_map_to_database_unavailable(exc: SQLAlchemyError) -
     """Map every database connectivity failure to the database error spec."""
     payload = payload_from_sqlalchemy_error(exc)
     spec = get_error_spec(ErrorCode.DATABASE_UNAVAILABLE)
-    assert payload.status_code == spec.status_code
+    assert payload.status_code == status_code_for(ErrorCode.DATABASE_UNAVAILABLE)
     assert payload.code == ErrorCode.DATABASE_UNAVAILABLE
     assert payload.log_level == spec.log_level
     assert payload.details is None
@@ -122,7 +123,7 @@ def test_taskiq_payload_uses_registry_spec() -> None:
     """Build the task enqueue payload from the registry without details."""
     payload = payload_from_taskiq_error(SendTaskError())
     spec = get_error_spec(ErrorCode.TASK_ENQUEUE_FAILED)
-    assert payload.status_code == spec.status_code
+    assert payload.status_code == status_code_for(ErrorCode.TASK_ENQUEUE_FAILED)
     assert payload.code == ErrorCode.TASK_ENQUEUE_FAILED
     assert payload.log_level == spec.log_level
     assert payload.details is None

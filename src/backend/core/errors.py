@@ -31,9 +31,8 @@ class ErrorCode(StrEnum):
 
 @dataclass(frozen=True)
 class ErrorSpec:
-    """Registry entry describing the transport-independent behavior of an error code."""
+    """Registry entry describing the logging level and default texts of an error code."""
 
-    status_code: int
     log_level: int
     message: str
     description: str
@@ -41,103 +40,86 @@ class ErrorSpec:
 
 ERROR_SPECS: dict[ErrorCode, ErrorSpec] = {
     ErrorCode.BAD_REQUEST: ErrorSpec(
-        status_code=400,
         log_level=logging.WARNING,
         message="Bad request",
         description="Некорректный запрос",
     ),
     ErrorCode.VALIDATION_ERROR: ErrorSpec(
-        status_code=422,
         log_level=logging.INFO,
         message="Request validation failed",
         description="Проверьте правильность заполнения полей",
     ),
     ErrorCode.UNAUTHORIZED: ErrorSpec(
-        status_code=401,
         log_level=logging.WARNING,
         message="Authentication required",
         description="Требуется авторизация",
     ),
     ErrorCode.FORBIDDEN: ErrorSpec(
-        status_code=403,
         log_level=logging.WARNING,
         message="Permission denied",
         description="Недостаточно прав",
     ),
     ErrorCode.AUTH_NOT_CONFIGURED: ErrorSpec(
-        status_code=503,
         log_level=logging.ERROR,
         message="Authentication is not configured",
         description="Аутентификация не настроена",
     ),
     ErrorCode.NOT_FOUND: ErrorSpec(
-        status_code=404,
         log_level=logging.INFO,
         message="Resource not found",
         description="Запрошенный ресурс не найден",
     ),
     ErrorCode.METHOD_NOT_ALLOWED: ErrorSpec(
-        status_code=405,
         log_level=logging.WARNING,
         message="Method not allowed",
         description="Метод не поддерживается",
     ),
     ErrorCode.CONFLICT: ErrorSpec(
-        status_code=409,
         log_level=logging.WARNING,
         message="Conflict",
         description="Операция конфликтует с текущим состоянием",
     ),
     ErrorCode.PAYLOAD_TOO_LARGE: ErrorSpec(
-        status_code=413,
         log_level=logging.WARNING,
         message="Payload too large",
         description="Слишком большой запрос",
     ),
     ErrorCode.UNSUPPORTED_MEDIA_TYPE: ErrorSpec(
-        status_code=415,
         log_level=logging.WARNING,
         message="Unsupported media type",
         description="Неподдерживаемый тип содержимого",
     ),
     ErrorCode.RATE_LIMITED: ErrorSpec(
-        status_code=429,
         log_level=logging.WARNING,
         message="Too many requests",
         description="Слишком много запросов",
     ),
     ErrorCode.INTERNAL_ERROR: ErrorSpec(
-        status_code=500,
         log_level=logging.ERROR,
         message="Internal server error",
         description="Внутренняя ошибка сервера",
     ),
     ErrorCode.NOT_IMPLEMENTED: ErrorSpec(
-        status_code=501,
         log_level=logging.WARNING,
         message="Not implemented",
         description="Функция не реализована",
     ),
     ErrorCode.SERVICE_UNAVAILABLE: ErrorSpec(
-        status_code=503,
         log_level=logging.ERROR,
         message="Service unavailable",
         description="Сервис временно недоступен",
     ),
     ErrorCode.DATABASE_UNAVAILABLE: ErrorSpec(
-        status_code=503,
         log_level=logging.ERROR,
         message="Database is unavailable",
         description="База данных временно недоступна",
     ),
     ErrorCode.TASK_ENQUEUE_FAILED: ErrorSpec(
-        status_code=503,
         log_level=logging.ERROR,
         message="Failed to enqueue task",
         description="Не удалось поставить задачу в очередь",
     ),
     ErrorCode.HTTP_ERROR: ErrorSpec(
-        status_code=500,
         log_level=logging.WARNING,
         message="HTTP error",
         description="Ошибка запроса",
@@ -150,8 +132,8 @@ def get_error_spec(code: ErrorCode) -> ErrorSpec:
     Return the registered specification for an error code.
 
     Purpose:
-        Centralize access to the status, logging level, and default texts of an
-        error code used by exceptions and transport mappers.
+        Centralize access to the logging level and default texts of an error
+        code used by exceptions and transport mappers.
 
     Args:
         code: Error code whose specification is requested.

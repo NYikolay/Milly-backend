@@ -9,7 +9,8 @@ from fastapi import APIRouter
 from fastapi.routing import APIRoute
 
 from backend.api.errors.schemas import ErrorResponse
-from backend.core.errors import ErrorCode, get_error_spec
+from backend.api.errors.status import status_code_for
+from backend.core.errors import ErrorCode
 
 ERROR_RESPONSES: dict[int, dict[str, object]] = {
     400: {"model": ErrorResponse, "description": "Bad Request"},
@@ -28,8 +29,8 @@ def document_errors(
 
     Purpose:
         Document the concrete HTTP status and machine-readable code of every
-        error an operation can return, deriving the status from the error
-        registry so documentation cannot drift from runtime behavior.
+        error an operation can return, deriving the status from the API-layer
+        status mapping so documentation cannot drift from runtime behavior.
 
     Args:
         errors: Mapping from an error code to an operation-specific English
@@ -40,7 +41,7 @@ def document_errors(
             status, ready to pass to FastAPI's ``responses`` argument.
 
     Raises:
-        KeyError: If a code has no registered specification.
+        KeyError: If a code has no registered HTTP status.
 
     Examples:
         >>> responses = document_errors(
@@ -57,8 +58,7 @@ def document_errors(
     """
     grouped: dict[int, list[str]] = {}
     for code, description in errors.items():
-        spec = get_error_spec(code)
-        grouped.setdefault(spec.status_code, []).append(f"- {code.value}: {description}")
+        grouped.setdefault(status_code_for(code), []).append(f"- {code.value}: {description}")
 
     responses: dict[int | str, dict[str, Any]] = {
         status: {
