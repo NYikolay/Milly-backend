@@ -6,7 +6,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 from taskiq import TaskiqDepends
 
-from backend.composition.task_management import build_series_service
+from backend.composition.task_management import build_series_generation_service
 from backend.tasks.broker import broker
 from backend.tasks.deps import get_task_session
 
@@ -37,6 +37,6 @@ async def generate_task_series(
         - Concurrent workers skip series that are locked by another run.
         - Only the number of created instances is logged.
     """
-    service = build_series_service(session)
+    service = build_series_generation_service(session)
     created = await service.generate(datetime.now(UTC))
     logger.info("task.series_generated", count=created)

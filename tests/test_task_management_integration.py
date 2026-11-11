@@ -11,6 +11,9 @@ from backend.application.ports.task_management import ReminderRepository
 from backend.application.task_management.projects import ProjectService
 from backend.application.task_management.reminders import ReminderDispatcher
 from backend.application.task_management.series import SeriesService
+from backend.application.task_management.series_generation import (
+    SeriesGenerationService,
+)
 from backend.application.task_management.series_materializer import SeriesMaterializer
 from backend.application.task_management.task_details import TaskDetails
 from backend.application.task_management.task_references import TaskReferences
@@ -45,7 +48,13 @@ REMINDER_TEXT = (
 
 def make_services(
     repository: FakeTaskManagementRepository,
-) -> tuple[PaletteService, ProjectService, SeriesService, TaskService]:
+) -> tuple[
+    PaletteService,
+    ProjectService,
+    SeriesService,
+    SeriesGenerationService,
+    TaskService,
+]:
     """
     Build the real task-management services over the shared fake repository.
 
@@ -57,9 +66,10 @@ def make_services(
         repository: In-memory repository double shared by all services.
 
     Returns:
-        tuple[PaletteService, ProjectService, SeriesService, TaskService]:
-            Palette, project, series, and task services wired with the fixed
-            test clock.
+        tuple[PaletteService, ProjectService, SeriesService,
+            SeriesGenerationService, TaskService]: Palette, project, series,
+            series-generation, and task services wired with the fixed test
+            clock.
     """
     palette = PaletteService(repository)
     projects = ProjectService(
@@ -70,19 +80,26 @@ def make_services(
     )
     references = TaskReferences(repository, repository, repository)
     details = TaskDetails(repository, repository, repository)
+    materializer = SeriesMaterializer(
+        repository,
+        repository,
+        repository,
+        repository,
+        references,
+        repository,
+    )
     series = SeriesService(
         repository,
         repository,
         repository,
         references,
-        SeriesMaterializer(
-            repository,
-            repository,
-            repository,
-            repository,
-            references,
-            repository,
-        ),
+        materializer,
+        repository,
+        clock=fixed_now,
+    )
+    generation = SeriesGenerationService(
+        repository,
+        materializer,
         repository,
         clock=fixed_now,
     )
@@ -95,7 +112,7 @@ def make_services(
         repository,
         clock=fixed_now,
     )
-    return palette, projects, series, tasks
+    return palette, projects, series, generation, tasks
 
 
 def make_dispatcher(
@@ -121,7 +138,7 @@ async def test_daily_series_lifecycle_end_to_end() -> None:
     """Drive a daily series through generation, reminders, archive, and delete."""
     repository = FakeTaskManagementRepository()
     repository.telegram_ids[USER_ID] = TELEGRAM_ID
-    palette, projects, series_service, task_service = make_services(repository)
+    palette, projects, series_service, generation_service, task_service = make_services(repository)
 
     color = repository.insert_color(
         ColorPalette(
@@ -209,7 +226,7 @@ async def test_daily_series_lifecycle_end_to_end() -> None:
             reminder.next_run_at is None
             for reminder in await repository.list_task_reminders(USER_ID, task.id)
         )
-    assert await series_service.generate(POST_HORIZON_NOW) == 0
+    assert await generation_service.generate(POST_HORIZON_NOW) == 0
     assert len(repository.tasks) == HORIZON_DAYS
     paused_sender = FakeSender()
     paused_dispatcher = make_dispatcher(
@@ -224,7 +241,7 @@ async def test_daily_series_lifecycle_end_to_end() -> None:
     restored = await projects.unarchive(USER_ID, project.id)
 
     assert restored.archived_at is None
-    created = await series_service.generate(POST_HORIZON_NOW)
+    created = await generation_service.generate(POST_HORIZON_NOW)
     assert created == HORIZON_DAYS
     assert len(repository.tasks) == HORIZON_DAYS * 2
     third_reminder = (await repository.list_task_reminders(USER_ID, third.id))[0]

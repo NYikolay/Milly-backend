@@ -14,6 +14,9 @@ from backend.application.task_management.palette import PaletteService
 from backend.application.task_management.projects import ProjectService
 from backend.application.task_management.reminders import ReminderDispatcher
 from backend.application.task_management.series import SeriesService
+from backend.application.task_management.series_generation import (
+    SeriesGenerationService,
+)
 from backend.application.task_management.series_materializer import SeriesMaterializer
 from backend.application.task_management.task_details import TaskDetails
 from backend.application.task_management.task_mutations import TaskMutationService
@@ -48,6 +51,7 @@ __all__ = [
     "TaskManagementServices",
     "build_palette_service",
     "build_reminder_dispatcher",
+    "build_series_generation_service",
     "build_series_service",
     "build_task_management_services",
 ]
@@ -167,22 +171,22 @@ def build_series_service(
     clock: Clock | None = None,
 ) -> SeriesService:
     """
-    Build the recurring-series service for a Taskiq generation job.
+    Build the recurring-series service for API request handling.
 
     Purpose:
-        Give the series generation entrypoint one factory that selects the
-        aggregate adapters and shared unit of work.
+        Give the API series entrypoint one factory that selects the aggregate
+        adapters and shared unit of work.
 
     Args:
-        session: Job-scoped async session owning the transaction.
+        session: Request-scoped async session owning the transaction.
         clock: Current-time provider. Defaults to the service UTC clock.
 
     Returns:
         SeriesService: Series service wired over the supplied session.
 
     Notes:
-        - Series, task, reminder, account, project, and label adapters and the
-          unit of work all share the same session.
+        - Series, task, reminder, account, project, and label adapters, the
+          materializer, and the unit of work all share the same session.
         - Does not commit, flush, or open a transaction.
     """
     account_repository = SqlAlchemyAccountRepository(session)
@@ -206,6 +210,56 @@ def build_series_service(
         task_repository,
         reminder_repository,
         references,
+        materializer,
+        unit_of_work,
+        clock=clock,
+    )
+
+
+def build_series_generation_service(
+    session: AsyncSession,
+    *,
+    clock: Clock | None = None,
+) -> SeriesGenerationService:
+    """
+    Build the scheduled series-generation service for a Taskiq job.
+
+    Purpose:
+        Give the generation entrypoint one factory that selects the aggregate
+        adapters and shared unit of work.
+
+    Args:
+        session: Job-scoped async session owning the transaction.
+        clock: Current-time provider. Defaults to the service UTC clock.
+
+    Returns:
+        SeriesGenerationService: Generator wired over the supplied session.
+
+    Notes:
+        - Series, task, reminder, account, project, and label adapters, the
+          materializer, and the unit of work all share the same session.
+        - The materializer owns the active-project gate; the generator needs no
+          separate project reader.
+        - Does not commit, flush, or open a transaction.
+    """
+    account_repository = SqlAlchemyAccountRepository(session)
+    project_repository = SqlAlchemyProjectRepository(session)
+    label_repository = SqlAlchemyLabelRepository(session)
+    series_repository = SqlAlchemySeriesRepository(session)
+    task_repository = SqlAlchemyTaskRepository(session)
+    reminder_repository = SqlAlchemyReminderRepository(session)
+    references = TaskReferences(project_repository, label_repository, account_repository)
+    unit_of_work = SqlAlchemyUnitOfWork(session)
+    materializer = SeriesMaterializer(
+        series_repository,
+        task_repository,
+        reminder_repository,
+        project_repository,
+        references,
+        unit_of_work,
+    )
+    return SeriesGenerationService(
+        series_repository,
         materializer,
         unit_of_work,
         clock=clock,

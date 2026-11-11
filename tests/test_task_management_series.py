@@ -6,6 +6,9 @@ from datetime import UTC, date, datetime, time, timedelta
 import pytest
 
 from backend.application.task_management.series import SeriesService
+from backend.application.task_management.series_generation import (
+    SeriesGenerationService,
+)
 from backend.application.task_management.series_materializer import SeriesMaterializer
 from backend.application.task_management.task_references import TaskReferences
 from backend.core.errors import BadRequestError, ErrorCode, NotFoundError
@@ -50,6 +53,26 @@ def make_series_service(repository: FakeTaskManagementRepository) -> SeriesServi
 def make_service(repository: FakeTaskManagementRepository) -> SeriesService:
     """Build a real series service over the fake repository."""
     return make_series_service(repository)
+
+
+def make_generation_service(
+    repository: FakeTaskManagementRepository,
+) -> SeriesGenerationService:
+    """Build a real series generation service over the fake repository ports."""
+    references = TaskReferences(repository, repository, repository)
+    return SeriesGenerationService(
+        repository,
+        SeriesMaterializer(
+            repository,
+            repository,
+            repository,
+            repository,
+            references,
+            repository,
+        ),
+        repository,
+        clock=fixed_now,
+    )
 
 
 class FlushOrderingRepository(FakeTaskManagementRepository):
@@ -219,9 +242,9 @@ async def test_generation_is_idempotent_for_an_existing_slot() -> None:
             due_at=due_at,
         )
     )
-    service = make_service(repository)
+    generation_service = make_generation_service(repository)
 
-    created = await service.generate(fixed_now())
+    created = await generation_service.generate(fixed_now())
 
     assert created == 0
     assert list(repository.tasks) == [existing.id]
@@ -615,9 +638,9 @@ async def test_generate_skips_caught_up_series_and_generates_future_series() -> 
             starts_on=fixed_now().date() + timedelta(days=10),
         )
     )
-    service = make_service(repository)
+    generation_service = make_generation_service(repository)
 
-    created = await service.generate(fixed_now())
+    created = await generation_service.generate(fixed_now())
 
     generated = [task for task in repository.tasks.values() if task.series_id == future.id]
     assert created == len(generated) > 0
@@ -649,9 +672,9 @@ async def test_generate_series_uses_bulk_add_methods() -> None:
             offset_minutes=30,
         )
     )
-    service = make_service(repository)
+    generation_service = make_generation_service(repository)
 
-    created = await service.generate(fixed_now())
+    created = await generation_service.generate(fixed_now())
 
     assert created > 1
     assert repository.bulk_calls.count("add_tasks") == 1
@@ -673,9 +696,9 @@ async def test_generate_series_does_not_claim_ended_series() -> None:
             ends_on=fixed_now().date() - timedelta(days=2),
         )
     )
-    service = make_service(repository)
+    generation_service = make_generation_service(repository)
 
-    created = await service.generate(fixed_now())
+    created = await generation_service.generate(fixed_now())
 
     assert created == 0
     assert repository.claimed_series_ids == []
@@ -696,9 +719,9 @@ async def test_generate_series_preserves_generated_through() -> None:
             generated_through=marker,
         )
     )
-    service = make_service(repository)
+    generation_service = make_generation_service(repository)
 
-    created = await service.generate(fixed_now() + timedelta(minutes=15))
+    created = await generation_service.generate(fixed_now() + timedelta(minutes=15))
 
     assert created == 0
     assert series.generated_through == marker
@@ -716,9 +739,9 @@ async def test_generate_skips_series_locked_by_another_worker() -> None:
         )
     )
     repository.blocked_series_ids.add(series.id)
-    service = make_service(repository)
+    generation_service = make_generation_service(repository)
 
-    created = await service.generate(fixed_now())
+    created = await generation_service.generate(fixed_now())
 
     assert created == 0
     assert repository.claimed_series_ids == [series.id]
@@ -738,9 +761,9 @@ async def test_generate_skips_archived_projects() -> None:
             starts_on=fixed_now().date(),
         )
     )
-    service = make_service(repository)
+    generation_service = make_generation_service(repository)
 
-    created = await service.generate(fixed_now())
+    created = await generation_service.generate(fixed_now())
 
     assert created == 0
     assert repository.tasks == {}
@@ -797,6 +820,7 @@ async def test_resumed_generation_does_not_overshoot_or_rewind_marker() -> None:
     """A run soon after creation creates nothing and keeps ``generated_through``."""
     repository = FakeTaskManagementRepository()
     service = make_service(repository)
+    generation_service = make_generation_service(repository)
     series = await service.create(
         USER_ID,
         title="Daily",
@@ -814,7 +838,7 @@ async def test_resumed_generation_does_not_overshoot_or_rewind_marker() -> None:
     generated_through = series.generated_through
     task_count = len(repository.tasks)
 
-    created = await service.generate(fixed_now() + timedelta(minutes=15))
+    created = await generation_service.generate(fixed_now() + timedelta(minutes=15))
 
     assert created == 0
     assert series.generated_through == generated_through
@@ -892,9 +916,9 @@ async def test_generation_continues_after_one_series_fails_unexpectedly() -> Non
         )
     )
     repository.series_errors[bad.id] = RuntimeError("boom")
-    service = make_service(repository)
+    generation_service = make_generation_service(repository)
 
-    created = await service.generate(fixed_now())
+    created = await generation_service.generate(fixed_now())
 
     assert created > 0
     assert repository.rollbacks == 1
@@ -1323,11 +1347,11 @@ async def test_generate_series_uses_stored_interval() -> None:
             starts_on=date(2026, 11, 1),
         )
     )
-    service = make_service(repository)
+    generation_service = make_generation_service(repository)
 
-    await service.generate(fixed_now())
-    await service.generate(fixed_now() + timedelta(days=30))
-    await service.generate(fixed_now() + timedelta(days=60))
+    await generation_service.generate(fixed_now())
+    await generation_service.generate(fixed_now() + timedelta(days=30))
+    await generation_service.generate(fixed_now() + timedelta(days=60))
 
     tasks = [task for task in repository.tasks.values() if task.series_id == series.id]
     assert tasks
@@ -1753,10 +1777,10 @@ async def test_generate_commits_successful_series_and_rolls_back_partial_failure
                 offset_minutes=30,
             )
         )
-    service = make_series_service(repository)
+    generation_service = make_generation_service(repository)
     repository.post_write_errors[failed_series_id] = RuntimeError("boom")
 
-    await service.generate(fixed_now())
+    await generation_service.generate(fixed_now())
 
     relevant_events = [
         event
@@ -1872,9 +1896,9 @@ async def test_generate_saves_generated_through_marker() -> None:
             starts_on=fixed_now().date(),
         )
     )
-    service = make_service(repository)
+    generation_service = make_generation_service(repository)
 
-    await service.generate(fixed_now())
+    await generation_service.generate(fixed_now())
 
     assert series.generated_through is not None
     assert series.id in repository.saved_series
@@ -1995,9 +2019,9 @@ async def test_generation_uses_returned_task_ids_for_related_rows() -> None:
             offset_minutes=30,
         )
     )
-    service = make_service(repository)
+    generation_service = make_generation_service(repository)
 
-    await service.generate(fixed_now())
+    await generation_service.generate(fixed_now())
 
     stored_ids = {task.id for task in repository.tasks.values() if task.series_id == series.id}
     assert stored_ids

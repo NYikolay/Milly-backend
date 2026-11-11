@@ -24,11 +24,15 @@ from backend.application.task_management.labels import LabelService
 from backend.application.task_management.palette import PaletteService
 from backend.application.task_management.projects import ProjectService
 from backend.application.task_management.series import SeriesService
+from backend.application.task_management.series_generation import (
+    SeriesGenerationService,
+)
 from backend.application.task_management.tasks import TaskService
 from backend.composition.auth import build_auth_service, build_token_verifier
 from backend.composition.task_management import (
     build_palette_service,
     build_reminder_dispatcher,
+    build_series_generation_service,
     build_series_service,
     build_task_management_services,
 )
@@ -142,7 +146,7 @@ def test_task_composition_passes_the_project_repository_as_today_progress_reader
 
 
 def test_series_builder_uses_the_account_and_aggregate_adapters() -> None:
-    """The generation builder wires series, task, reminder, reference, and project ports."""
+    """The series builder wires series, task, reminder, reference, and project ports."""
     session = make_session()
 
     service = build_series_service(session, clock=fixed_now)
@@ -160,6 +164,26 @@ def test_series_builder_uses_the_account_and_aggregate_adapters() -> None:
     assert materializer._references is references
     assert isinstance(references._label_reader, SqlAlchemyLabelRepository)
     assert isinstance(service._unit_of_work, SqlAlchemyUnitOfWork)
+    assert service._unit_of_work._session is session
+
+
+def test_generation_builder_uses_the_aggregate_adapters() -> None:
+    """The generation builder wires series, materializer, and unit-of-work ports."""
+    session = make_session()
+
+    service = build_series_generation_service(session, clock=fixed_now)
+
+    materializer = cast(Any, service._materializer)
+    assert isinstance(service, SeriesGenerationService)
+    assert isinstance(service._series_repository, SqlAlchemySeriesRepository)
+    assert isinstance(materializer._series_repository, SqlAlchemySeriesRepository)
+    assert isinstance(materializer._task_repository, SqlAlchemyTaskRepository)
+    assert isinstance(materializer._reminder_repository, SqlAlchemyReminderRepository)
+    assert isinstance(materializer._project_reader, SqlAlchemyProjectRepository)
+    assert isinstance(materializer._references._account_repository, SqlAlchemyAccountRepository)
+    assert isinstance(materializer._references._label_reader, SqlAlchemyLabelRepository)
+    assert isinstance(service._unit_of_work, SqlAlchemyUnitOfWork)
+    assert service._unit_of_work is materializer._unit_of_work
     assert service._unit_of_work._session is session
 
 
@@ -290,7 +314,7 @@ def test_taskiq_entrypoints_use_the_composition_root() -> None:
     generation = Path("src/backend/tasks/generation.py").read_text()
     delivery = Path("src/backend/tasks/delivery.py").read_text()
 
-    assert "build_series_service" in generation
+    assert "build_series_generation_service" in generation
     assert "SqlAlchemySeriesRepository" not in generation
     assert "build_reminder_dispatcher" in delivery
 

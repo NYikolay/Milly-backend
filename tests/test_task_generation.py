@@ -6,6 +6,7 @@ from typing import Any, cast
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.composition.task_management import build_series_generation_service
 from backend.tasks import generation
 from backend.tasks.generation import generate_task_series
 
@@ -38,27 +39,34 @@ def test_generation_task_has_schedule() -> None:
     assert schedule[0]["schedule_id"] == "task-series-generation"
 
 
-async def test_generation_task_delegates_to_series_service(
+async def test_generation_task_delegates_to_series_generation_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The task body calls the series service with the current UTC time."""
+    """The task body calls the series generation service with the current UTC time."""
     calls: list[datetime] = []
 
-    class FakeSeriesService:
-        """Series service double recording the generation instant."""
+    class FakeSeriesGenerationService:
+        """Series generation service double recording the generation instant."""
 
         async def generate(self, now: datetime) -> int:
             """Record the generation instant and return a fixed count."""
             calls.append(now)
             return 3
 
-    def fake_build_series_service(session: AsyncSession) -> FakeSeriesService:
-        """Return the series service double for the supplied job session."""
+    def fake_build_series_generation_service(
+        session: AsyncSession,
+    ) -> FakeSeriesGenerationService:
+        """Return the generation service double for the supplied job session."""
         constructed["session"] = session
-        return FakeSeriesService()
+        return FakeSeriesGenerationService()
 
     constructed: dict[str, object] = {}
-    monkeypatch.setattr(generation, "build_series_service", fake_build_series_service)
+    assert cast(Any, generation).build_series_generation_service is build_series_generation_service
+    monkeypatch.setattr(
+        generation,
+        "build_series_generation_service",
+        fake_build_series_generation_service,
+    )
     monkeypatch.setattr(generation, "datetime", FixedDateTime)
 
     session = cast(AsyncSession, object())
