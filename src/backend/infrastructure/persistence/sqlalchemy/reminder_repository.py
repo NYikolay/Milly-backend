@@ -10,7 +10,6 @@ from zoneinfo import ZoneInfoNotFoundError
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.core.errors import BadRequestError
 from backend.domain.entities import ReminderDelivery, TaskReminder
 from backend.domain.enums import DeliveryStatus, ReminderKind
 from backend.domain.task_management.policies import rebuild_reminder_slot
@@ -484,7 +483,7 @@ class SqlAlchemyReminderRepository:
                         due_at=task.due_at,
                         now=now,
                     )
-                except (ZoneInfoNotFoundError, ValueError, BadRequestError):  # fmt: skip
+                except (ZoneInfoNotFoundError, ValueError):  # fmt: skip
                     reminder.next_run_at = None
                 apply_reminder(reminder, row)
         await self._session.flush()

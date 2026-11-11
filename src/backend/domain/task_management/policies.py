@@ -6,9 +6,9 @@ from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from backend.core.errors import BadRequestError
 from backend.domain.entities import TaskReminder
 from backend.domain.enums import ReminderKind
+from backend.domain.task_management.errors import ReminderConfigurationError
 from backend.domain.task_management.models import ReminderInput
 
 MIN_SUPPORTED_DATE: date = date(2025, 1, 1)
@@ -508,30 +508,30 @@ def validate_reminder_inputs(
         tuple[ReminderInput, ...]: The validated rules in input order.
 
     Raises:
-        BadRequestError: If a rule is incomplete, inconsistent, duplicated, or
+        ReminderConfigurationError: If a rule is incomplete, inconsistent, duplicated, or
             carries a timezone-aware ``time_of_day``.
     """
     seen: set[ReminderKind] = set()
     for reminder in reminders:
         if reminder.kind in seen:
-            raise BadRequestError(_DUPLICATE_REMINDER)
+            raise ReminderConfigurationError(_DUPLICATE_REMINDER)
         seen.add(reminder.kind)
         if reminder.time_of_day is not None and (
             reminder.time_of_day.tzinfo is not None or reminder.time_of_day.utcoffset() is not None
         ):
-            raise BadRequestError(_INVALID_REMINDER)
+            raise ReminderConfigurationError(_INVALID_REMINDER)
         if reminder.kind is ReminderKind.BEFORE_DUE:
             if reminder.offset_minutes is None or reminder.offset_minutes < 0:
-                raise BadRequestError(_INVALID_REMINDER)
+                raise ReminderConfigurationError(_INVALID_REMINDER)
             if reminder.interval_days is not None or reminder.time_of_day is not None:
-                raise BadRequestError(_INVALID_REMINDER)
+                raise ReminderConfigurationError(_INVALID_REMINDER)
         elif reminder.kind is ReminderKind.SCHEDULED:
             if reminder.interval_days is None or reminder.interval_days < 1:
-                raise BadRequestError(_INVALID_REMINDER)
+                raise ReminderConfigurationError(_INVALID_REMINDER)
             if reminder.time_of_day is None or reminder.offset_minutes is not None:
-                raise BadRequestError(_INVALID_REMINDER)
+                raise ReminderConfigurationError(_INVALID_REMINDER)
         else:
-            raise BadRequestError(_INVALID_REMINDER)
+            raise ReminderConfigurationError(_INVALID_REMINDER)
     return tuple(reminders)
 
 
@@ -567,7 +567,7 @@ def build_task_reminder(
             before-due moment has passed.
 
     Raises:
-        BadRequestError: If the reminder schedule overflows the datetime range.
+        ReminderConfigurationError: If the reminder schedule overflows the datetime range.
 
     Notes:
         - A supplied ``scheduled_starts_on`` keeps scheduled slots on the
@@ -581,7 +581,7 @@ def build_task_reminder(
                 offset_minutes=reminder.offset_minutes or 0,
             )
         except OverflowError as error:
-            raise BadRequestError(_INVALID_REMINDER) from error
+            raise ReminderConfigurationError(_INVALID_REMINDER) from error
         if slot <= now:
             return None
         return TaskReminder(
@@ -614,7 +614,7 @@ def build_task_reminder(
                 now=now,
             )
     except OverflowError as error:
-        raise BadRequestError(_INVALID_REMINDER) from error
+        raise ReminderConfigurationError(_INVALID_REMINDER) from error
     return TaskReminder(
         user_id=user_id,
         task_id=task_id,
@@ -711,7 +711,7 @@ def next_reminder_slot(
         datetime | None: The next future slot, or ``None`` for before-due rules.
 
     Raises:
-        BadRequestError: If advancing the schedule overflows the datetime range.
+        ReminderConfigurationError: If advancing the schedule overflows the datetime range.
 
     Notes:
         - Stale slots are skipped in whole intervals using date arithmetic,
@@ -734,7 +734,7 @@ def next_reminder_slot(
             current_date += timedelta(days=interval_days)
             slot = localize_wall_time(current_date, time_of_day, timezone)
     except OverflowError as error:
-        raise BadRequestError(_INVALID_REMINDER) from error
+        raise ReminderConfigurationError(_INVALID_REMINDER) from error
     return slot
 
 
@@ -760,7 +760,7 @@ def rebuild_reminder_slot(
             before-due moment has passed.
 
     Raises:
-        BadRequestError: If the reminder schedule overflows the datetime range.
+        ReminderConfigurationError: If the reminder schedule overflows the datetime range.
     """
     if reminder.kind == ReminderKind.BEFORE_DUE.value:
         try:
@@ -769,7 +769,7 @@ def rebuild_reminder_slot(
                 offset_minutes=reminder.offset_minutes or 0,
             )
         except OverflowError as error:
-            raise BadRequestError(_INVALID_REMINDER) from error
+            raise ReminderConfigurationError(_INVALID_REMINDER) from error
         return slot if slot > now else None
     try:
         return first_scheduled_time(
@@ -780,4 +780,4 @@ def rebuild_reminder_slot(
             now=now,
         )
     except OverflowError as error:
-        raise BadRequestError(_INVALID_REMINDER) from error
+        raise ReminderConfigurationError(_INVALID_REMINDER) from error

@@ -19,6 +19,7 @@ from backend.application.ports.unit_of_work import UnitOfWork
 from backend.core.errors import BadRequestError, NotFoundError
 from backend.domain.entities import Task, TaskLabel, TaskReminder, TaskSeries
 from backend.domain.enums import Priority, ReminderKind, SeriesFrequency
+from backend.domain.task_management.errors import ReminderConfigurationError
 from backend.domain.task_management.models import (
     UNSET,
     ReminderInput,
@@ -250,7 +251,10 @@ class SeriesService:
         )
         await self._validate_project(user_id, project_id)
         owned_label_ids = await self._validate_labels(user_id, label_ids)
-        validated_reminders = validate_reminder_inputs(reminders)
+        try:
+            validated_reminders = validate_reminder_inputs(reminders)
+        except ReminderConfigurationError as error:
+            raise BadRequestError(str(error)) from error
         series = TaskSeries(
             user_id=user_id,
             project_id=project_id,
@@ -492,7 +496,13 @@ class SeriesService:
         owned_label_ids = (
             await self._validate_labels(user_id, label_ids) if label_ids is not None else None
         )
-        validated_reminders = validate_reminder_inputs(reminders) if reminders is not None else None
+        if reminders is None:
+            validated_reminders = None
+        else:
+            try:
+                validated_reminders = validate_reminder_inputs(reminders)
+            except ReminderConfigurationError as error:
+                raise BadRequestError(str(error)) from error
         timezone_changed = zone.key != series.timezone
         frequency_changed = resolved_frequency.value != series.frequency
         interval_changed = resolved_interval_days != series.interval_days
@@ -949,15 +959,18 @@ class SeriesService:
             if is_periodic and template.kind == ReminderKind.SCHEDULED.value
             else None
         )
-        return build_task_reminder(
-            reminder_input_from_row(template),
-            user_id=template.user_id,
-            task_id=task_id,
-            due_at=due_at,
-            timezone_name=timezone_name,
-            now=now,
-            scheduled_starts_on=scheduled_starts_on,
-        )
+        try:
+            return build_task_reminder(
+                reminder_input_from_row(template),
+                user_id=template.user_id,
+                task_id=task_id,
+                due_at=due_at,
+                timezone_name=timezone_name,
+                now=now,
+                scheduled_starts_on=scheduled_starts_on,
+            )
+        except ReminderConfigurationError as error:
+            raise BadRequestError(str(error)) from error
 
     async def _update_future_instances(
         self,

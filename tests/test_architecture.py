@@ -176,3 +176,11 @@ def test_removed_legacy_composite_modules_are_absent() -> None:
     """The dead composite facade is not kept as a second persistence contract."""
     for path in REMOVED_LEGACY_MODULES:
         assert not path.exists(), f"{path} must be removed"
+
+
+def test_domain_does_not_import_core_errors() -> None:
+    """Domain policies are independent of the transport error registry."""
+    for path in Path("src/backend/domain").rglob("*.py"):
+        for imported in _imports(path):
+            assert imported != "backend.core.errors", f"{path}: {imported}"
+            assert not imported.startswith("backend.core.errors."), f"{path}: {imported}"

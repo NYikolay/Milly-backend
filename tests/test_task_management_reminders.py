@@ -1164,3 +1164,13 @@ async def test_sent_mark_is_committed_before_slot_update(
     assert resumed == 0
     assert len(sender.calls) == 1
     assert reminder.next_run_at == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
+
+
+def test_domain_reminder_validation_uses_domain_error() -> None:
+    """Domain policies do not raise the transport-level BadRequestError."""
+    from backend.domain.task_management.errors import ReminderConfigurationError
+    from backend.domain.task_management.models import ReminderInput
+    from backend.domain.task_management.policies import validate_reminder_inputs
+
+    with pytest.raises(ReminderConfigurationError):
+        validate_reminder_inputs([ReminderInput(kind=ReminderKind.BEFORE_DUE, enabled=True)])

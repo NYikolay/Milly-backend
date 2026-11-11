@@ -20,6 +20,7 @@ from backend.application.ports.unit_of_work import UnitOfWork
 from backend.core.errors import BadRequestError, NotFoundError
 from backend.domain.entities import Task, TaskSeries
 from backend.domain.enums import Priority, SeriesFrequency, TaskRecurrence
+from backend.domain.task_management.errors import ReminderConfigurationError
 from backend.domain.task_management.models import (
     UNSET,
     ReminderInput,
@@ -282,7 +283,10 @@ class TaskService:
         self._validate_due_at(due_at)
         await self._validate_project(user_id, project_id)
         owned_label_ids = await self._validate_labels(user_id, label_ids)
-        validated_reminders = validate_reminder_inputs(reminders)
+        try:
+            validated_reminders = validate_reminder_inputs(reminders)
+        except ReminderConfigurationError as error:
+            raise BadRequestError(str(error)) from error
         zone = await self._user_timezone(user_id)
         now = self._clock()
         task = Task(
@@ -299,14 +303,17 @@ class TaskService:
         task = await self._repository.add_task(task)
         await self._repository.add_task_labels(task.id, user_id, owned_label_ids)
         for reminder in validated_reminders:
-            row = build_task_reminder(
-                reminder,
-                user_id=user_id,
-                task_id=task.id,
-                due_at=due_at,
-                timezone_name=zone.key,
-                now=now,
-            )
+            try:
+                row = build_task_reminder(
+                    reminder,
+                    user_id=user_id,
+                    task_id=task.id,
+                    due_at=due_at,
+                    timezone_name=zone.key,
+                    now=now,
+                )
+            except ReminderConfigurationError as error:
+                raise BadRequestError(str(error)) from error
             if row is not None:
                 await self._reminder_repository.add_reminder(row)
         await self._unit_of_work.flush()
@@ -386,92 +393,95 @@ class TaskService:
               row; one-off tasks lock only the task row.
             - Does not commit.
         """
-        self._validate_recurrence_interval(recurrence, interval_days)
-        task, series = await self._lock_update_target(user_id, task_id)
+        try:
+            self._validate_recurrence_interval(recurrence, interval_days)
+            task, series = await self._lock_update_target(user_id, task_id)
 
-        if series is None:
-            return await self._update_detached_task(
-                user_id,
-                task,
-                title=title,
-                description=description,
-                priority=priority,
-                due_at=due_at,
-                project_id=project_id,
-                label_ids=label_ids,
-                reminders_enabled=reminders_enabled,
-                reminders=reminders,
-                recurrence=recurrence,
-                interval_days=interval_days,
-            )
-
-        if recurrence is TaskRecurrence.ONE_OFF:
-            anchor = series.starts_on
-            series_interval_days = series.interval_days
-            zone = ZoneInfo(series.timezone)
-            await self._series_operations.detach_task(user_id, task, series)
-            now = self._clock()
-            final_due_at = due_at if due_at is not None else task.due_at
-            will_shift = (
-                task.completed_at is None
-                and final_due_at.tzinfo is not None
-                and final_due_at.utcoffset() is not None
-                and final_due_at <= now
-            )
-            await self._apply_task_update(
-                user_id,
-                task,
-                title=title,
-                description=description,
-                priority=priority,
-                due_at=due_at,
-                project_id=project_id,
-                label_ids=label_ids,
-                reminders_enabled=reminders_enabled,
-                reminders=reminders,
-                defer_reminder_rebuild=will_shift,
-            )
-            if will_shift:
-                await self._shift_overdue_task(
+            if series is None:
+                return await self._update_detached_task(
                     user_id,
                     task,
-                    anchor=anchor,
-                    interval_days=series_interval_days,
-                    timezone=zone,
+                    title=title,
+                    description=description,
+                    priority=priority,
+                    due_at=due_at,
+                    project_id=project_id,
+                    label_ids=label_ids,
+                    reminders_enabled=reminders_enabled,
                     reminders=reminders,
+                    recurrence=recurrence,
+                    interval_days=interval_days,
                 )
-            await self._repository.save_task(task)
-            await self._unit_of_work.flush()
-            return await self._detail(user_id, task)
 
-        if (
-            recurrence is None
-            and interval_days is not None
-            and series.frequency != SeriesFrequency.PERIODIC.value
-        ):
-            raise BadRequestError(_INVALID_RECURRENCE_INTERVAL)
-        frequency: SeriesFrequency | None = None
-        resolved_interval_days = interval_days
-        if recurrence is TaskRecurrence.REGULAR:
-            frequency = SeriesFrequency.DAILY
-            resolved_interval_days = 1
-        elif recurrence is TaskRecurrence.PERIODIC:
-            frequency = SeriesFrequency.PERIODIC
-        return await self._update_series_task(
-            user_id,
-            task,
-            series,
-            title=title,
-            description=description,
-            priority=priority,
-            due_at=due_at,
-            project_id=project_id,
-            label_ids=label_ids,
-            reminders_enabled=reminders_enabled,
-            reminders=reminders,
-            frequency=frequency,
-            interval_days=resolved_interval_days,
-        )
+            if recurrence is TaskRecurrence.ONE_OFF:
+                anchor = series.starts_on
+                series_interval_days = series.interval_days
+                zone = ZoneInfo(series.timezone)
+                await self._series_operations.detach_task(user_id, task, series)
+                now = self._clock()
+                final_due_at = due_at if due_at is not None else task.due_at
+                will_shift = (
+                    task.completed_at is None
+                    and final_due_at.tzinfo is not None
+                    and final_due_at.utcoffset() is not None
+                    and final_due_at <= now
+                )
+                await self._apply_task_update(
+                    user_id,
+                    task,
+                    title=title,
+                    description=description,
+                    priority=priority,
+                    due_at=due_at,
+                    project_id=project_id,
+                    label_ids=label_ids,
+                    reminders_enabled=reminders_enabled,
+                    reminders=reminders,
+                    defer_reminder_rebuild=will_shift,
+                )
+                if will_shift:
+                    await self._shift_overdue_task(
+                        user_id,
+                        task,
+                        anchor=anchor,
+                        interval_days=series_interval_days,
+                        timezone=zone,
+                        reminders=reminders,
+                    )
+                await self._repository.save_task(task)
+                await self._unit_of_work.flush()
+                return await self._detail(user_id, task)
+
+            if (
+                recurrence is None
+                and interval_days is not None
+                and series.frequency != SeriesFrequency.PERIODIC.value
+            ):
+                raise BadRequestError(_INVALID_RECURRENCE_INTERVAL)
+            frequency: SeriesFrequency | None = None
+            resolved_interval_days = interval_days
+            if recurrence is TaskRecurrence.REGULAR:
+                frequency = SeriesFrequency.DAILY
+                resolved_interval_days = 1
+            elif recurrence is TaskRecurrence.PERIODIC:
+                frequency = SeriesFrequency.PERIODIC
+            return await self._update_series_task(
+                user_id,
+                task,
+                series,
+                title=title,
+                description=description,
+                priority=priority,
+                due_at=due_at,
+                project_id=project_id,
+                label_ids=label_ids,
+                reminders_enabled=reminders_enabled,
+                reminders=reminders,
+                frequency=frequency,
+                interval_days=resolved_interval_days,
+            )
+        except ReminderConfigurationError as error:
+            raise BadRequestError(str(error)) from error
 
     async def _update_detached_task(
         self,
@@ -823,9 +833,13 @@ class TaskService:
             )
         task.completed_at = None
         for reminder in await self._reminder_repository.list_task_reminders(user_id, task.id):
+            try:
+                next_run_at = rebuild_reminder_slot(reminder, due_at=task.due_at, now=now)
+            except ReminderConfigurationError as error:
+                raise BadRequestError(str(error)) from error
             await self._reminder_repository.update_reminder_next_run_at(
                 reminder,
-                rebuild_reminder_slot(reminder, due_at=task.due_at, now=now),
+                next_run_at,
             )
         await self._repository.save_task(task)
         if was_completed and series is not None and series.deleted_at is not None:
@@ -1120,24 +1134,29 @@ class TaskService:
             - Does not commit.
         """
         existing = await self._reminder_repository.list_task_reminders(user_id, task.id)
-        configs = (
-            validate_reminder_inputs(reminders)
-            if reminders is not None
-            else tuple(reminder_input_from_row(reminder) for reminder in existing)
-        )
+        if reminders is not None:
+            try:
+                configs = validate_reminder_inputs(reminders)
+            except ReminderConfigurationError as error:
+                raise BadRequestError(str(error)) from error
+        else:
+            configs = tuple(reminder_input_from_row(reminder) for reminder in existing)
         zone = await self._user_timezone(user_id)
         now = self._clock()
         await self._reminder_repository.cancel_task_reminders(user_id, task.id)
         await self._reminder_repository.delete_task_reminders(user_id, task.id)
         for config in configs:
-            row = build_task_reminder(
-                config,
-                user_id=user_id,
-                task_id=task.id,
-                due_at=task.due_at,
-                timezone_name=zone.key,
-                now=now,
-            )
+            try:
+                row = build_task_reminder(
+                    config,
+                    user_id=user_id,
+                    task_id=task.id,
+                    due_at=task.due_at,
+                    timezone_name=zone.key,
+                    now=now,
+                )
+            except ReminderConfigurationError as error:
+                raise BadRequestError(str(error)) from error
             if row is not None:
                 await self._reminder_repository.add_reminder(row)
 
