@@ -11,7 +11,7 @@ from urllib.request import Request
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.auth.errors import AuthNotConfiguredError
+from backend.application.auth.errors import AuthNotConfiguredError
 from backend.core.config import Settings
 from backend.infrastructure.telegram import sender as telegram_sender
 from backend.infrastructure.telegram.sender import TelegramBotSender

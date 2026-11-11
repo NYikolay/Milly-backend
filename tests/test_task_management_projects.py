@@ -573,7 +573,7 @@ async def test_unarchive_rebuilds_every_series_and_task_reminder() -> None:
     """Unarchiving a project mutates reminder slots for every series and task."""
     from datetime import date, time, timedelta
 
-    from backend.task_management.enums import ReminderKind
+    from backend.domain.enums import ReminderKind
     from tests.task_management_fakes import (
         make_reminder,
         make_series,

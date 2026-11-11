@@ -15,9 +15,9 @@ from backend.domain.entities import (
     TaskReminder,
     TaskSeries,
 )
+from backend.domain.enums import DeliveryStatus, ReminderKind, SeriesFrequency
 from backend.domain.task_management.models import ProjectReminderContext
 from backend.domain.task_management.policies import HORIZON_DAYS
-from backend.task_management.enums import DeliveryStatus, ReminderKind, SeriesFrequency
 
 _ACTIVE_DELIVERY_STATUSES = {
     DeliveryStatus.PENDING.value,

@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from backend.api.deps import get_current_access, get_palette_service
-from backend.auth.tokens import AccessTokenClaims
+from backend.domain.auth.models import AccessTokenClaims
 from backend.domain.entities import ColorPalette
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)

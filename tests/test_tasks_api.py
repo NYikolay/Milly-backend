@@ -16,16 +16,16 @@ from backend.api.deps import (
 from backend.api.pagination import MAX_DB_ID, encode_cursor, filter_fingerprint
 from backend.application.task_management.task_details import TaskDetails
 from backend.application.task_management.task_references import TaskReferences
-from backend.auth.tokens import AccessTokenClaims
+from backend.application.task_management.tasks import TaskService
 from backend.core.errors import NotFoundError
+from backend.domain.auth.models import AccessTokenClaims
 from backend.domain.entities import Label, Task, TaskReminder
-from backend.task_management.enums import Priority, ReminderKind, TaskRecurrence
-from backend.task_management.tasks import (
+from backend.domain.enums import Priority, ReminderKind, TaskRecurrence
+from backend.domain.task_management.models import (
     TaskDetail,
     TaskFilters,
     TaskListCursor,
     TaskPage,
-    TaskService,
 )
 from tests.task_management_fakes import FakeTaskManagementRepository, fixed_now
 

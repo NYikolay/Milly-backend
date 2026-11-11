@@ -1117,7 +1117,7 @@ async def test_pause_project_reminders_clears_slots_and_cancels_deliveries() -> 
 
 async def test_list_project_reminder_contexts_reads_series_and_task_contexts() -> None:
     """Context reads return mapped reminders without mutating or flushing."""
-    from backend.task_management.enums import ReminderKind
+    from backend.domain.enums import ReminderKind
 
     series = make_series(
         series_id=3,

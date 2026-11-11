@@ -5,14 +5,14 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from backend.task_management.enums import (
+from backend.domain.enums import (
     DeliveryStatus,
     Priority,
     ReminderKind,
     SeriesFrequency,
     TaskRecurrence,
 )
-from backend.task_management.schedule import (
+from backend.domain.task_management.policies import (
     before_due_time,
     first_scheduled_time,
     localize_wall_time,

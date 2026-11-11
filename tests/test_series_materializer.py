@@ -9,8 +9,8 @@ from backend.application.task_management.series_materializer import SeriesMateri
 from backend.application.task_management.series_reminders import build_instance_reminder
 from backend.application.task_management.task_references import TaskReferences
 from backend.core.errors import BadRequestError
+from backend.domain.enums import Priority, ReminderKind
 from backend.domain.task_management.models import ReminderInput
-from backend.task_management.enums import Priority, ReminderKind
 from tests.task_management_fakes import (
     FakeTaskManagementRepository,
     fixed_now,

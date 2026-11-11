@@ -22,31 +22,12 @@ FORBIDDEN = (
     "backend.composition",
     "backend.core.config",
     "backend.core.middleware",
-    "backend.task_management",
-    "backend.auth",
-)
-
-COMPATIBILITY_SHIMS = (
-    Path("src/backend/task_management/enums.py"),
-    Path("src/backend/task_management/date_bounds.py"),
-    Path("src/backend/task_management/schedule.py"),
-    Path("src/backend/task_management/tasks.py"),
-    Path("src/backend/task_management/palette.py"),
-    Path("src/backend/task_management/labels.py"),
-    Path("src/backend/task_management/projects.py"),
-    Path("src/backend/task_management/series.py"),
-    Path("src/backend/task_management/reminders.py"),
-    Path("src/backend/auth/service.py"),
-    Path("src/backend/auth/repository.py"),
-    Path("src/backend/auth/cookies.py"),
-    Path("src/backend/auth/tokens.py"),
-    Path("src/backend/auth/init_data.py"),
-    Path("src/backend/auth/errors.py"),
-    Path("src/backend/auth/schemas.py"),
-    Path("src/backend/tasks/telegram.py"),
 )
 
 REMOVED_LEGACY_MODULES = (
+    Path("src/backend/task_management"),
+    Path("src/backend/auth"),
+    Path("src/backend/tasks/telegram.py"),
     Path("src/backend/application/ports/legacy.py"),
     Path("src/backend/infrastructure/persistence/sqlalchemy/legacy.py"),
     Path("src/backend/task_management/ports.py"),
@@ -103,30 +84,6 @@ def _imports(path: Path) -> set[str]:
     return result
 
 
-def _defines_implementation(path: Path) -> bool:
-    """Return whether a module defines its own class or function at module level."""
-    tree = ast.parse(path.read_text())
-    return any(
-        isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef))
-        for node in tree.body
-    )
-
-
-def _declares_all(path: Path) -> bool:
-    """Return whether a module assigns ``__all__`` at module level."""
-    tree = ast.parse(path.read_text())
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            targets = node.targets
-        elif isinstance(node, ast.AnnAssign):
-            targets = [node.target]
-        else:
-            continue
-        if any(isinstance(target, ast.Name) and target.id == "__all__" for target in targets):
-            return True
-    return False
-
-
 def test_domain_and_application_do_not_import_outer_layers() -> None:
     """Inner layers never depend on frameworks, adapters, or the composition root."""
     roots = [Path("src/backend/domain"), Path("src/backend/application")]
@@ -172,15 +129,8 @@ def test_import_collector_resolves_relative_imports(tmp_path: Path) -> None:
     assert "backend.application.ports" in imports
 
 
-def test_compatibility_modules_are_shims_only() -> None:
-    """Old module paths re-export new layers instead of owning implementations."""
-    for path in COMPATIBILITY_SHIMS:
-        assert not _defines_implementation(path), f"{path} defines its own implementation"
-        assert _declares_all(path), f"{path} must declare __all__"
-
-
-def test_removed_legacy_composite_modules_are_absent() -> None:
-    """The dead composite facade is not kept as a second persistence contract."""
+def test_removed_legacy_modules_are_absent() -> None:
+    """Dead composite facades and compatibility packages are not kept around."""
     for path in REMOVED_LEGACY_MODULES:
         assert not path.exists(), f"{path} must be removed"
 

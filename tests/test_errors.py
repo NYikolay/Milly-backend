@@ -11,7 +11,7 @@ from starlette.types import Scope
 
 from backend.api.errors.handlers import render_error_response
 from backend.api.errors.mapping import payload_from_app_error
-from backend.auth.errors import AuthNotConfiguredError
+from backend.application.auth.errors import AuthNotConfiguredError
 from backend.core.config import Settings
 from backend.core.errors import AppError, ErrorCode, NotFoundError, UnauthorizedError
 from backend.main import create_app

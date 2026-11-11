@@ -10,8 +10,8 @@ from httpx import ASGITransport, AsyncClient
 from backend.api.deps import get_current_access, get_project_service
 from backend.api.pagination import MAX_DB_ID, encode_cursor, filter_fingerprint
 from backend.api.routes import projects as projects_routes
-from backend.auth.tokens import AccessTokenClaims
 from backend.core.errors import ConflictError, NotFoundError
+from backend.domain.auth.models import AccessTokenClaims
 from backend.domain.entities import ColorPalette, Project
 from backend.domain.task_management.models import (
     ProjectListCursor,

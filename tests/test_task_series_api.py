@@ -9,11 +9,11 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from backend.api.deps import get_current_access, get_series_service
-from backend.auth.tokens import AccessTokenClaims
 from backend.core.errors import NotFoundError
+from backend.domain.auth.models import AccessTokenClaims
 from backend.domain.entities import Label, TaskReminder, TaskSeries
-from backend.task_management.enums import Priority, ReminderKind
-from backend.task_management.series import SeriesDetail
+from backend.domain.enums import Priority, ReminderKind
+from backend.domain.task_management.models import SeriesDetail
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
 GENERATED_THROUGH = datetime(2027, 1, 2, 9, 0, tzinfo=UTC)

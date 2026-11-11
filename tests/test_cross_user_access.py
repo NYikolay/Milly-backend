@@ -15,17 +15,17 @@ from backend.api.deps import (
     get_task_mutation_service,
     get_task_service,
 )
+from backend.application.task_management.labels import LabelService
+from backend.application.task_management.palette import PaletteService
 from backend.application.task_management.project_reminders import ProjectReminderService
+from backend.application.task_management.projects import ProjectService
+from backend.application.task_management.series import SeriesService
 from backend.application.task_management.series_materializer import SeriesMaterializer
 from backend.application.task_management.task_details import TaskDetails
 from backend.application.task_management.task_mutations import TaskMutationService
 from backend.application.task_management.task_references import TaskReferences
-from backend.auth.tokens import AccessTokenClaims
-from backend.task_management.labels import LabelService
-from backend.task_management.palette import PaletteService
-from backend.task_management.projects import ProjectService
-from backend.task_management.series import SeriesService
-from backend.task_management.tasks import TaskService
+from backend.application.task_management.tasks import TaskService
+from backend.domain.auth.models import AccessTokenClaims
 from tests.task_management_fakes import (
     FakeTaskManagementRepository,
     make_label,

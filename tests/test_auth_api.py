@@ -471,5 +471,3 @@ def test_auth_route_uses_api_modules_and_mappers() -> None:
     assert "from backend.api.auth.cookies import" in source
     assert "from backend.api.auth.schemas import" in source
     assert "from backend.api.mappers.auth import" in source
-    assert "backend.auth.cookies" not in source
-    assert "backend.auth.schemas" not in source

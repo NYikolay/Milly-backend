@@ -23,7 +23,6 @@ from backend.api.deps import (
     get_task_service,
 )
 from backend.application.auth.service import AuthService
-from backend.application.ports.collaborators import ReminderSender
 from backend.application.task_management.labels import LabelService
 from backend.application.task_management.palette import PaletteService
 from backend.application.task_management.project_reminders import ProjectReminderService
@@ -69,7 +68,6 @@ from backend.infrastructure.persistence.sqlalchemy.task_repository import (
 from backend.infrastructure.persistence.sqlalchemy.unit_of_work import (
     SqlAlchemyUnitOfWork,
 )
-from backend.infrastructure.telegram.sender import TelegramBotSender
 from tests.task_management_fakes import FakeSender, fixed_now
 
 
@@ -417,41 +415,6 @@ def test_taskiq_entrypoints_use_the_composition_root() -> None:
     assert "build_series_generation_service" in generation
     assert "SqlAlchemySeriesRepository" not in generation
     assert "build_reminder_dispatcher" in delivery
-
-
-def test_compatibility_modules_reexport_new_layers() -> None:
-    """Legacy module paths expose the application, domain, and infrastructure symbols."""
-    from backend.application.ports.auth import AuthRepository
-    from backend.auth.repository import AuthRepository as LegacyAuthRepository
-    from backend.auth.repository import (
-        SqlAlchemyAuthRepository as LegacyAuthRepositoryAdapter,
-    )
-    from backend.auth.service import AuthService as LegacyAuthService
-    from backend.infrastructure.persistence.sqlalchemy.auth_repository import (
-        SqlAlchemyAuthRepository,
-    )
-    from backend.task_management.labels import LabelService as LegacyLabelService
-    from backend.task_management.palette import PaletteService as LegacyPaletteService
-    from backend.task_management.projects import ProjectService as LegacyProjectService
-    from backend.task_management.series import SeriesService as LegacySeriesService
-    from backend.task_management.tasks import TaskService as LegacyTaskService
-
-    assert LegacyAuthService is AuthService
-    assert LegacyAuthRepository is AuthRepository
-    assert LegacyAuthRepositoryAdapter is SqlAlchemyAuthRepository
-    assert LegacyPaletteService is PaletteService
-    assert LegacyProjectService is ProjectService
-    assert LegacyLabelService is LabelService
-    assert LegacySeriesService is SeriesService
-    assert LegacyTaskService is TaskService
-
-
-def test_telegram_modules_reexport_the_reminder_sender_contract() -> None:
-    """The old Taskiq telegram path exposes the infrastructure sender and port alias."""
-    from backend.tasks import telegram as legacy_telegram
-
-    assert legacy_telegram.TelegramBotSender is TelegramBotSender
-    assert legacy_telegram.TelegramSender is ReminderSender
 
 
 def test_fixed_now_is_timezone_aware() -> None:

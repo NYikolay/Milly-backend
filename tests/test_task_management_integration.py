@@ -7,6 +7,7 @@ from typing import Any, cast
 import pytest
 
 from backend.api.pagination import DEFAULT_PAGE_SIZE
+from backend.application.task_management.palette import PaletteService
 from backend.application.task_management.project_reminders import ProjectReminderService
 from backend.application.task_management.projects import ProjectService
 from backend.application.task_management.reminders import ReminderDispatcher
@@ -19,11 +20,10 @@ from backend.application.task_management.task_details import TaskDetails
 from backend.application.task_management.task_references import TaskReferences
 from backend.application.task_management.tasks import TaskFilters, TaskService
 from backend.core.errors import NotFoundError
+from backend.domain.enums import Priority, ReminderKind
 from backend.domain.task_management.models import ReminderInput
 from backend.domain.task_management.policies import HORIZON_DAYS
 from backend.models.color_palette import ColorPalette
-from backend.task_management.enums import Priority, ReminderKind
-from backend.task_management.palette import PaletteService
 from tests.task_management_fakes import (
     FakeSender,
     FakeTaskManagementRepository,

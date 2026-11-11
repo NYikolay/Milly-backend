@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from backend.api.errors.status import ERROR_STATUS_CODES, status_code_for
-from backend.auth.errors import AuthNotConfiguredError
+from backend.application.auth.errors import AuthNotConfiguredError
 from backend.core.errors import (
     ERROR_SPECS,
     ErrorCode,

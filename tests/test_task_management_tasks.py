@@ -8,7 +8,9 @@ import pytest
 
 from backend.api.pagination import DEFAULT_PAGE_SIZE
 from backend.application.ports.collaborators import SeriesOperations
+from backend.application.task_management.palette import PaletteService
 from backend.application.task_management.project_reminders import ProjectReminderService
+from backend.application.task_management.projects import ProjectService
 from backend.application.task_management.series import SeriesService
 from backend.application.task_management.series_materializer import SeriesMaterializer
 from backend.application.task_management.task_details import TaskDetails
@@ -23,8 +25,6 @@ from backend.core.errors import BadRequestError, ErrorCode, NotFoundError
 from backend.domain.entities import Task, TaskSeries
 from backend.domain.enums import Priority, ReminderKind, TaskRecurrence
 from backend.domain.task_management.models import ReminderInput
-from backend.task_management.palette import PaletteService
-from backend.task_management.projects import ProjectService
 from tests.task_management_fakes import (
     FakeTaskManagementRepository,
     fixed_now,
