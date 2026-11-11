@@ -9,6 +9,16 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.application.ports.collaborators import ReminderSender
+from backend.application.ports.task_management import (
+    AccountRepository,
+    LabelRepository,
+    PaletteRepository,
+    ProjectRepository,
+    ReminderRepository,
+    SeriesRepository,
+    TaskRepository,
+)
+from backend.application.ports.unit_of_work import UnitOfWork
 from backend.application.task_management.labels import LabelService
 from backend.application.task_management.palette import PaletteService
 from backend.application.task_management.project_reminders import ProjectReminderService
@@ -49,6 +59,7 @@ from backend.infrastructure.persistence.sqlalchemy.unit_of_work import (
 )
 
 __all__ = [
+    "TaskManagementAdapters",
     "TaskManagementServices",
     "build_palette_service",
     "build_reminder_dispatcher",
@@ -59,6 +70,51 @@ __all__ = [
 
 Clock = Callable[[], datetime]
 Monotonic = Callable[[], float]
+
+
+@dataclass(frozen=True)
+class TaskManagementAdapters:
+    """Concrete aggregate adapters and transaction boundary sharing one session."""
+
+    palette: PaletteRepository
+    account: AccountRepository
+    projects: ProjectRepository
+    labels: LabelRepository
+    tasks: TaskRepository
+    series: SeriesRepository
+    reminders: ReminderRepository
+    unit_of_work: UnitOfWork
+
+
+def _build_task_management_adapters(session: AsyncSession) -> TaskManagementAdapters:
+    """
+    Select every task-management adapter for the supplied session.
+
+    Purpose:
+        Give every API dependency and worker factory one adapter graph so
+        services, repositories, and the unit of work share one session.
+
+    Args:
+        session: Request- or job-scoped async session owning the transaction.
+
+    Returns:
+        TaskManagementAdapters: Palette, account, project, label, task, series,
+            and reminder adapters plus the unit of work bound to ``session``.
+
+    Notes:
+        - Constructing adapters performs no I/O and opens no transaction.
+        - Does not commit or flush.
+    """
+    return TaskManagementAdapters(
+        palette=SqlAlchemyPaletteRepository(session),
+        account=SqlAlchemyAccountRepository(session),
+        projects=SqlAlchemyProjectRepository(session),
+        labels=SqlAlchemyLabelRepository(session),
+        tasks=SqlAlchemyTaskRepository(session),
+        series=SqlAlchemySeriesRepository(session),
+        reminders=SqlAlchemyReminderRepository(session),
+        unit_of_work=SqlAlchemyUnitOfWork(session),
+    )
 
 
 @dataclass(frozen=True)
@@ -94,66 +150,60 @@ def build_task_management_services(
             task-mutation services wired over the supplied session.
 
     Notes:
-        - Every aggregate adapter and the unit of work share the same session.
+        - Every aggregate adapter and the unit of work share the same session
+          through ``TaskManagementAdapters``.
         - The task services receive the aggregate project repository as their
           project reader so the today-progress aggregate is available.
         - Task details and reference validation are shared between the task
           query/creation and task-mutation services.
         - Does not commit, flush, or open a transaction.
     """
-    palette_repository = SqlAlchemyPaletteRepository(session)
-    account_repository = SqlAlchemyAccountRepository(session)
-    project_repository = SqlAlchemyProjectRepository(session)
-    label_repository = SqlAlchemyLabelRepository(session)
-    task_repository = SqlAlchemyTaskRepository(session)
-    series_repository = SqlAlchemySeriesRepository(session)
-    reminder_repository = SqlAlchemyReminderRepository(session)
-    unit_of_work = SqlAlchemyUnitOfWork(session)
+    adapters = _build_task_management_adapters(session)
 
-    palette = PaletteService(palette_repository)
+    palette = PaletteService(adapters.palette)
     projects = ProjectService(
-        project_repository,
+        adapters.projects,
         palette,
-        ProjectReminderService(reminder_repository),
+        ProjectReminderService(adapters.reminders),
         clock=clock,
     )
-    labels = LabelService(label_repository, palette, clock=clock)
-    references = TaskReferences(project_repository, label_repository, account_repository)
-    details = TaskDetails(task_repository, series_repository, project_repository)
+    labels = LabelService(adapters.labels, palette, clock=clock)
+    references = TaskReferences(adapters.projects, adapters.labels, adapters.account)
+    details = TaskDetails(adapters.tasks, adapters.series, adapters.projects)
     materializer = SeriesMaterializer(
-        series_repository,
-        task_repository,
-        reminder_repository,
-        project_repository,
+        adapters.series,
+        adapters.tasks,
+        adapters.reminders,
+        adapters.projects,
         references,
-        unit_of_work,
+        adapters.unit_of_work,
     )
     series = SeriesService(
-        series_repository,
-        task_repository,
-        reminder_repository,
+        adapters.series,
+        adapters.tasks,
+        adapters.reminders,
         references,
         materializer,
-        unit_of_work,
+        adapters.unit_of_work,
         clock=clock,
     )
     tasks = TaskService(
-        task_repository,
-        reminder_repository,
-        project_repository,
+        adapters.tasks,
+        adapters.reminders,
+        adapters.projects,
         references,
         details,
-        unit_of_work,
+        adapters.unit_of_work,
         clock=clock,
     )
     task_mutations = TaskMutationService(
-        task_repository,
-        series_repository,
-        reminder_repository,
+        adapters.tasks,
+        adapters.series,
+        adapters.reminders,
         references,
         details,
         series,
-        unit_of_work,
+        adapters.unit_of_work,
         clock=clock,
     )
     return TaskManagementServices(
@@ -187,32 +237,27 @@ def build_series_service(
 
     Notes:
         - Series, task, reminder, account, project, and label adapters, the
-          materializer, and the unit of work all share the same session.
+          materializer, and the unit of work all share the same session through
+          ``TaskManagementAdapters``.
         - Does not commit, flush, or open a transaction.
     """
-    account_repository = SqlAlchemyAccountRepository(session)
-    project_repository = SqlAlchemyProjectRepository(session)
-    label_repository = SqlAlchemyLabelRepository(session)
-    series_repository = SqlAlchemySeriesRepository(session)
-    task_repository = SqlAlchemyTaskRepository(session)
-    reminder_repository = SqlAlchemyReminderRepository(session)
-    references = TaskReferences(project_repository, label_repository, account_repository)
-    unit_of_work = SqlAlchemyUnitOfWork(session)
+    adapters = _build_task_management_adapters(session)
+    references = TaskReferences(adapters.projects, adapters.labels, adapters.account)
     materializer = SeriesMaterializer(
-        series_repository,
-        task_repository,
-        reminder_repository,
-        project_repository,
+        adapters.series,
+        adapters.tasks,
+        adapters.reminders,
+        adapters.projects,
         references,
-        unit_of_work,
+        adapters.unit_of_work,
     )
     return SeriesService(
-        series_repository,
-        task_repository,
-        reminder_repository,
+        adapters.series,
+        adapters.tasks,
+        adapters.reminders,
         references,
         materializer,
-        unit_of_work,
+        adapters.unit_of_work,
         clock=clock,
     )
 
@@ -238,31 +283,26 @@ def build_series_generation_service(
 
     Notes:
         - Series, task, reminder, account, project, and label adapters, the
-          materializer, and the unit of work all share the same session.
+          materializer, and the unit of work all share the same session through
+          ``TaskManagementAdapters``.
         - The materializer owns the active-project gate; the generator needs no
           separate project reader.
         - Does not commit, flush, or open a transaction.
     """
-    account_repository = SqlAlchemyAccountRepository(session)
-    project_repository = SqlAlchemyProjectRepository(session)
-    label_repository = SqlAlchemyLabelRepository(session)
-    series_repository = SqlAlchemySeriesRepository(session)
-    task_repository = SqlAlchemyTaskRepository(session)
-    reminder_repository = SqlAlchemyReminderRepository(session)
-    references = TaskReferences(project_repository, label_repository, account_repository)
-    unit_of_work = SqlAlchemyUnitOfWork(session)
+    adapters = _build_task_management_adapters(session)
+    references = TaskReferences(adapters.projects, adapters.labels, adapters.account)
     materializer = SeriesMaterializer(
-        series_repository,
-        task_repository,
-        reminder_repository,
-        project_repository,
+        adapters.series,
+        adapters.tasks,
+        adapters.reminders,
+        adapters.projects,
         references,
-        unit_of_work,
+        adapters.unit_of_work,
     )
     return SeriesGenerationService(
-        series_repository,
+        adapters.series,
         materializer,
-        unit_of_work,
+        adapters.unit_of_work,
         clock=clock,
     )
 
@@ -313,16 +353,17 @@ def build_reminder_dispatcher(
 
     Notes:
         - Reminder, task, series, project, and account adapters and the unit of
-          work all share the same session.
+          work all share the same session through ``TaskManagementAdapters``.
         - Does not commit, flush, or open a transaction.
     """
+    adapters = _build_task_management_adapters(session)
     return ReminderDispatcher(
-        SqlAlchemyReminderRepository(session),
-        SqlAlchemyTaskRepository(session),
-        SqlAlchemySeriesRepository(session),
-        SqlAlchemyProjectRepository(session),
-        SqlAlchemyAccountRepository(session),
-        SqlAlchemyUnitOfWork(session),
+        adapters.reminders,
+        adapters.tasks,
+        adapters.series,
+        adapters.projects,
+        adapters.account,
+        adapters.unit_of_work,
         sender,
         clock=clock,
         monotonic=monotonic,

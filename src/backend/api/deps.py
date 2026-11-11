@@ -15,8 +15,7 @@ from backend.application.task_management.task_mutations import TaskMutationServi
 from backend.application.task_management.tasks import TaskService
 from backend.composition.auth import build_auth_service
 from backend.composition.task_management import (
-    build_palette_service,
-    build_series_service,
+    TaskManagementServices,
     build_task_management_services,
 )
 from backend.core.config import Settings
@@ -79,16 +78,46 @@ SessionDep = Annotated[AsyncSession, Depends(get_session, scope="function")]
 DatabaseProbeDep = Annotated[DatabaseProbe, Depends(get_database_probe)]
 
 
-async def get_palette_service(session: SessionDep) -> PaletteService:
+async def get_task_management_services(session: SessionDep) -> TaskManagementServices:
     """
-    Build the palette service for the current request.
+    Build the task-management service graph for the current request.
 
     Purpose:
-        Build the palette service through the composition root using the
-        request-scoped session used for palette reads.
+        Give every task-management route dependency one shared graph so all
+        services use the same adapters, session, and unit of work.
 
     Args:
         session: Request-scoped database session.
+
+    Returns:
+        TaskManagementServices: Palette, project, label, series, task, and
+            task-mutation services backed by the request session.
+
+    Notes:
+        - FastAPI caches this dependency per request, so derived service
+          dependencies reuse one graph.
+        - The services do not commit; ``SessionDep`` owns the transaction
+          boundary.
+    """
+    return build_task_management_services(session)
+
+
+TaskManagementServicesDep = Annotated[
+    TaskManagementServices,
+    Depends(get_task_management_services),
+]
+
+
+async def get_palette_service(services: TaskManagementServicesDep) -> PaletteService:
+    """
+    Resolve the palette service from the request task-management graph.
+
+    Purpose:
+        Keep palette routes on the same request graph as the other
+        task-management routes.
+
+    Args:
+        services: Cached task-management services for the current request.
 
     Returns:
         PaletteService: Palette service backed by the request session.
@@ -97,19 +126,19 @@ async def get_palette_service(session: SessionDep) -> PaletteService:
         - The service does not commit; ``SessionDep`` owns the transaction
           boundary.
     """
-    return build_palette_service(session)
+    return services.palette
 
 
-async def get_project_service(session: SessionDep) -> ProjectService:
+async def get_project_service(services: TaskManagementServicesDep) -> ProjectService:
     """
-    Build the project service for the current request.
+    Resolve the project service from the request task-management graph.
 
     Purpose:
-        Build the project service through the composition root using the
-        request-scoped session used by project routes.
+        Keep project routes on the same request graph as the other
+        task-management routes.
 
     Args:
-        session: Request-scoped database session.
+        services: Cached task-management services for the current request.
 
     Returns:
         ProjectService: Project service backed by the request session.
@@ -118,19 +147,19 @@ async def get_project_service(session: SessionDep) -> ProjectService:
         - The service does not commit; ``SessionDep`` owns the transaction
           boundary.
     """
-    return build_task_management_services(session).projects
+    return services.projects
 
 
-async def get_label_service(session: SessionDep) -> LabelService:
+async def get_label_service(services: TaskManagementServicesDep) -> LabelService:
     """
-    Build the label service for the current request.
+    Resolve the label service from the request task-management graph.
 
     Purpose:
-        Build the label service through the composition root using the
-        request-scoped session used by label routes.
+        Keep label routes on the same request graph as the other
+        task-management routes.
 
     Args:
-        session: Request-scoped database session.
+        services: Cached task-management services for the current request.
 
     Returns:
         LabelService: Label service backed by the request session.
@@ -139,7 +168,7 @@ async def get_label_service(session: SessionDep) -> LabelService:
         - The service does not commit; ``SessionDep`` owns the transaction
           boundary.
     """
-    return build_task_management_services(session).labels
+    return services.labels
 
 
 PaletteServiceDep = Annotated[PaletteService, Depends(get_palette_service)]
@@ -147,16 +176,16 @@ ProjectServiceDep = Annotated[ProjectService, Depends(get_project_service)]
 LabelServiceDep = Annotated[LabelService, Depends(get_label_service)]
 
 
-async def get_series_service(session: SessionDep) -> SeriesService:
+async def get_series_service(services: TaskManagementServicesDep) -> SeriesService:
     """
-    Build the recurring-series service for the current request.
+    Resolve the recurring-series service from the request task-management graph.
 
     Purpose:
-        Build the series service through the composition root using the
-        request-scoped session used by series routes.
+        Keep series routes on the same request graph as the other
+        task-management routes.
 
     Args:
-        session: Request-scoped database session.
+        services: Cached task-management services for the current request.
 
     Returns:
         SeriesService: Series service backed by the request session.
@@ -165,19 +194,19 @@ async def get_series_service(session: SessionDep) -> SeriesService:
         - The service does not commit; ``SessionDep`` owns the transaction
           boundary.
     """
-    return build_series_service(session)
+    return services.series
 
 
-async def get_task_service(session: SessionDep) -> TaskService:
+async def get_task_service(services: TaskManagementServicesDep) -> TaskService:
     """
-    Build the task service for the current request.
+    Resolve the task service from the request task-management graph.
 
     Purpose:
-        Build the task service through the composition root using the
-        request-scoped session used by task routes.
+        Keep task routes on the same request graph as the other
+        task-management routes.
 
     Args:
-        session: Request-scoped database session.
+        services: Cached task-management services for the current request.
 
     Returns:
         TaskService: Task service backed by the request session.
@@ -186,23 +215,25 @@ async def get_task_service(session: SessionDep) -> TaskService:
         - The service does not commit; ``SessionDep`` owns the transaction
           boundary.
     """
-    return build_task_management_services(session).tasks
+    return services.tasks
 
 
 SeriesServiceDep = Annotated[SeriesService, Depends(get_series_service)]
 TaskServiceDep = Annotated[TaskService, Depends(get_task_service)]
 
 
-async def get_task_mutation_service(session: SessionDep) -> TaskMutationService:
+async def get_task_mutation_service(
+    services: TaskManagementServicesDep,
+) -> TaskMutationService:
     """
-    Build the task mutation service for the current request.
+    Resolve the task mutation service from the request task-management graph.
 
     Purpose:
-        Build the task mutation service through the composition root using the
-        request-scoped session used by task update, reopen, and delete routes.
+        Keep task update, reopen, and delete routes on the same request graph
+        as the other task-management routes.
 
     Args:
-        session: Request-scoped database session.
+        services: Cached task-management services for the current request.
 
     Returns:
         TaskMutationService: Task mutation service backed by the request
@@ -212,7 +243,7 @@ async def get_task_mutation_service(session: SessionDep) -> TaskMutationService:
         - The service does not commit; ``SessionDep`` owns the transaction
           boundary.
     """
-    return build_task_management_services(session).task_mutations
+    return services.task_mutations
 
 
 TaskMutationServiceDep = Annotated[TaskMutationService, Depends(get_task_mutation_service)]

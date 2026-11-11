@@ -6,16 +6,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 from fastapi import Request
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import backend.composition.task_management as task_management_composition
 from backend.api.deps import (
     get_current_access,
     get_label_service,
     get_palette_service,
     get_project_service,
     get_series_service,
+    get_task_management_services,
+    get_task_mutation_service,
     get_task_service,
 )
 from backend.application.auth.service import AuthService
@@ -31,6 +35,8 @@ from backend.application.task_management.series_generation import (
 from backend.application.task_management.tasks import TaskService
 from backend.composition.auth import build_auth_service, build_token_verifier
 from backend.composition.task_management import (
+    TaskManagementAdapters,
+    _build_task_management_adapters,
     build_palette_service,
     build_reminder_dispatcher,
     build_series_generation_service,
@@ -150,6 +156,71 @@ def test_task_composition_passes_the_project_repository_as_today_progress_reader
     assert services.tasks._project_reader is services.projects._repository
 
 
+def test_adapter_builder_binds_every_adapter_to_the_session() -> None:
+    """The shared adapter builder binds every aggregate adapter and the UoW."""
+    session = make_session()
+
+    adapters = _build_task_management_adapters(session)
+
+    assert isinstance(adapters, TaskManagementAdapters)
+    assert isinstance(adapters.palette, SqlAlchemyPaletteRepository)
+    assert isinstance(adapters.account, SqlAlchemyAccountRepository)
+    assert isinstance(adapters.projects, SqlAlchemyProjectRepository)
+    assert isinstance(adapters.labels, SqlAlchemyLabelRepository)
+    assert isinstance(adapters.tasks, SqlAlchemyTaskRepository)
+    assert isinstance(adapters.series, SqlAlchemySeriesRepository)
+    assert isinstance(adapters.reminders, SqlAlchemyReminderRepository)
+    assert isinstance(adapters.unit_of_work, SqlAlchemyUnitOfWork)
+    for adapter in (
+        adapters.palette,
+        adapters.account,
+        adapters.projects,
+        adapters.labels,
+        adapters.tasks,
+        adapters.series,
+        adapters.reminders,
+        adapters.unit_of_work,
+    ):
+        assert cast(Any, adapter)._session is session
+
+
+def test_task_management_builders_consume_the_shared_adapter_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """API and worker factories build every adapter through one adapter helper."""
+    session = make_session()
+    adapters = _build_task_management_adapters(session)
+    calls: list[AsyncSession] = []
+
+    def recording_builder(supplied: AsyncSession) -> TaskManagementAdapters:
+        """Record the session and return the prepared adapter graph."""
+        calls.append(supplied)
+        return adapters
+
+    monkeypatch.setattr(
+        task_management_composition,
+        "_build_task_management_adapters",
+        recording_builder,
+    )
+
+    services = build_task_management_services(session, clock=fixed_now)
+    series_service = build_series_service(session, clock=fixed_now)
+    generation_service = build_series_generation_service(session, clock=fixed_now)
+    dispatcher = build_reminder_dispatcher(
+        session,
+        FakeSender(),
+        clock=fixed_now,
+        monotonic=lambda: 0.0,
+    )
+
+    assert calls == [session, session, session, session]
+    assert cast(Any, services.tasks)._repository is adapters.tasks
+    assert cast(Any, services.series)._repository is adapters.series
+    assert cast(Any, series_service)._repository is adapters.series
+    assert generation_service._series_repository is adapters.series
+    assert dispatcher._reminder_repository is adapters.reminders
+
+
 def test_series_builder_uses_the_account_and_aggregate_adapters() -> None:
     """The series builder wires series, task, reminder, reference, and project ports."""
     session = make_session()
@@ -247,21 +318,45 @@ def test_auth_composition_builds_auth_service() -> None:
     assert service._validator.__class__.__name__ == "PydanticInitDataValidator"
 
 
+async def test_api_services_share_one_request_graph() -> None:
+    """All task-management services come from one cached, shared graph."""
+    session = make_session()
+    services = await get_task_management_services(session)
+    projects = await get_project_service(services)
+    labels = await get_label_service(services)
+    series = await get_series_service(services)
+    tasks = await get_task_service(services)
+    mutations = await get_task_mutation_service(services)
+
+    assert cast(Any, projects)._repository is cast(Any, services.projects)._repository
+    assert cast(Any, labels)._repository is cast(Any, services.labels)._repository
+    assert cast(Any, series) is services.series
+    assert cast(Any, tasks) is services.tasks
+    assert cast(Any, mutations) is services.task_mutations
+    assert cast(Any, tasks)._unit_of_work is cast(Any, services.task_mutations)._unit_of_work
+
+
 async def test_api_service_dependencies_use_the_composition_root() -> None:
     """API dependencies build application services from composition factories."""
     session = make_session()
 
-    palette = await get_palette_service(session)
-    projects = await get_project_service(session)
-    labels = await get_label_service(session)
-    series = await get_series_service(session)
-    tasks = await get_task_service(session)
+    services = await get_task_management_services(session)
+    palette = await get_palette_service(services)
+    projects = await get_project_service(services)
+    labels = await get_label_service(services)
+    series = await get_series_service(services)
+    tasks = await get_task_service(services)
 
     assert isinstance(palette, PaletteService)
     assert isinstance(projects, ProjectService)
     assert isinstance(labels, LabelService)
     assert isinstance(series, SeriesService)
     assert isinstance(tasks, TaskService)
+    assert cast(Any, palette) is services.palette
+    assert cast(Any, projects) is services.projects
+    assert cast(Any, labels) is services.labels
+    assert cast(Any, series) is services.series
+    assert cast(Any, tasks) is services.tasks
     assert cast(Any, palette)._repository._session is session
     assert cast(Any, projects)._repository._session is session
     assert cast(Any, labels)._repository._session is session
