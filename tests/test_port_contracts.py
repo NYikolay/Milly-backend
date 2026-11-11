@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 
 from backend.application.ports import auth as auth_ports
-from backend.application.ports import collaborators, legacy
+from backend.application.ports import collaborators
 from backend.application.ports import task_management as ports
 from backend.application.ports.unit_of_work import UnitOfWork
 
@@ -15,7 +15,7 @@ def _methods(protocol: type) -> set[str]:
     return {name for name in dir(protocol) if not name.startswith("_")}
 
 
-LEGACY_FAT_PORT_METHODS = frozenset(
+ALL_AGGREGATE_METHODS = frozenset(
     {
         "list_palette_colors",
         "list_active_palette_colors",
@@ -289,22 +289,13 @@ def test_aggregate_protocols_partition_the_legacy_contract_without_duplicates() 
             )
 
     aggregate_union = set().union(*declared.values())
-    assert aggregate_union | _methods(UnitOfWork) == (LEGACY_FAT_PORT_METHODS | SAVE_METHODS)
+    assert aggregate_union | _methods(UnitOfWork) == (ALL_AGGREGATE_METHODS | SAVE_METHODS)
 
 
 def test_unit_of_work_is_reexported_by_task_management_and_auth_ports() -> None:
     """Both port modules expose the shared transaction boundary contract."""
     assert ports.UnitOfWork is UnitOfWork
     assert auth_ports.UnitOfWork is UnitOfWork
-
-
-def test_legacy_facade_composes_all_aggregates_and_unit_of_work() -> None:
-    """The compatibility facade inherits every aggregate contract and the UnitOfWork."""
-    facade = legacy.TaskManagementRepository
-    mro = set(facade.__mro__)
-    assert set(AGGREGATE_PROTOCOLS.values()) <= mro
-    assert UnitOfWork in mro
-    assert _methods(facade) == LEGACY_FAT_PORT_METHODS | SAVE_METHODS
 
 
 def test_collaborator_protocols_expose_expected_methods() -> None:

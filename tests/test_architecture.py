@@ -36,8 +36,6 @@ COMPATIBILITY_SHIMS = (
     Path("src/backend/task_management/projects.py"),
     Path("src/backend/task_management/series.py"),
     Path("src/backend/task_management/reminders.py"),
-    Path("src/backend/task_management/ports.py"),
-    Path("src/backend/task_management/repository.py"),
     Path("src/backend/auth/service.py"),
     Path("src/backend/auth/repository.py"),
     Path("src/backend/auth/cookies.py"),
@@ -47,6 +45,14 @@ COMPATIBILITY_SHIMS = (
     Path("src/backend/auth/schemas.py"),
     Path("src/backend/tasks/telegram.py"),
 )
+
+REMOVED_LEGACY_MODULES = (
+    Path("src/backend/application/ports/legacy.py"),
+    Path("src/backend/infrastructure/persistence/sqlalchemy/legacy.py"),
+    Path("src/backend/task_management/ports.py"),
+    Path("src/backend/task_management/repository.py"),
+)
+
 
 ORM_MODELS_MODULE = "backend.models"
 
@@ -164,3 +170,9 @@ def test_compatibility_modules_are_shims_only() -> None:
     for path in COMPATIBILITY_SHIMS:
         assert not _defines_implementation(path), f"{path} defines its own implementation"
         assert _declares_all(path), f"{path} must declare __all__"
+
+
+def test_removed_legacy_composite_modules_are_absent() -> None:
+    """The dead composite facade is not kept as a second persistence contract."""
+    for path in REMOVED_LEGACY_MODULES:
+        assert not path.exists(), f"{path} must be removed"

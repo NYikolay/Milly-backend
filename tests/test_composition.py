@@ -18,7 +18,6 @@ from backend.api.deps import (
 )
 from backend.application.auth.service import AuthService
 from backend.application.ports.collaborators import ReminderSender
-from backend.application.ports.legacy import TaskManagementRepository
 from backend.application.task_management.labels import LabelService
 from backend.application.task_management.palette import PaletteService
 from backend.application.task_management.projects import ProjectService
@@ -37,9 +36,6 @@ from backend.infrastructure.persistence.sqlalchemy.account_repository import (
 )
 from backend.infrastructure.persistence.sqlalchemy.label_repository import (
     SqlAlchemyLabelRepository,
-)
-from backend.infrastructure.persistence.sqlalchemy.legacy import (
-    SqlAlchemyTaskManagementRepository,
 )
 from backend.infrastructure.persistence.sqlalchemy.palette_repository import (
     SqlAlchemyPaletteRepository,
@@ -258,9 +254,7 @@ def test_taskiq_entrypoints_use_the_composition_root() -> None:
 
     assert "build_series_service" in generation
     assert "SqlAlchemySeriesRepository" not in generation
-    assert "SqlAlchemyTaskManagementRepository" not in generation
     assert "build_reminder_dispatcher" in delivery
-    assert "SqlAlchemyTaskManagementRepository" not in delivery
 
 
 def test_compatibility_modules_reexport_new_layers() -> None:
@@ -276,13 +270,7 @@ def test_compatibility_modules_reexport_new_layers() -> None:
     )
     from backend.task_management.labels import LabelService as LegacyLabelService
     from backend.task_management.palette import PaletteService as LegacyPaletteService
-    from backend.task_management.ports import (
-        TaskManagementRepository as LegacyTaskManagementRepositoryPort,
-    )
     from backend.task_management.projects import ProjectService as LegacyProjectService
-    from backend.task_management.repository import (
-        SqlAlchemyTaskManagementRepository as LegacyTaskManagementRepositoryAdapter,
-    )
     from backend.task_management.series import SeriesService as LegacySeriesService
     from backend.task_management.tasks import TaskService as LegacyTaskService
 
@@ -294,8 +282,6 @@ def test_compatibility_modules_reexport_new_layers() -> None:
     assert LegacyLabelService is LabelService
     assert LegacySeriesService is SeriesService
     assert LegacyTaskService is TaskService
-    assert LegacyTaskManagementRepositoryPort is TaskManagementRepository
-    assert LegacyTaskManagementRepositoryAdapter is SqlAlchemyTaskManagementRepository
 
 
 def test_telegram_modules_reexport_the_reminder_sender_contract() -> None:
@@ -304,33 +290,6 @@ def test_telegram_modules_reexport_the_reminder_sender_contract() -> None:
 
     assert legacy_telegram.TelegramBotSender is TelegramBotSender
     assert legacy_telegram.TelegramSender is ReminderSender
-
-
-def test_legacy_composite_adapter_shares_one_session_across_aggregates() -> None:
-    """The composite compatibility facade binds every aggregate to one session."""
-    session = make_session()
-
-    repository = SqlAlchemyTaskManagementRepository(session)
-
-    assert isinstance(repository._palette, SqlAlchemyPaletteRepository)
-    assert isinstance(repository._accounts, SqlAlchemyAccountRepository)
-    assert isinstance(repository._projects, SqlAlchemyProjectRepository)
-    assert isinstance(repository._labels, SqlAlchemyLabelRepository)
-    assert isinstance(repository._tasks, SqlAlchemyTaskRepository)
-    assert isinstance(repository._series, SqlAlchemySeriesRepository)
-    assert isinstance(repository._reminders, SqlAlchemyReminderRepository)
-    assert isinstance(repository._unit_of_work, SqlAlchemyUnitOfWork)
-    for adapter in (
-        repository._palette,
-        repository._accounts,
-        repository._projects,
-        repository._labels,
-        repository._tasks,
-        repository._series,
-        repository._reminders,
-        repository._unit_of_work,
-    ):
-        assert adapter._session is session
 
 
 def test_fixed_now_is_timezone_aware() -> None:
