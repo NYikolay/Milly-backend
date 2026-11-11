@@ -218,18 +218,28 @@ class SqlAlchemyReminderRepository:
             LookupError: If any reminder row is not present in the session.
 
         Notes:
-            - Resolves every tracked row by primary key; the caller is
-              responsible for loading the entities through a tenant-scoped
-              read.
+            - Resolves every tracked row with one owner-scoped batched read, so
+              a resumed project keeps its four context queries plus one save
+              query instead of adding one select per reminder.
             - Empty input still flushes once so the project resume transaction
               keeps its previous flush count.
             - Flushes once but does not commit.
         """
-        for reminder in reminders:
-            row = await self._session.get(TaskReminderRow, reminder.id)
-            if row is None:
-                raise LookupError(f"Reminder {reminder.id} is not present in the session")
-            apply_reminder(reminder, row)
+        if reminders:
+            reminder_ids = [reminder.id for reminder in reminders]
+            user_ids = sorted({reminder.user_id for reminder in reminders})
+            result = await self._session.execute(
+                select(TaskReminderRow).where(
+                    TaskReminderRow.id.in_(reminder_ids),
+                    TaskReminderRow.user_id.in_(user_ids),
+                )
+            )
+            rows = {row.id: row for row in result.scalars().all()}
+            for reminder in reminders:
+                row = rows.get(reminder.id)
+                if row is None:
+                    raise LookupError(f"Reminder {reminder.id} is not present in the session")
+                apply_reminder(reminder, row)
         await self._session.flush()
 
     async def delete_task_reminders(self, user_id: int, task_id: int) -> None:

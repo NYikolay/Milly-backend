@@ -207,6 +207,7 @@ class RecordingSession:
         self.statements: list[Any] = []
         self.added: list[Any] = []
         self.flush_count = 0
+        self.get_count = 0
         self._results = list(results or [])
         self._get_results = list(get_results or [])
         self._assigned_ids = list(assigned_ids or [])
@@ -245,6 +246,7 @@ class RecordingSession:
         Returns:
             Any: The next prepared row, or ``None``.
         """
+        self.get_count += 1
         if self._get_results:
             return self._get_results.pop(0)
         return None
@@ -1242,11 +1244,11 @@ async def test_account_repository_reads_timezone_and_telegram_id() -> None:
     assert "telegram_profiles.user_id = 7" in telegram_sql
 
 
-async def test_save_reminders_applies_all_changes_with_one_flush() -> None:
-    """Batch reminder saves apply every entity and flush exactly once."""
+async def test_save_reminders_applies_all_changes_with_one_batched_read() -> None:
+    """Batch saves resolve rows with one owner-scoped select and flush once."""
     first_row = make_reminder(reminder_id=2, task_id=4)
     second_row = make_reminder(reminder_id=3, user_id=8, task_id=9)
-    session = RecordingSession(get_results=[first_row, second_row])
+    session = RecordingSession(results=[RecordingResult(values=[first_row, second_row])])
     repository = make_reminder_repository(session)
     first = TaskReminderEntity(
         id=2,
@@ -1275,19 +1277,28 @@ async def test_save_reminders_applies_all_changes_with_one_flush() -> None:
     assert second_row.time_of_day == time(8, 0)
     assert second_row.timezone == "Asia/Tokyo"
     assert second_row.next_run_at is None
-    assert session.statements == []
+    assert len(session.statements) == 1
+    sql = compile_statement(session.statements[0])
+    assert sql.startswith("SELECT task_reminders")
+    assert "task_reminders.id IN (2, 3)" in sql
+    assert "task_reminders.user_id IN (7, 8)" in sql
+    assert session.get_count == 0
     assert session.flush_count == 1
 
 
 async def test_save_reminders_raises_for_a_missing_row_without_flushing() -> None:
-    """Batch saves fail when one loaded reminder row is no longer available."""
-    session = RecordingSession(get_results=[None])
+    """Batch saves fail when one requested reminder row is not returned."""
+    first_row = make_reminder(reminder_id=2, task_id=4)
+    session = RecordingSession(results=[RecordingResult(values=[first_row])])
     repository = make_reminder_repository(session)
-    reminder = TaskReminderEntity(id=2, user_id=USER_ID, task_id=4, kind="before_due")
+    first = TaskReminderEntity(id=2, user_id=USER_ID, task_id=4, kind="before_due")
+    missing = TaskReminderEntity(id=3, user_id=USER_ID, task_id=5, kind="before_due")
 
     with pytest.raises(LookupError):
-        await repository.save_reminders([reminder])
+        await repository.save_reminders([first, missing])
 
+    assert len(session.statements) == 1
+    assert session.get_count == 0
     assert session.flush_count == 0
 
 

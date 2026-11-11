@@ -1580,6 +1580,8 @@ class ReminderRepository(Protocol):
             LookupError: If any reminder row is not present in the session.
 
         Notes:
+            - Implementations resolve all rows with one owner-scoped batched
+              read and apply the changed fields.
             - Empty input still flushes once so the project resume transaction
               keeps its previous flush count.
             - Flushes once but does not commit.
