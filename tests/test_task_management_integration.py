@@ -82,10 +82,8 @@ def make_services(
         repository,
         repository,
         repository,
-        repository,
         references,
         details,
-        series,
         repository,
         clock=fixed_now,
     )

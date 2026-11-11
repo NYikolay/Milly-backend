@@ -4,7 +4,7 @@ from typing import Annotated, Any
 
 from fastapi import Query, Response, status
 
-from backend.api.deps import CurrentAccessDep, TaskServiceDep
+from backend.api.deps import CurrentAccessDep, TaskMutationServiceDep, TaskServiceDep
 from backend.api.errors.openapi import StandardizedAPIRouter, document_errors
 from backend.api.mappers.task_management import task_list_response, task_response
 from backend.api.queries.tasks import (
@@ -45,7 +45,8 @@ def _task_changes(payload: TaskUpdate) -> dict[str, Any]:
         payload: Partial task update fields.
 
     Returns:
-        dict[str, Any]: Keyword arguments accepted by ``TaskService.update``.
+        dict[str, Any]: Keyword arguments accepted by
+            ``TaskMutationService.update``.
     """
     changes = payload.model_dump(exclude_unset=True)
     if "reminders" in changes:
@@ -263,7 +264,7 @@ async def update_task(
     task_id: int,
     payload: TaskUpdate,
     claims: CurrentAccessDep,
-    service: TaskServiceDep,
+    service: TaskMutationServiceDep,
 ) -> TaskResponse:
     """
     Update an owned task or its recurring series.
@@ -276,7 +277,7 @@ async def update_task(
         task_id: Task identifier.
         payload: Partial task update fields.
         claims: Verified access-token claims.
-        service: Task service performing the update.
+        service: Task mutation service performing the update.
 
     Returns:
         TaskResponse: The updated task detail.
@@ -345,7 +346,7 @@ async def complete_task(
 async def uncomplete_task(
     task_id: int,
     claims: CurrentAccessDep,
-    service: TaskServiceDep,
+    service: TaskMutationServiceDep,
 ) -> TaskResponse:
     """
     Reopen an owned task.
@@ -358,7 +359,7 @@ async def uncomplete_task(
     Args:
         task_id: Task identifier.
         claims: Verified access-token claims.
-        service: Task service performing the reopen.
+        service: Task mutation service performing the reopen.
 
     Returns:
         TaskResponse: The reopened task detail.
@@ -393,7 +394,7 @@ async def uncomplete_task(
 async def delete_task(
     task_id: int,
     claims: CurrentAccessDep,
-    service: TaskServiceDep,
+    service: TaskMutationServiceDep,
 ) -> Response:
     """
     Delete an owned task or its recurring series.
@@ -405,7 +406,7 @@ async def delete_task(
     Args:
         task_id: Task identifier.
         claims: Verified access-token claims.
-        service: Task service performing the deletion.
+        service: Task mutation service performing the deletion.
 
     Returns:
         Response: Empty 204 response.

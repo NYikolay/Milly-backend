@@ -15,6 +15,7 @@ from backend.application.task_management.projects import ProjectService
 from backend.application.task_management.reminders import ReminderDispatcher
 from backend.application.task_management.series import SeriesService
 from backend.application.task_management.task_details import TaskDetails
+from backend.application.task_management.task_mutations import TaskMutationService
 from backend.application.task_management.task_references import TaskReferences
 from backend.application.task_management.tasks import TaskService
 from backend.infrastructure.persistence.sqlalchemy.account_repository import (
@@ -63,6 +64,7 @@ class TaskManagementServices:
     labels: LabelService
     series: SeriesService
     tasks: TaskService
+    task_mutations: TaskMutationService
 
 
 def build_task_management_services(
@@ -82,13 +84,15 @@ def build_task_management_services(
         clock: Current-time provider. Defaults to the service UTC clock.
 
     Returns:
-        TaskManagementServices: Palette, project, label, series, and task
-            services wired over the supplied session.
+        TaskManagementServices: Palette, project, label, series, task, and
+            task-mutation services wired over the supplied session.
 
     Notes:
         - Every aggregate adapter and the unit of work share the same session.
-        - The task service receives the aggregate project repository as its
+        - The task services receive the aggregate project repository as their
           project reader so the today-progress aggregate is available.
+        - Task details and reference validation are shared between the task
+          query/creation and task-mutation services.
         - Does not commit, flush, or open a transaction.
     """
     palette_repository = SqlAlchemyPaletteRepository(session)
@@ -121,9 +125,17 @@ def build_task_management_services(
     )
     tasks = TaskService(
         task_repository,
-        series_repository,
         reminder_repository,
         project_repository,
+        references,
+        details,
+        unit_of_work,
+        clock=clock,
+    )
+    task_mutations = TaskMutationService(
+        task_repository,
+        series_repository,
+        reminder_repository,
         references,
         details,
         series,
@@ -136,6 +148,7 @@ def build_task_management_services(
         labels=labels,
         series=series,
         tasks=tasks,
+        task_mutations=task_mutations,
     )
 
 

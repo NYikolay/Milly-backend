@@ -10,6 +10,7 @@ from backend.api.pagination import DEFAULT_PAGE_SIZE
 from backend.application.ports.collaborators import SeriesOperations
 from backend.application.task_management.series import SeriesService
 from backend.application.task_management.task_details import TaskDetails
+from backend.application.task_management.task_mutations import TaskMutationService
 from backend.application.task_management.task_references import TaskReferences
 from backend.application.task_management.tasks import (
     TaskFilters,
@@ -41,23 +42,9 @@ def make_references(repository: FakeTaskManagementRepository) -> TaskReferences:
     return TaskReferences(repository, repository, repository)
 
 
-def make_series_service(repository: FakeTaskManagementRepository) -> SeriesService:
-    """Build a real application series service over the fake repository ports."""
-    return SeriesService(
-        repository,
-        repository,
-        repository,
-        repository,
-        make_references(repository),
-        repository,
-        clock=fixed_now,
-    )
-
-
 def make_service(
     repository: FakeTaskManagementRepository,
     *,
-    series_operations: SeriesOperations | None = None,
     clock: Callable[[], datetime] = fixed_now,
 ) -> TaskService:
     """Build a task service over the fake repository ports."""
@@ -65,10 +52,27 @@ def make_service(
         repository,
         repository,
         repository,
+        make_references(repository),
+        TaskDetails(repository, repository, repository),
+        repository,
+        clock=clock,
+    )
+
+
+def make_mutation_service(
+    repository: FakeTaskManagementRepository,
+    *,
+    series_operations: SeriesOperations | None = None,
+    clock: Callable[[], datetime] = fixed_now,
+) -> TaskMutationService:
+    """Build a task mutation service over the fake repository ports."""
+    return TaskMutationService(
+        repository,
+        repository,
         repository,
         make_references(repository),
         TaskDetails(repository, repository, repository),
-        series_operations if series_operations is not None else make_series_service(repository),
+        series_operations if series_operations is not None else RecordingSeriesService(repository),
         repository,
         clock=clock,
     )
@@ -85,7 +89,7 @@ class GeneratedIdTaskRepository(FakeTaskManagementRepository):
 
 
 class RecordingSeriesService(SeriesService):
-    """Real series service that records task-service delegation calls."""
+    """Real series service that records task-mutation delegation calls."""
 
     def __init__(self, repository: FakeTaskManagementRepository) -> None:
         """Build the service over the fake ports and initialize call logs."""
@@ -402,9 +406,9 @@ async def test_update_series_task_applies_to_future_incomplete_instances_only() 
             completed_at=fixed_now(),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(
+    detail = await mutation_service.update(
         USER_ID,
         future.id,
         title="New",
@@ -474,9 +478,9 @@ async def test_uncomplete_clears_timestamp_and_rebuilds_reminders_from_now() -> 
             next_run_at=None,
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.uncomplete(USER_ID, task.id)
+    detail = await mutation_service.uncomplete(USER_ID, task.id)
 
     assert detail.task.completed_at is None
     assert reminder.next_run_at == task.due_at - timedelta(minutes=30)
@@ -492,10 +496,10 @@ async def test_uncomplete_rejects_past_due_time_for_one_off_task() -> None:
             completed_at=fixed_now(),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
     with pytest.raises(BadRequestError) as error:
-        await service.uncomplete(USER_ID, task.id)
+        await mutation_service.uncomplete(USER_ID, task.id)
 
     assert error.value.code is ErrorCode.BAD_REQUEST
     assert error.value.message == "Task due date is in the past"
@@ -519,11 +523,11 @@ async def test_uncomplete_rejects_past_date_for_task_of_soft_deleted_series() ->
             completed_at=fixed_now(),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
     series_count = len(repository.series)
 
     with pytest.raises(BadRequestError):
-        await service.uncomplete(USER_ID, task.id)
+        await mutation_service.uncomplete(USER_ID, task.id)
 
     assert task.completed_at == fixed_now()
     assert len(repository.series) == series_count
@@ -543,11 +547,11 @@ async def test_uncomplete_rejects_past_due_time_for_active_series_task() -> None
             completed_at=fixed_now(),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
     series_count = len(repository.series)
 
     with pytest.raises(BadRequestError) as error:
-        await service.uncomplete(USER_ID, task.id)
+        await mutation_service.uncomplete(USER_ID, task.id)
 
     assert error.value.code is ErrorCode.BAD_REQUEST
     assert error.value.message == "Task due date is in the past"
@@ -590,9 +594,9 @@ async def test_uncomplete_recreates_deleted_series_from_saved_schedule(
             completed_at=fixed_now(),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.uncomplete(USER_ID, task.id)
+    detail = await mutation_service.uncomplete(USER_ID, task.id)
 
     assert task.completed_at is None
     assert task.series_id is not None
@@ -622,10 +626,10 @@ async def test_uncomplete_does_not_recreate_active_series() -> None:
             completed_at=fixed_now(),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
     series_count = len(repository.series)
 
-    await service.uncomplete(USER_ID, task.id)
+    await mutation_service.uncomplete(USER_ID, task.id)
 
     assert task.series_id == series.id
     assert len(repository.series) == series_count
@@ -642,10 +646,10 @@ async def test_uncomplete_rejects_same_day_due_time_in_past() -> None:
             completed_at=fixed_now(),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
     with pytest.raises(BadRequestError):
-        await service.uncomplete(USER_ID, task.id)
+        await mutation_service.uncomplete(USER_ID, task.id)
 
     assert task.completed_at == fixed_now()
 
@@ -660,10 +664,10 @@ async def test_uncomplete_rejects_due_time_equal_to_now() -> None:
             completed_at=fixed_now(),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
     with pytest.raises(BadRequestError) as error:
-        await service.uncomplete(USER_ID, task.id)
+        await mutation_service.uncomplete(USER_ID, task.id)
 
     assert error.value.code is ErrorCode.BAD_REQUEST
     assert error.value.message == "Task due date is in the past"
@@ -683,9 +687,9 @@ async def test_uncomplete_allows_same_day_due_time_in_future() -> None:
             completed_at=fixed_now(),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.uncomplete(USER_ID, task.id)
+    detail = await mutation_service.uncomplete(USER_ID, task.id)
 
     assert detail.task.completed_at is None
 
@@ -700,9 +704,9 @@ async def test_uncomplete_past_date_is_allowed_for_already_active_task() -> None
             completed_at=None,
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.uncomplete(USER_ID, task.id)
+    detail = await mutation_service.uncomplete(USER_ID, task.id)
 
     assert detail.task.completed_at is None
 
@@ -732,9 +736,9 @@ async def test_delete_one_off_task_soft_deletes_and_cancels_deliveries() -> None
             scheduled_for=fixed_now() + timedelta(minutes=30),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    await service.delete(USER_ID, task.id)
+    await mutation_service.delete(USER_ID, task.id)
 
     assert task.deleted_at == fixed_now()
     assert task.deletion_batch_id is not None
@@ -766,9 +770,9 @@ async def test_delete_series_task_deletes_the_series_and_future_instances() -> N
             due_at=fixed_now() + timedelta(days=1),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    await service.delete(USER_ID, future.id)
+    await mutation_service.delete(USER_ID, future.id)
 
     assert series.deleted_at == fixed_now()
     assert future.id not in repository.tasks
@@ -922,15 +926,15 @@ async def test_re_enabling_reminders_rebuilds_slots_from_now() -> None:
             next_run_at=None,
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(USER_ID, task.id, reminders_enabled=True)
+    detail = await mutation_service.update(USER_ID, task.id, reminders_enabled=True)
 
     assert detail.task.reminders_enabled is True
     assert len(detail.reminders) == 1
     assert detail.reminders[0].next_run_at == task.due_at - timedelta(minutes=30)
 
-    await service.update(USER_ID, task.id, reminders_enabled=False)
+    await mutation_service.update(USER_ID, task.id, reminders_enabled=False)
 
     assert all(reminder.next_run_at is None for reminder in repository.reminders.values())
 
@@ -990,9 +994,9 @@ async def test_disabling_reminders_persists_supplied_rules_before_clearing_slots
             next_run_at=fixed_now() + timedelta(hours=1),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(
+    detail = await mutation_service.update(
         USER_ID,
         task.id,
         reminders_enabled=False,
@@ -1009,7 +1013,7 @@ async def test_disabling_reminders_persists_supplied_rules_before_clearing_slots
     assert detail.reminders[0].offset_minutes == 15
     assert detail.reminders[0].next_run_at is None
 
-    reenabled = await service.update(USER_ID, task.id, reminders_enabled=True)
+    reenabled = await mutation_service.update(USER_ID, task.id, reminders_enabled=True)
 
     assert len(reenabled.reminders) == 1
     assert reenabled.reminders[0].offset_minutes == 15
@@ -1043,10 +1047,10 @@ async def test_update_task_rejects_archived_project() -> None:
     repository = FakeTaskManagementRepository()
     task = repository.insert_task(make_task(task_id=1, due_at=fixed_now() + timedelta(hours=1)))
     project = repository.insert_project(make_project(project_id=1, archived_at=fixed_now()))
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
     with pytest.raises(BadRequestError):
-        await service.update(USER_ID, task.id, project_id=project.id)
+        await mutation_service.update(USER_ID, task.id, project_id=project.id)
 
     assert task.project_id is None
 
@@ -1084,10 +1088,10 @@ async def test_update_task_rejects_due_at_outside_supported_range() -> None:
     repository = FakeTaskManagementRepository()
     due_at = fixed_now() + timedelta(hours=1)
     task = repository.insert_task(make_task(task_id=1, due_at=due_at))
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
     with pytest.raises(BadRequestError):
-        await service.update(USER_ID, task.id, due_at=datetime(2101, 1, 1, tzinfo=UTC))
+        await mutation_service.update(USER_ID, task.id, due_at=datetime(2101, 1, 1, tzinfo=UTC))
 
     assert task.due_at == due_at
 
@@ -1160,9 +1164,9 @@ async def test_enable_regular_on_future_one_off_task_creates_series_without_movi
             title="Old",
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(
+    detail = await mutation_service.update(
         USER_ID,
         task.id,
         title="New",
@@ -1183,9 +1187,9 @@ async def test_enable_periodic_on_overdue_one_off_task_shifts_to_next_phase_slot
     repository = FakeTaskManagementRepository()
     repository.user_timezones[USER_ID] = "Europe/Moscow"
     task = repository.insert_task(make_task(due_at=datetime(2026, 11, 1, 6, 0, tzinfo=UTC)))
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(
+    detail = await mutation_service.update(
         USER_ID,
         task.id,
         recurrence=TaskRecurrence.PERIODIC,
@@ -1211,9 +1215,9 @@ async def test_enable_regular_on_completed_task_keeps_completion_and_series_star
             completed_at=fixed_now() - timedelta(days=1),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(
+    detail = await mutation_service.update(
         USER_ID,
         task.id,
         recurrence=TaskRecurrence.REGULAR,
@@ -1263,9 +1267,9 @@ async def test_disable_regular_on_future_series_task_detaches_only_current_insta
             completed_at=fixed_now(),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(USER_ID, current.id, recurrence=TaskRecurrence.ONE_OFF)
+    detail = await mutation_service.update(USER_ID, current.id, recurrence=TaskRecurrence.ONE_OFF)
 
     assert future.id not in repository.tasks
     assert current.id in repository.tasks
@@ -1316,9 +1320,9 @@ async def test_disable_regular_on_overdue_series_task_shifts_current_and_keeps_h
             due_at=datetime(2026, 11, 5, 9, 0, tzinfo=UTC),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(USER_ID, current.id, recurrence=TaskRecurrence.ONE_OFF)
+    detail = await mutation_service.update(USER_ID, current.id, recurrence=TaskRecurrence.ONE_OFF)
 
     assert current.due_at == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
     assert current.series_id is None
@@ -1355,9 +1359,9 @@ async def test_disable_overdue_series_task_can_reuse_a_removed_future_slot() -> 
             due_at=datetime(2026, 11, 5, 9, 0, tzinfo=UTC),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(USER_ID, current.id, recurrence=TaskRecurrence.ONE_OFF)
+    detail = await mutation_service.update(USER_ID, current.id, recurrence=TaskRecurrence.ONE_OFF)
 
     assert future.id not in repository.tasks
     assert current.due_at == datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
@@ -1390,9 +1394,9 @@ async def test_disable_regular_on_completed_series_task_keeps_due() -> None:
             due_at=fixed_now() + timedelta(days=2),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(USER_ID, completed.id, recurrence=TaskRecurrence.ONE_OFF)
+    detail = await mutation_service.update(USER_ID, completed.id, recurrence=TaskRecurrence.ONE_OFF)
 
     assert completed.due_at == fixed_now() + timedelta(days=1)
     assert completed.completed_at == fixed_now() - timedelta(hours=1)
@@ -1436,9 +1440,9 @@ async def test_update_periodic_series_interval_without_recurrence() -> None:
             completed_at=fixed_now(),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(USER_ID, future.id, interval_days=5)
+    detail = await mutation_service.update(USER_ID, future.id, interval_days=5)
 
     assert series.frequency == "periodic"
     assert series.interval_days == 5
@@ -1477,12 +1481,12 @@ async def test_interval_only_on_one_off_or_daily_raises_bad_request() -> None:
             due_at=fixed_now() + timedelta(days=1),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
     with pytest.raises(BadRequestError):
-        await service.update(USER_ID, one_off.id, interval_days=5)
+        await mutation_service.update(USER_ID, one_off.id, interval_days=5)
     with pytest.raises(BadRequestError):
-        await service.update(USER_ID, daily_task.id, interval_days=5)
+        await mutation_service.update(USER_ID, daily_task.id, interval_days=5)
 
     assert one_off.series_id is None
     assert series.frequency == "daily"
@@ -1504,10 +1508,10 @@ async def test_toggle_rejects_incompatible_explicit_interval(
     """Reject one-off intervals and daily intervals other than one at the service boundary."""
     repository = FakeTaskManagementRepository()
     task = repository.insert_task(make_task(due_at=fixed_now() + timedelta(days=1)))
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
     with pytest.raises(BadRequestError):
-        await service.update(
+        await mutation_service.update(
             USER_ID,
             task.id,
             recurrence=recurrence,
@@ -1522,10 +1526,10 @@ async def test_periodic_requires_interval_on_conversion() -> None:
     """Converting a one-off task to periodic requires an explicit interval."""
     repository = FakeTaskManagementRepository()
     task = repository.insert_task(make_task(due_at=fixed_now() + timedelta(days=1)))
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
     with pytest.raises(BadRequestError):
-        await service.update(USER_ID, task.id, recurrence=TaskRecurrence.PERIODIC)
+        await mutation_service.update(USER_ID, task.id, recurrence=TaskRecurrence.PERIODIC)
 
     assert task.series_id is None
     assert repository.series == {}
@@ -1541,10 +1545,10 @@ async def test_enable_regular_on_task_with_archived_project_raises_bad_request()
             project_id=project.id,
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
     with pytest.raises(BadRequestError):
-        await service.update(USER_ID, task.id, recurrence=TaskRecurrence.REGULAR)
+        await mutation_service.update(USER_ID, task.id, recurrence=TaskRecurrence.REGULAR)
 
     assert task.series_id is None
     assert repository.series == {}
@@ -1560,10 +1564,10 @@ async def test_enable_regular_on_task_with_deleted_project_raises_not_found() ->
             project_id=project.id,
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
     with pytest.raises(NotFoundError):
-        await service.update(USER_ID, task.id, recurrence=TaskRecurrence.REGULAR)
+        await mutation_service.update(USER_ID, task.id, recurrence=TaskRecurrence.REGULAR)
 
     assert task.series_id is None
     assert repository.series == {}
@@ -1588,9 +1592,9 @@ async def test_update_task_of_soft_deleted_series_treats_it_as_one_off() -> None
             due_at=fixed_now() + timedelta(days=1),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(USER_ID, task.id, title="New")
+    detail = await mutation_service.update(USER_ID, task.id, title="New")
 
     assert detail.task is task
     assert task.title == "New"
@@ -1620,9 +1624,9 @@ async def test_update_due_at_on_soft_deleted_series_task_clears_stale_series() -
             due_at=datetime(2026, 11, 5, 9, 0, tzinfo=UTC),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(USER_ID, task.id, due_at=target_due_at)
+    detail = await mutation_service.update(USER_ID, task.id, due_at=target_due_at)
 
     assert task.series_id is None
     assert task.due_at == target_due_at
@@ -1652,9 +1656,9 @@ async def test_update_due_at_on_completed_soft_deleted_series_task_keeps_link() 
             completed_at=fixed_now(),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(
+    detail = await mutation_service.update(
         USER_ID,
         task.id,
         due_at=datetime(2026, 11, 6, 9, 0, tzinfo=UTC),
@@ -1687,9 +1691,9 @@ async def test_update_due_at_on_completed_soft_deleted_series_task_clears_link_o
             completed_at=fixed_now(),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(USER_ID, task.id, due_at=target_due_at)
+    detail = await mutation_service.update(USER_ID, task.id, due_at=target_due_at)
 
     assert task.series_id is None
     assert detail.recurrence is TaskRecurrence.ONE_OFF
@@ -1713,9 +1717,9 @@ async def test_disable_regular_on_task_of_soft_deleted_series_clears_series_id()
             due_at=fixed_now() + timedelta(days=1),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(USER_ID, task.id, recurrence=TaskRecurrence.ONE_OFF)
+    detail = await mutation_service.update(USER_ID, task.id, recurrence=TaskRecurrence.ONE_OFF)
 
     assert task.series_id is None
     assert series.deleted_at == fixed_now()
@@ -1747,9 +1751,9 @@ async def test_reenable_regular_on_task_of_soft_deleted_series_creates_new_serie
             due_at=fixed_now() + timedelta(days=1),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(USER_ID, task.id, recurrence=TaskRecurrence.REGULAR)
+    detail = await mutation_service.update(USER_ID, task.id, recurrence=TaskRecurrence.REGULAR)
 
     assert detail.recurrence is TaskRecurrence.REGULAR
     assert task.series_id is not None
@@ -1774,9 +1778,9 @@ async def test_toggle_applies_other_fields_before_conversion() -> None:
             due_at=fixed_now() + timedelta(days=1),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(
+    detail = await mutation_service.update(
         USER_ID,
         task.id,
         title="New",
@@ -1810,9 +1814,9 @@ async def test_toggle_to_regular_on_overdue_task_keeps_supplied_before_due_remin
             reminders_enabled=True,
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(
+    detail = await mutation_service.update(
         USER_ID,
         task.id,
         recurrence=TaskRecurrence.REGULAR,
@@ -1855,9 +1859,9 @@ async def test_toggle_to_one_off_on_overdue_series_task_keeps_supplied_before_du
             reminders_enabled=True,
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(
+    detail = await mutation_service.update(
         USER_ID,
         task.id,
         recurrence=TaskRecurrence.ONE_OFF,
@@ -1897,9 +1901,9 @@ async def test_delete_completed_series_task_deletes_series_and_future_instances(
     past = repository.insert_task(
         make_task(task_id=3, series_id=series.id, due_at=fixed_now() - timedelta(days=1))
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    await service.delete(USER_ID, completed.id)
+    await mutation_service.delete(USER_ID, completed.id)
 
     assert completed.deleted_at == fixed_now()
     assert series.deleted_at == fixed_now()
@@ -1919,9 +1923,9 @@ async def test_delete_overdue_series_task_deletes_series_and_future_instances() 
     future = repository.insert_task(
         make_task(task_id=2, series_id=series.id, due_at=fixed_now() + timedelta(days=1))
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    await service.delete(USER_ID, overdue.id)
+    await mutation_service.delete(USER_ID, overdue.id)
 
     assert overdue.deleted_at == fixed_now()
     assert series.deleted_at == fixed_now()
@@ -1935,9 +1939,9 @@ async def test_delete_task_of_soft_deleted_series_deletes_only_task() -> None:
     task = repository.insert_task(
         make_task(task_id=1, series_id=series.id, due_at=fixed_now() + timedelta(days=1))
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    await service.delete(USER_ID, task.id)
+    await mutation_service.delete(USER_ID, task.id)
 
     assert task.deleted_at == fixed_now()
     assert series.deleted_at == fixed_now()
@@ -2119,9 +2123,9 @@ async def test_delete_active_future_series_task_still_deletes_series_and_all_fut
             due_at=fixed_now() + timedelta(days=2),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    await service.delete(USER_ID, target.id)
+    await mutation_service.delete(USER_ID, target.id)
 
     assert series.deleted_at == fixed_now()
     assert earlier_future.id not in repository.tasks
@@ -2147,9 +2151,9 @@ async def test_lock_update_target_treats_soft_deleted_series_as_one_off() -> Non
             due_at=fixed_now() + timedelta(days=1),
         )
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
-    detail = await service.update(USER_ID, task.id, title="New")
+    detail = await mutation_service.update(USER_ID, task.id, title="New")
 
     assert detail.task is task
     assert task.title == "New"
@@ -2350,10 +2354,10 @@ async def test_update_persists_task_and_returns_domain_detail() -> None:
     task = repository.insert_task(
         make_task(user_id=USER_ID, due_at=fixed_now() + timedelta(hours=1))
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
     new_due_at = fixed_now() + timedelta(hours=3)
 
-    detail = await service.update(USER_ID, task.id, title="Changed", due_at=new_due_at)
+    detail = await mutation_service.update(USER_ID, task.id, title="Changed", due_at=new_due_at)
 
     assert detail.task.title == "Changed"
     assert detail.task.due_at == new_due_at
@@ -2368,10 +2372,10 @@ async def test_cross_user_task_update_does_not_mutate() -> None:
     task = repository.insert_task(
         make_task(user_id=USER_ID, due_at=fixed_now() + timedelta(hours=1))
     )
-    service = make_service(repository)
+    mutation_service = make_mutation_service(repository)
 
     with pytest.raises(NotFoundError):
-        await service.update(USER_ID + 1, task.id, title="Hacked")
+        await mutation_service.update(USER_ID + 1, task.id, title="Hacked")
 
     assert task.title == "Task"
     assert repository.saved_tasks == []
@@ -2420,9 +2424,9 @@ async def test_disable_recurrence_delegates_to_series_operations() -> None:
         )
     )
     series_operations = RecordingSeriesService(repository)
-    service = make_service(repository, series_operations=series_operations)
+    mutation_service = make_mutation_service(repository, series_operations=series_operations)
 
-    await service.update(USER_ID, task.id, recurrence=TaskRecurrence.ONE_OFF)
+    await mutation_service.update(USER_ID, task.id, recurrence=TaskRecurrence.ONE_OFF)
 
     assert series_operations.detach_calls == [(USER_ID, task.id, series.id)]
 
@@ -2446,8 +2450,8 @@ async def test_delete_series_task_delegates_to_series_operations() -> None:
         )
     )
     series_operations = RecordingSeriesService(repository)
-    service = make_service(repository, series_operations=series_operations)
+    mutation_service = make_mutation_service(repository, series_operations=series_operations)
 
-    await service.delete(USER_ID, task.id)
+    await mutation_service.delete(USER_ID, task.id)
 
     assert series_operations.delete_calls == [(USER_ID, series.id, task.id)]

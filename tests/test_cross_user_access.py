@@ -12,9 +12,11 @@ from backend.api.deps import (
     get_label_service,
     get_project_service,
     get_series_service,
+    get_task_mutation_service,
     get_task_service,
 )
 from backend.application.task_management.task_details import TaskDetails
+from backend.application.task_management.task_mutations import TaskMutationService
 from backend.application.task_management.task_references import TaskReferences
 from backend.auth.tokens import AccessTokenClaims
 from backend.task_management.labels import LabelService
@@ -202,13 +204,26 @@ def series_service(repository: FakeTaskManagementRepository) -> SeriesService:
 
 
 @pytest.fixture
-def task_service(
-    repository: FakeTaskManagementRepository,
-    series_service: SeriesService,
-) -> TaskService:
+def task_service(repository: FakeTaskManagementRepository) -> TaskService:
     """Build a task service backed by the in-memory repository."""
     return TaskService(
         repository,
+        repository,
+        repository,
+        TaskReferences(repository, repository, repository),
+        TaskDetails(repository, repository, repository),
+        repository,
+        clock=lambda: NOW,
+    )
+
+
+@pytest.fixture
+def task_mutation_service(
+    repository: FakeTaskManagementRepository,
+    series_service: SeriesService,
+) -> TaskMutationService:
+    """Build a task mutation service backed by the in-memory repository."""
+    return TaskMutationService(
         repository,
         repository,
         repository,
@@ -224,6 +239,7 @@ def task_service(
 async def user_one_client(
     app: FastAPI,
     task_service: TaskService,
+    task_mutation_service: TaskMutationService,
     series_service: SeriesService,
     project_service: ProjectService,
     label_service: LabelService,
@@ -231,6 +247,7 @@ async def user_one_client(
     """Yield a client authenticated as the first user against real services."""
     app.dependency_overrides[get_current_access] = lambda: _claims(OWNER_ID)
     app.dependency_overrides[get_task_service] = lambda: task_service
+    app.dependency_overrides[get_task_mutation_service] = lambda: task_mutation_service
     app.dependency_overrides[get_series_service] = lambda: series_service
     app.dependency_overrides[get_project_service] = lambda: project_service
     app.dependency_overrides[get_label_service] = lambda: label_service

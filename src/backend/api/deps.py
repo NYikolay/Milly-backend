@@ -11,6 +11,7 @@ from backend.application.task_management.labels import LabelService
 from backend.application.task_management.palette import PaletteService
 from backend.application.task_management.projects import ProjectService
 from backend.application.task_management.series import SeriesService
+from backend.application.task_management.task_mutations import TaskMutationService
 from backend.application.task_management.tasks import TaskService
 from backend.composition.auth import build_auth_service
 from backend.composition.task_management import (
@@ -190,6 +191,31 @@ async def get_task_service(session: SessionDep) -> TaskService:
 
 SeriesServiceDep = Annotated[SeriesService, Depends(get_series_service)]
 TaskServiceDep = Annotated[TaskService, Depends(get_task_service)]
+
+
+async def get_task_mutation_service(session: SessionDep) -> TaskMutationService:
+    """
+    Build the task mutation service for the current request.
+
+    Purpose:
+        Build the task mutation service through the composition root using the
+        request-scoped session used by task update, reopen, and delete routes.
+
+    Args:
+        session: Request-scoped database session.
+
+    Returns:
+        TaskMutationService: Task mutation service backed by the request
+            session.
+
+    Notes:
+        - The service does not commit; ``SessionDep`` owns the transaction
+          boundary.
+    """
+    return build_task_management_services(session).task_mutations
+
+
+TaskMutationServiceDep = Annotated[TaskMutationService, Depends(get_task_mutation_service)]
 
 
 async def get_auth_service(request: Request, session: SessionDep) -> AuthService:
